@@ -1,0 +1,10 @@
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+cronova
+cronova-executor
+/data/
+/logs/
+node_modules/

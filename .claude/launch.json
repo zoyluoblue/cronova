@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cronova",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./cmd/cronova", "serve", "-http", ":8090"],
+      "port": 8090
+    }
+  ]
+}
