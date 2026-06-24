@@ -1,0 +1,978 @@
+// Package scheduler is cronova's core: it loads DAGs, creates runs (on a cron
+// schedule or on demand), and drives task instances through their state machine
+// each tick — dispatching ready tasks, propagating failures, and finalizing
+// runs. See docs/ARCHITECTURE.md §7.
+//
+// M1 executes tasks in-process via an executor.Executor running in a goroutine
+// per task. The scheduler loop is single-goroutine; tasks coordinate back
+// through the store (the single source of truth). Pool enforcement, retries,
+// cross-DAG dependency triggers, and catchup arrive in M3/M4.
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/robfig/cron/v3"
+	"github.com/zoyluo/cronova/internal/executor"
+	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/scheduler/parser"
+	"github.com/zoyluo/cronova/internal/store"
+)
+
+// Options configures a Scheduler.
+type Options struct {
+	DagDir       string        // directory of *.yaml DAG definitions ("" = none)
+	LogDir       string        // root directory for per-task log files
+	Tick         time.Duration // scheduling loop interval
+	PollInterval time.Duration // how often a running task is Probed for completion
+	Logger       *slog.Logger
+}
+
+// Scheduler is the cronova scheduling engine.
+type Scheduler struct {
+	store store.Store
+	exec  executor.Executor
+	opts  Options
+	log   *slog.Logger
+
+	mu        sync.Mutex
+	dags      map[string]*model.DAG
+	schedules map[string]cron.Schedule
+
+	bootTime time.Time
+	inflight sync.WaitGroup
+}
+
+// New constructs a Scheduler.
+func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
+	if opts.Tick <= 0 {
+		opts.Tick = 2 * time.Second
+	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = 250 * time.Millisecond
+	}
+	if opts.LogDir == "" {
+		opts.LogDir = "logs"
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	return &Scheduler{
+		store:     st,
+		exec:      ex,
+		opts:      opts,
+		log:       opts.Logger,
+		dags:      map[string]*model.DAG{},
+		schedules: map[string]cron.Schedule{},
+		bootTime:  time.Now().UTC(),
+	}
+}
+
+// LoadDAGs reads, parses, validates, and registers every *.yaml/*.yml file in
+// the configured DagDir. Bad files are logged and skipped, not fatal.
+func (s *Scheduler) LoadDAGs(ctx context.Context) error {
+	if s.opts.DagDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.opts.DagDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(s.opts.DagDir, name))
+		if err != nil {
+			s.log.Error("read dag file", "file", name, "err", err)
+			continue
+		}
+		d, err := parser.Parse(raw)
+		if err != nil {
+			s.log.Error("parse dag", "file", name, "err", err)
+			continue
+		}
+		// The DB archive wins over a lingering file: if this dag_id was
+		// soft-deleted, do NOT re-register it (which would revive it). This makes
+		// a delete durable even if the YAML file removal failed or was restored.
+		if existing, gerr := s.store.GetDAG(ctx, d.DagID); gerr == nil && existing.DeletedAt != nil {
+			s.log.Warn("skipping soft-deleted dag (file still present)", "dag", d.DagID, "file", name)
+			continue
+		}
+		if err := s.registerDAG(ctx, d); err != nil {
+			s.log.Error("register dag", "dag", d.DagID, "err", err)
+		}
+	}
+	return nil
+}
+
+const defaultPoolSlots = 16
+
+func (s *Scheduler) registerDAG(ctx context.Context, d *model.DAG) error {
+	if err := s.store.UpsertDAG(ctx, d); err != nil {
+		return err
+	}
+	if err := s.ensurePools(ctx, d); err != nil {
+		return err
+	}
+	if err := s.store.ReplaceDagDependencies(ctx, d.DagID, d.TriggerAfter); err != nil {
+		return err
+	}
+	var sched cron.Schedule
+	if d.Schedule != "" {
+		sc, err := parser.ParseSchedule(d.Schedule)
+		if err != nil {
+			return err
+		}
+		sched = sc
+	}
+	s.mu.Lock()
+	s.dags[d.DagID] = d
+	if sched != nil {
+		s.schedules[d.DagID] = sched
+	} else {
+		delete(s.schedules, d.DagID)
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// CreateDAG validates a YAML definition, persists it to the DAG directory (so
+// it survives restarts and is the source of truth), and registers it live.
+func (s *Scheduler) CreateDAG(ctx context.Context, yamlText string) (string, error) {
+	d, err := parser.Parse([]byte(yamlText))
+	if err != nil {
+		return "", err
+	}
+	if s.opts.DagDir != "" {
+		if err := os.MkdirAll(s.opts.DagDir, 0o755); err != nil {
+			return "", err
+		}
+		path := filepath.Join(s.opts.DagDir, d.DagID+".yaml")
+		if err := os.WriteFile(path, []byte(yamlText), 0o644); err != nil {
+			return "", fmt.Errorf("write dag file: %w", err)
+		}
+	}
+	if err := s.registerDAG(ctx, d); err != nil {
+		return "", err
+	}
+	s.log.Info("dag created", "dag", d.DagID)
+	return d.DagID, nil
+}
+
+// DeleteDAG soft-deletes (archives) a DAG. It refuses if the DAG has any
+// queued/running run (so we never orphan an in-flight executor process), then
+// marks it deleted, evicts it from the live cache (so it is never scheduled or
+// triggered), and removes its YAML file (the definition is preserved in the
+// dags row for recovery). Run history is kept.
+func (s *Scheduler) DeleteDAG(ctx context.Context, dagID string) error {
+	active, err := s.store.CountActiveRuns(ctx, dagID)
+	if err != nil {
+		return err
+	}
+	if active > 0 {
+		return fmt.Errorf("dag %q: %w (%d queued/running)", dagID, model.ErrActiveRuns, active)
+	}
+	if err := s.store.SoftDeleteDAG(ctx, dagID); err != nil {
+		return err // ErrNotFound if absent or already deleted
+	}
+	s.mu.Lock()
+	delete(s.dags, dagID)
+	delete(s.schedules, dagID)
+	s.mu.Unlock()
+	if s.opts.DagDir != "" {
+		// Remove the on-disk file so a restart's LoadDAGs won't re-register the
+		// archived DAG; the definition stays in the dags row. A failed removal is
+		// not fatal (LoadDAGs also skips soft-deleted rows), but log it.
+		for _, ext := range []string{".yaml", ".yml"} {
+			if err := os.Remove(filepath.Join(s.opts.DagDir, dagID+ext)); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("could not remove dag file (archive still enforced via DB)", "dag", dagID, "err", err)
+			}
+		}
+	}
+	s.log.Info("dag archived (soft-deleted)", "dag", dagID)
+	return nil
+}
+
+// NextSchedule returns a human-ish description of a DAG's next scheduled fire,
+// or "" if it has no schedule. Paused/manual cases are handled by the caller.
+func (s *Scheduler) NextSchedule(ctx context.Context, d *model.DAG) (time.Time, bool) {
+	if d.Schedule == "" {
+		return time.Time{}, false
+	}
+	// A 0-task shell is never scheduled, so it has no "next fire". The store-row
+	// DAG passed here has no parsed Tasks, so consult the cache (registered DAGs
+	// carry their parsed task set).
+	if cd, _, ok := s.cachedDAG(d.DagID); ok && len(cd.Tasks) == 0 {
+		return time.Time{}, false
+	}
+	sched, err := parser.ParseSchedule(d.Schedule)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return sched.Next(s.scheduleAnchor(ctx, d)), true
+}
+
+// ensurePools auto-provisions any pool a task references but that does not yet
+// exist (with a default slot count). Existing pools keep their configured size.
+func (s *Scheduler) ensurePools(ctx context.Context, d *model.DAG) error {
+	seen := map[string]bool{}
+	for _, t := range d.Tasks {
+		if t.Pool == "" || seen[t.Pool] {
+			continue
+		}
+		seen[t.Pool] = true
+		_, err := s.store.GetPool(ctx, t.Pool)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err := s.store.UpsertPool(ctx, &model.Pool{Name: t.Pool, Slots: defaultPoolSlots}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) poolSlots(ctx context.Context, name string) int {
+	p, err := s.store.GetPool(ctx, name)
+	if err != nil {
+		return defaultPoolSlots
+	}
+	return p.Slots
+}
+
+func (s *Scheduler) cachedDAG(id string) (*model.DAG, cron.Schedule, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.dags[id]
+	return d, s.schedules[id], ok
+}
+
+func (s *Scheduler) allDAGs() []*model.DAG {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*model.DAG, 0, len(s.dags))
+	for _, d := range s.dags {
+		out = append(out, d)
+	}
+	return out
+}
+
+// TriggerManual creates a manual run for dagID; the running loop picks it up on
+// the next tick. Returns the new run id.
+func (s *Scheduler) TriggerManual(ctx context.Context, dagID string) (string, error) {
+	// Only an actively-registered DAG can be triggered: a soft-deleted DAG is
+	// evicted from the cache, and an unknown one was never registered. Using the
+	// cache also gives the parsed task set, so we can gate on the real task count
+	// — a 0-task shell would otherwise finalize instantly as a phantom success.
+	d, _, ok := s.cachedDAG(dagID)
+	if !ok {
+		return "", fmt.Errorf("dag %q not found or not active: %w", dagID, store.ErrNotFound)
+	}
+	if len(d.Tasks) == 0 {
+		return "", fmt.Errorf("dag %q: %w; add a task before triggering", dagID, model.ErrNoTasks)
+	}
+	now := time.Now().UTC()
+	run := &model.DagRun{
+		RunID:       fmt.Sprintf("%s__manual_%d", dagID, now.UnixNano()),
+		DagID:       dagID,
+		LogicalDate: now,
+		State:       model.RunQueued,
+		TriggerType: model.TriggerManual,
+	}
+	if err := s.store.CreateDagRun(ctx, run); err != nil {
+		return "", err
+	}
+	s.log.Info("manual run created", "dag", dagID, "run", run.RunID)
+	return run.RunID, nil
+}
+
+// Run drives the scheduling loop until ctx is cancelled, then waits for any
+// in-flight tasks to finish (graceful shutdown).
+func (s *Scheduler) Run(ctx context.Context) error {
+	s.bootTime = time.Now().UTC()
+	if err := s.LoadDAGs(ctx); err != nil {
+		return err
+	}
+	if err := s.Recover(ctx); err != nil {
+		return err
+	}
+	s.log.Info("scheduler started", "tick", s.opts.Tick.String(), "dags", len(s.allDAGs()))
+	t := time.NewTicker(s.opts.Tick)
+	defer t.Stop()
+	for {
+		s.tickOnce(ctx)
+		select {
+		case <-ctx.Done():
+			s.log.Info("scheduler stopping; waiting for in-flight tasks")
+			s.inflight.Wait()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// WaitInflight blocks until all dispatched tasks have finished. Used by tests
+// to drive the loop deterministically.
+func (s *Scheduler) WaitInflight() { s.inflight.Wait() }
+
+func (s *Scheduler) tickOnce(ctx context.Context) {
+	now := time.Now().UTC()
+	s.createDueRuns(ctx, now)
+	s.processActiveRuns(ctx)
+}
+
+// createDueRuns creates the next scheduled run for each scheduled DAG that is
+// due. M1 is catchup-free: it anchors on the latest scheduled run (or boot
+// time) so it only ever creates the single next run, never a backfill storm.
+func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
+	for _, d := range s.allDAGs() {
+		// d comes from the cache (allDAGs), so d.Tasks is the parsed task set; a
+		// 0-task shell is never scheduled.
+		if d.Paused || d.Schedule == "" || len(d.Tasks) == 0 {
+			continue
+		}
+		_, sched, ok := s.cachedDAG(d.DagID)
+		if !ok || sched == nil {
+			continue
+		}
+		next := sched.Next(s.scheduleAnchor(ctx, d))
+		if now.Before(next) {
+			continue
+		}
+		active, err := s.store.CountActiveRuns(ctx, d.DagID)
+		if err != nil {
+			s.log.Error("count active runs", "dag", d.DagID, "err", err)
+			continue
+		}
+		if active >= d.MaxActiveRuns {
+			continue
+		}
+		run := &model.DagRun{
+			RunID:       runID(d.DagID, next),
+			DagID:       d.DagID,
+			LogicalDate: next,
+			State:       model.RunQueued,
+			TriggerType: model.TriggerSchedule,
+		}
+		if err := s.store.CreateDagRun(ctx, run); err != nil {
+			// ErrAlreadyExists: a run for this period already exists. ErrNotFound:
+			// the DAG was soft-deleted concurrently (the CreateDagRun guard) — both benign.
+			if !errors.Is(err, store.ErrAlreadyExists) && !errors.Is(err, store.ErrNotFound) {
+				s.log.Error("create scheduled run", "dag", d.DagID, "err", err)
+			}
+			continue
+		}
+		s.log.Info("scheduled run created", "dag", d.DagID, "logical_date", next.Format(time.RFC3339))
+	}
+}
+
+// scheduleAnchor returns the point from which the next scheduled run's logical
+// date is computed (next = schedule.Next(anchor)). It is the latest existing
+// scheduled run's logical date; if there are none, catchup DAGs anchor at
+// start_date (so missed periods are backfilled), while non-catchup DAGs anchor
+// at boot time (so only future periods run — no backfill). max_active_runs +
+// one-run-per-tick throttle catchup so it never floods (see §20 catchup storm).
+func (s *Scheduler) scheduleAnchor(ctx context.Context, d *model.DAG) time.Time {
+	runs, err := s.store.ListDagRuns(ctx, d.DagID, 100) // ordered logical_date DESC
+	if err == nil {
+		for _, r := range runs {
+			if r.TriggerType == model.TriggerSchedule {
+				return r.LogicalDate
+			}
+		}
+	}
+	if d.Catchup {
+		// Anchor just before start_date so Next() yields the first period at/after it.
+		return d.StartDate.Add(-time.Second)
+	}
+	return s.bootTime
+}
+
+func (s *Scheduler) processActiveRuns(ctx context.Context) {
+	var active []*model.DagRun
+	for _, st := range []model.RunState{model.RunQueued, model.RunRunning} {
+		rs, err := s.store.ListDagRunsByState(ctx, st)
+		if err != nil {
+			s.log.Error("list runs by state", "state", st, "err", err)
+			continue
+		}
+		active = append(active, rs...)
+	}
+	for _, run := range active {
+		if err := s.processRun(ctx, run); err != nil {
+			s.log.Error("process run", "run", run.RunID, "err", err)
+		}
+	}
+}
+
+// processRun advances a single run: expands task instances, promotes the run to
+// running, propagates failures to downstream tasks, dispatches ready tasks, and
+// finalizes the run when every task is terminal.
+func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
+	d, err := s.dagFor(ctx, run.DagID)
+	if err != nil {
+		return err
+	}
+
+	tis, err := s.store.ListTaskInstances(ctx, run.RunID)
+	if err != nil {
+		return err
+	}
+	if len(tis) == 0 {
+		if err := s.expandRun(ctx, run, d); err != nil {
+			return err
+		}
+		if tis, err = s.store.ListTaskInstances(ctx, run.RunID); err != nil {
+			return err
+		}
+	}
+
+	// A run with no task instances has nothing to execute — this happens if the
+	// DAG's last task was deleted after the run was queued (the gates prevent
+	// run creation for a 0-task DAG, but not a live edit afterwards). Such a run
+	// must FAIL, not finalize as a phantom success (empty set => allTerminal).
+	if len(tis) == 0 {
+		fin := time.Now().UTC()
+		started := run.StartedAt
+		if started == nil {
+			started = &fin
+		}
+		if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunFailed, started, &fin); err != nil {
+			return err
+		}
+		s.log.Warn("run failed: dag has no tasks to run", "run", run.RunID, "dag", run.DagID)
+		return nil
+	}
+
+	if run.State == model.RunQueued {
+		now := time.Now().UTC()
+		if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, &now, nil); err != nil {
+			return err
+		}
+		run.State = model.RunRunning
+		run.StartedAt = &now
+	}
+
+	tiByTask := make(map[string]*model.TaskInstance, len(tis))
+	for _, ti := range tis {
+		tiByTask[ti.TaskID] = ti
+	}
+	taskByID := make(map[string]model.Task, len(d.Tasks))
+	for _, t := range d.Tasks {
+		taskByID[t.ID] = t
+	}
+
+	// 1. Block propagation to a fixpoint: a scheduled task whose trigger rule can
+	// no longer be satisfied by its dependencies becomes upstream_failed.
+	for changed := true; changed; {
+		changed = false
+		for _, t := range d.Tasks {
+			ti := tiByTask[t.ID]
+			if ti == nil || ti.State != model.TaskScheduled {
+				continue
+			}
+			if _, blocked := taskGate(t, tiByTask); blocked {
+				now := time.Now().UTC()
+				ti.State = model.TaskUpstreamFailed
+				ti.FinishedAt = &now
+				if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+					return err
+				}
+				changed = true
+			}
+		}
+	}
+
+	// 2. Requeue up_for_retry tasks whose retry delay has elapsed.
+	now := time.Now().UTC()
+	for _, t := range d.Tasks {
+		ti := tiByTask[t.ID]
+		if ti == nil || ti.State != model.TaskUpForRetry {
+			continue
+		}
+		readyAt := now
+		if ti.FinishedAt != nil {
+			readyAt = ti.FinishedAt.Add(time.Duration(t.RetryDelay) * time.Second)
+		}
+		if now.Before(readyAt) {
+			continue
+		}
+		ti.State = model.TaskScheduled
+		ti.ExecutorRef = ""
+		ti.StartedAt = nil
+		ti.FinishedAt = nil
+		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			return err
+		}
+	}
+
+	// 3. Dispatch ready scheduled tasks, highest priority first, respecting pool
+	// slots. A pool that is full simply defers its remaining tasks to a later tick.
+	var ready []*model.TaskInstance
+	for _, t := range d.Tasks {
+		ti := tiByTask[t.ID]
+		if ti == nil || ti.State != model.TaskScheduled {
+			continue
+		}
+		if r, _ := taskGate(t, tiByTask); r {
+			ready = append(ready, ti)
+		}
+	}
+	sort.SliceStable(ready, func(i, j int) bool {
+		if ready[i].Priority != ready[j].Priority {
+			return ready[i].Priority > ready[j].Priority
+		}
+		return ready[i].TaskID < ready[j].TaskID
+	})
+	poolRemaining := map[string]int{}
+	for _, ti := range ready {
+		rem, ok := poolRemaining[ti.Pool]
+		if !ok {
+			used, err := s.store.CountRunningInPool(ctx, ti.Pool)
+			if err != nil {
+				return err
+			}
+			rem = s.poolSlots(ctx, ti.Pool) - used
+		}
+		if rem <= 0 {
+			poolRemaining[ti.Pool] = rem
+			continue
+		}
+		if err := s.dispatch(ctx, run, taskByID[ti.TaskID], ti); err != nil {
+			return err
+		}
+		poolRemaining[ti.Pool] = rem - 1
+	}
+
+	// 4. Finalize the run if every task is terminal.
+	tis, err = s.store.ListTaskInstances(ctx, run.RunID)
+	if err != nil {
+		return err
+	}
+	allTerminal, anyFailed := true, false
+	for _, ti := range tis {
+		if !ti.State.IsTerminal() {
+			allTerminal = false
+		}
+		if ti.State == model.TaskFailed || ti.State == model.TaskUpstreamFailed {
+			anyFailed = true
+		}
+	}
+	if allTerminal {
+		final := model.RunSuccess
+		if anyFailed {
+			final = model.RunFailed
+		}
+		fin := time.Now().UTC()
+		if err := s.store.UpdateDagRunState(ctx, run.RunID, final, run.StartedAt, &fin); err != nil {
+			return err
+		}
+		s.log.Info("run finished", "run", run.RunID, "state", final)
+		if final == model.RunSuccess {
+			s.triggerDownstreams(ctx, run)
+		}
+	}
+	return nil
+}
+
+// triggerDownstreams creates runs for any DAG whose trigger_after upstreams have
+// all succeeded for this run's logical date (see docs/ARCHITECTURE.md §7.1).
+func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagRun) {
+	downs, err := s.store.ListDownstreams(ctx, upstream.DagID)
+	if err != nil {
+		s.log.Error("list downstreams", "dag", upstream.DagID, "err", err)
+		return
+	}
+	for _, dn := range downs {
+		ups, err := s.store.ListUpstreams(ctx, dn)
+		if err != nil {
+			s.log.Error("list upstreams", "dag", dn, "err", err)
+			continue
+		}
+		allOK := true
+		for _, up := range ups {
+			// A soft-deleted (or never-registered) upstream is a dangling
+			// dependency: it is evicted from the cache and can never produce a new
+			// success, so treat it as unsatisfied — the downstream stays blocked
+			// (its trigger_after ref to the archived DAG is dangling, by design).
+			// This also ignores an archived upstream's stale historical success.
+			if _, _, ok := s.cachedDAG(up); !ok {
+				allOK = false
+				break
+			}
+			r, err := s.store.GetDagRunByLogicalDate(ctx, up, upstream.LogicalDate)
+			if err != nil || r.State != model.RunSuccess {
+				allOK = false
+				break
+			}
+		}
+		if !allOK {
+			continue
+		}
+		// Only fire downstreams that are actively registered: a soft-deleted or
+		// unregistered downstream is not in the cache, and a 0-task shell is skipped.
+		dd, _, ok := s.cachedDAG(dn)
+		if !ok || len(dd.Tasks) == 0 {
+			continue
+		}
+		maxActive := dd.MaxActiveRuns
+		if active, _ := s.store.CountActiveRuns(ctx, dn); active >= maxActive {
+			continue
+		}
+		nr := &model.DagRun{
+			RunID:       runID(dn, upstream.LogicalDate),
+			DagID:       dn,
+			LogicalDate: upstream.LogicalDate,
+			State:       model.RunQueued,
+			TriggerType: model.TriggerDependency,
+		}
+		if err := s.store.CreateDagRun(ctx, nr); err != nil {
+			if !errors.Is(err, store.ErrAlreadyExists) && !errors.Is(err, store.ErrNotFound) {
+				s.log.Error("create dependency run", "dag", dn, "err", err)
+			}
+			continue
+		}
+		s.log.Info("dependency run created", "dag", dn, "upstream", upstream.DagID,
+			"logical_date", upstream.LogicalDate.Format(time.RFC3339))
+	}
+}
+
+func (s *Scheduler) dagFor(ctx context.Context, dagID string) (*model.DAG, error) {
+	if d, _, ok := s.cachedDAG(dagID); ok {
+		return d, nil
+	}
+	sd, err := s.store.GetDAG(ctx, dagID)
+	if err != nil {
+		return nil, err
+	}
+	return parser.Parse([]byte(sd.DefinitionYAML))
+}
+
+func (s *Scheduler) expandRun(ctx context.Context, run *model.DagRun, d *model.DAG) error {
+	for _, t := range d.Tasks {
+		ti := &model.TaskInstance{
+			RunID:      run.RunID,
+			TaskID:     t.ID,
+			State:      model.TaskScheduled,
+			MaxRetries: t.Retries,
+			Pool:       t.Pool,
+			Priority:   t.Priority,
+			LogPath:    s.logPath(d.DagID, run.RunID, t.ID),
+		}
+		if err := s.store.CreateTaskInstance(ctx, ti); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+	}
+	return nil
+}
+
+// dispatch moves a task scheduled -> queued (synchronously, before launching,
+// to prevent re-dispatch on the next tick), assigns this attempt's unique ref,
+// and launches it in a goroutine. The ref embeds the try number so each retry
+// re-runs on the executor (whose Launch is idempotent per ref).
+func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Task, ti *model.TaskInstance) error {
+	ti.TryNumber++
+	ti.State = model.TaskQueued
+	ti.ExecutorRef = attemptRef(run.RunID, t.ID, ti.TryNumber)
+	if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+		return err
+	}
+	tiVal := *ti
+	s.inflight.Add(1)
+	go func() {
+		defer s.inflight.Done()
+		s.runTask(ctx, run, t, tiVal)
+	}()
+	return nil
+}
+
+// runTask launches a task on the executor (using the ref dispatch assigned) and
+// then awaits completion by polling. The executor owns the child process, so a
+// scheduler shutdown (ctx cancel) just stops the poll; the task keeps running
+// and recovery re-attaches to it on restart.
+func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance) {
+	vars := templateVars(run, t, ti.TryNumber)
+	spec := executor.Spec{
+		TaskRunID: ti.ExecutorRef,
+		Type:      t.Type,
+		Command:   renderCommand(t.Command, vars),
+		Env:       envFromVars(vars),
+		Timeout:   time.Duration(t.Timeout) * time.Second,
+		LogPath:   ti.LogPath,
+	}
+	if _, err := s.exec.Launch(ctx, spec); err != nil {
+		s.log.Error("launch task", "run", run.RunID, "task", t.ID, "err", err)
+		now := time.Now().UTC()
+		ti.StartedAt = &now
+		s.recordFailure(ctx, &ti, "launch error")
+		return
+	}
+
+	now := time.Now().UTC()
+	ti.State = model.TaskRunning
+	ti.StartedAt = &now
+	if err := s.store.UpdateTaskInstance(ctx, &ti); err != nil {
+		s.log.Error("mark running", "ti", ti.ID, "err", err)
+		return
+	}
+	s.awaitCompletion(ctx, &ti)
+}
+
+// awaitCompletion polls the executor until the task exits (or the executor
+// loses it), then records the outcome. On ctx cancellation it returns without
+// finalizing, leaving the task running for recovery to re-attach.
+func (s *Scheduler) awaitCompletion(ctx context.Context, ti *model.TaskInstance) {
+	poll := time.NewTicker(s.opts.PollInterval)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return // leave the task running; recovery re-attaches
+		case <-poll.C:
+		}
+		st, err := s.exec.Probe(ctx, ti.ExecutorRef)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.log.Error("probe task", "ref", ti.ExecutorRef, "err", err)
+			continue
+		}
+		switch st.Phase {
+		case executor.PhaseExited:
+			s.finalizeTask(ctx, ti, st.ExitCode)
+			return
+		case executor.PhaseUnknown:
+			s.log.Warn("task lost (executor has no record)", "ref", ti.ExecutorRef)
+			s.finalizeTaskLost(ctx, ti)
+			return
+		case executor.PhaseRunning:
+			// keep polling
+		}
+	}
+}
+
+func (s *Scheduler) finalizeTask(ctx context.Context, ti *model.TaskInstance, exitCode int) {
+	if exitCode == 0 {
+		now := time.Now().UTC()
+		ti.State = model.TaskSuccess
+		ti.FinishedAt = &now
+		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			s.log.Error("finalize task", "ti", ti.ID, "err", err)
+			return
+		}
+		s.log.Info("task finished", "ref", ti.ExecutorRef, "state", model.TaskSuccess, "exit", 0)
+		return
+	}
+	s.recordFailure(ctx, ti, fmt.Sprintf("exit %d", exitCode))
+}
+
+// finalizeTaskLost handles a task whose executor record vanished (e.g. the
+// executor process restarted) — treated as a failure (retry-aware).
+func (s *Scheduler) finalizeTaskLost(ctx context.Context, ti *model.TaskInstance) {
+	s.recordFailure(ctx, ti, "executor lost")
+}
+
+// recordFailure routes a failed attempt to up_for_retry if retries remain, else
+// to failed. TryNumber counts attempts made (incremented at dispatch), so the
+// task gets MaxRetries+1 total attempts.
+func (s *Scheduler) recordFailure(ctx context.Context, ti *model.TaskInstance, reason string) {
+	now := time.Now().UTC()
+	ti.FinishedAt = &now
+	if ti.TryNumber <= ti.MaxRetries {
+		ti.State = model.TaskUpForRetry
+		s.log.Info("task up for retry", "ref", ti.ExecutorRef, "try", ti.TryNumber, "max", ti.MaxRetries, "reason", reason)
+	} else {
+		ti.State = model.TaskFailed
+		s.log.Info("task failed", "ref", ti.ExecutorRef, "try", ti.TryNumber, "reason", reason)
+	}
+	if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+		s.log.Error("record failure", "ti", ti.ID, "err", err)
+	}
+}
+
+// reattach spawns a poll goroutine for a task already running on the executor.
+func (s *Scheduler) reattach(ctx context.Context, ti *model.TaskInstance) {
+	s.inflight.Add(1)
+	go func() {
+		defer s.inflight.Done()
+		s.awaitCompletion(ctx, ti)
+	}()
+}
+
+// Recover reconciles in-flight task instances with the executor after a
+// scheduler restart (see docs/ARCHITECTURE.md §9). Tasks the executor is still
+// running are re-attached; finished tasks are finalized; tasks the executor
+// never started (queued but not launched) are reset to scheduled.
+func (s *Scheduler) Recover(ctx context.Context) error {
+	reattached, finalized, reset := 0, 0, 0
+
+	queued, err := s.store.ListTaskInstancesByState(ctx, model.TaskQueued)
+	if err != nil {
+		return err
+	}
+	for _, ti := range queued {
+		ref := ti.ExecutorRef // assigned at dispatch, before the queued-write
+		st, err := s.exec.Probe(ctx, ref)
+		if err != nil {
+			s.log.Error("recover probe", "ref", ref, "err", err)
+			continue
+		}
+		switch st.Phase {
+		case executor.PhaseExited:
+			s.finalizeTask(ctx, ti, st.ExitCode)
+			finalized++
+		case executor.PhaseRunning:
+			ti.State = model.TaskRunning
+			if ti.StartedAt == nil {
+				now := time.Now().UTC()
+				ti.StartedAt = &now
+			}
+			if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+				s.log.Error("recover mark running", "ti", ti.ID, "err", err)
+				continue
+			}
+			s.reattach(ctx, ti)
+			reattached++
+		case executor.PhaseUnknown:
+			// Never launched (crashed between queued-write and Launch): undo this
+			// attempt's try increment and re-run it.
+			ti.State = model.TaskScheduled
+			ti.ExecutorRef = ""
+			if ti.TryNumber > 0 {
+				ti.TryNumber--
+			}
+			if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+				s.log.Error("recover reset queued", "ti", ti.ID, "err", err)
+				continue
+			}
+			reset++
+		}
+	}
+
+	running, err := s.store.ListTaskInstancesByState(ctx, model.TaskRunning)
+	if err != nil {
+		return err
+	}
+	for _, ti := range running {
+		ref := ti.ExecutorRef
+		st, err := s.exec.Probe(ctx, ref)
+		if err != nil {
+			s.log.Error("recover probe", "ref", ref, "err", err)
+			continue
+		}
+		switch st.Phase {
+		case executor.PhaseExited:
+			ti.ExecutorRef = ref
+			s.finalizeTask(ctx, ti, st.ExitCode)
+			finalized++
+		case executor.PhaseRunning:
+			ti.ExecutorRef = ref
+			s.reattach(ctx, ti)
+			reattached++
+		case executor.PhaseUnknown:
+			s.log.Warn("recover: running task lost", "ref", ref)
+			s.finalizeTaskLost(ctx, ti)
+			finalized++
+		}
+	}
+
+	if reattached+finalized+reset > 0 {
+		s.log.Info("recovery complete", "reattached", reattached, "finalized", finalized, "reset", reset)
+	}
+	return nil
+}
+
+// attemptRef is the executor ref / idempotency key for one task attempt. The
+// try number makes each retry a distinct ref so the executor re-runs it.
+func attemptRef(runID, taskID string, try int) string {
+	return fmt.Sprintf("%s/%s/%d", runID, taskID, try)
+}
+
+// templateVars are the substitution variables available to a task — both as
+// {{ name }} placeholders in the command and as CRONOVA_<NAME> env vars. The
+// logical date is what makes catchup meaningful: a backfilled run processes the
+// data for the period it represents, not wall-clock "now".
+func templateVars(run *model.DagRun, t model.Task, try int) map[string]string {
+	return map[string]string{
+		"run_id":           run.RunID,
+		"dag_id":           run.DagID,
+		"task_id":          t.ID,
+		"try_number":       strconv.Itoa(try),
+		"logical_date":     run.LogicalDate.Format("2006-01-02"),
+		"logical_datetime": run.LogicalDate.Format(time.RFC3339),
+	}
+}
+
+func envFromVars(vars map[string]string) map[string]string {
+	env := make(map[string]string, len(vars))
+	for k, v := range vars {
+		env["CRONOVA_"+strings.ToUpper(k)] = v
+	}
+	return env
+}
+
+var templateRe = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+
+// renderCommand substitutes {{ name }} placeholders from vars. Unknown names
+// are left as-is so unrelated shell braces are not mangled.
+func renderCommand(cmd string, vars map[string]string) string {
+	return templateRe.ReplaceAllStringFunc(cmd, func(m string) string {
+		key := templateRe.FindStringSubmatch(m)[1]
+		if v, ok := vars[key]; ok {
+			return v
+		}
+		return m
+	})
+}
+
+func (s *Scheduler) logPath(dagID, runID, taskID string) string {
+	return filepath.Join(s.opts.LogDir, dagID, sanitize(runID), taskID+".log")
+}
+
+// --- pure helpers ---
+
+// taskGate evaluates a task's trigger rule against its dependencies' current
+// states, returning whether it is ready to dispatch and/or blocked.
+func taskGate(t model.Task, byTask map[string]*model.TaskInstance) (ready, blocked bool) {
+	states := make([]model.TaskState, 0, len(t.Deps))
+	for _, dep := range t.Deps {
+		if dti := byTask[dep]; dti != nil {
+			states = append(states, dti.State)
+		} else {
+			states = append(states, "") // not yet expanded -> pending
+		}
+	}
+	return model.EvalTriggerRule(t.TriggerRule, states)
+}
+
+func runID(dagID string, logical time.Time) string {
+	// The .999999999 fraction is trimmed when zero, so whole-second logical
+	// dates (cron, @every Ns) get clean ids, while sub-second schedules still
+	// produce a unique run_id per logical_date (avoiding a PK collision).
+	return fmt.Sprintf("%s__%s", dagID, logical.UTC().Format("20060102T150405.999999999Z"))
+}
+
+func sanitize(s string) string { return strings.ReplaceAll(s, ":", "_") }
