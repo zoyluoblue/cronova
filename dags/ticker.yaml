@@ -1,0 +1,9 @@
+dag_id: ticker
+schedule: "@every 1m"
+start_date: 2026-06-01
+max_active_runs: 1
+default_retries: 0
+tasks:
+  - id: heartbeat
+    type: shell
+    command: "echo tick at $(date -u +%H:%M:%S) logical=$CRONOVA_LOGICAL_DATETIME"

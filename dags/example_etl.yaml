@@ -1,0 +1,40 @@
+dag_id: example_etl
+start_date: "2026-06-01"
+catchup: false
+max_active_runs: 1
+tasks:
+    - id: extract
+      type: shell
+      command: echo extracting for $CRONOVA_LOGICAL_DATE && sleep 1
+      pool: default
+      retries: 0
+      retry_delay: 0
+      trigger_rule: all_success
+    - id: transform
+      type: shell
+      command: echo transforming && sleep 1
+      deps:
+        - extract
+      pool: default
+      retries: 0
+      retry_delay: 0
+      trigger_rule: all_success
+    - id: validate
+      type: shell
+      command: echo validating && sleep 1
+      deps:
+        - extract
+      pool: default
+      retries: 0
+      retry_delay: 0
+      trigger_rule: all_success
+    - id: load
+      type: shell
+      command: echo loading run=$CRONOVA_RUN_ID && sleep 1
+      deps:
+        - transform
+        - validate
+      pool: default
+      retries: 0
+      retry_delay: 0
+      trigger_rule: all_success

@@ -1,0 +1,14 @@
+dag_id: downstream_report
+start_date: 2026-06-01
+max_active_runs: 1
+default_retries: 1
+# runs automatically once upstream_ingest succeeds for the same logical_date
+trigger_after:
+  - dag_id: upstream_ingest
+tasks:
+  - id: build_report
+    type: shell
+    command: "echo building report from $CRONOVA_LOGICAL_DATE data"
+    pool: reports        # configure size with: cronova pools set reports <n>
+    retries: 2
+    timeout: 600

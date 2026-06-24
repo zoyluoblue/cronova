@@ -1,0 +1,8 @@
+dag_id: upstream_ingest
+# manual/scheduled upstream; downstream_report runs after this succeeds
+start_date: 2026-06-01
+max_active_runs: 1
+tasks:
+  - id: ingest
+    type: shell
+    command: "echo ingesting for $CRONOVA_LOGICAL_DATE && sleep 1"
