@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package cronova.executor.v1;
+
+option go_package = "github.com/zoyluo/cronova/proto/cronova/executor/v1;executorv1";
+
+// Executor runs tasks as OS subprocesses in a long-lived process, decoupled
+// from the scheduler so a scheduler restart never kills running tasks. See
+// docs/ARCHITECTURE.md §8 and §9.
+service Executor {
+  // Launch starts a task. It is idempotent on task_run_id: launching an
+  // already-running task returns the existing ref instead of starting twice.
+  rpc Launch(LaunchRequest) returns (LaunchResponse);
+  // Probe reports a task's current phase (used by normal polling and by
+  // scheduler crash recovery to re-attach to in-flight tasks).
+  rpc Probe(ProbeRequest) returns (ProbeResponse);
+  // Cancel kills a running task's process group.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+}
+
+message LaunchRequest {
+  string task_run_id = 1; // run_id + "/" + task_id; the idempotency key and ref
+  string type = 2;        // shell/python/sql/jar (informational)
+  string command = 3;     // shell command line
+  map<string, string> env = 4;
+  int64 timeout_seconds = 5; // 0 = no timeout
+  string log_path = 6;       // file for combined stdout/stderr
+}
+
+message LaunchResponse {
+  string ref = 1; // handle for Probe/Cancel; equals task_run_id
+}
+
+message ProbeRequest {
+  string ref = 1;
+}
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_RUNNING = 1; // still executing
+  PHASE_EXITED = 2;  // finished; exit_code is valid
+  PHASE_UNKNOWN = 3; // executor has no record (never launched, or executor restarted)
+}
+
+message ProbeResponse {
+  Phase phase = 1;
+  int32 exit_code = 2; // valid when phase = PHASE_EXITED; 124 indicates timeout kill
+}
+
+message CancelRequest {
+  string ref = 1;
+}
+
+message CancelResponse {
+  bool ok = 1;
+}
