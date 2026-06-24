@@ -3,8 +3,9 @@
 *.db-wal
 *.db-shm
 *.db-journal
-cronova
-cronova-executor
+# built binaries at repo root (anchored so they don't match cmd/cronova* source dirs)
+/cronova
+/cronova-executor
 /data/
 /logs/
 node_modules/

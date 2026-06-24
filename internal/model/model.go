@@ -1,0 +1,132 @@
+// Package model defines cronova's core domain types: DAGs, runs, task
+// instances, pools, and the state/trigger enumerations they use.
+package model
+
+import (
+	"errors"
+	"time"
+)
+
+// ErrNoTasks is returned when an operation requires a DAG to have at least one
+// task (e.g. a manual trigger) but the DAG is an empty shell. The API maps it to
+// a 400 client error.
+var ErrNoTasks = errors.New("dag has no tasks")
+
+// ErrActiveRuns is returned when an operation (e.g. delete) is refused because
+// the DAG still has queued/running runs. The API maps it to a 409 conflict.
+var ErrActiveRuns = errors.New("dag has active runs")
+
+// RunState is the lifecycle state of a DagRun.
+type RunState string
+
+const (
+	RunQueued  RunState = "queued"
+	RunRunning RunState = "running"
+	RunSuccess RunState = "success"
+	RunFailed  RunState = "failed"
+)
+
+// TaskState is the lifecycle state of a TaskInstance.
+type TaskState string
+
+const (
+	TaskScheduled      TaskState = "scheduled"
+	TaskQueued         TaskState = "queued"
+	TaskRunning        TaskState = "running"
+	TaskSuccess        TaskState = "success"
+	TaskFailed         TaskState = "failed"
+	TaskUpForRetry     TaskState = "up_for_retry"
+	TaskUpstreamFailed TaskState = "upstream_failed"
+	TaskSkipped        TaskState = "skipped"
+)
+
+// IsTerminal reports whether the task state is final (no further transitions).
+func (s TaskState) IsTerminal() bool {
+	switch s {
+	case TaskSuccess, TaskFailed, TaskUpstreamFailed, TaskSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// TriggerType records what caused a DagRun to be created.
+type TriggerType string
+
+const (
+	TriggerSchedule   TriggerType = "schedule"
+	TriggerManual     TriggerType = "manual"
+	TriggerDependency TriggerType = "dependency"
+	TriggerEvent      TriggerType = "event"
+)
+
+// DAG is a workflow definition. Persisted fields live in the dags table; Tasks
+// are derived by parsing DefinitionYAML and are not stored row-by-row.
+type DAG struct {
+	DagID          string     `json:"dag_id"`
+	Schedule       string     `json:"schedule"` // cron expression; empty => manual/event only
+	StartDate      time.Time  `json:"start_date"`
+	Catchup        bool       `json:"catchup"`
+	Paused         bool       `json:"paused"`
+	MaxActiveRuns  int        `json:"max_active_runs"`
+	DefaultRetries int        `json:"default_retries"` // DAG-level default; per-task retries override
+	DefinitionYAML string     `json:"definition_yaml,omitempty"`
+	Owner          string     `json:"owner,omitempty"`   // reserved for future RBAC
+	Project        string     `json:"project,omitempty"` // reserved for future RBAC
+	Tasks          []Task     `json:"tasks,omitempty"`
+	TriggerAfter   []string   `json:"trigger_after,omitempty"` // upstream dag_ids
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
+}
+
+// Task is a single node in a DAG.
+type Task struct {
+	ID          string   `json:"id"`
+	Type        string   `json:"type"` // shell/python/sql/jar/...
+	Command     string   `json:"command"`
+	Deps        []string `json:"deps,omitempty"`
+	Pool        string   `json:"pool"`
+	Priority    int      `json:"priority"`
+	Retries     int      `json:"retries"`
+	RetryDelay  int      `json:"retry_delay"`  // seconds
+	Timeout     int      `json:"timeout"`      // seconds; 0 = no timeout
+	TriggerRule string   `json:"trigger_rule"` // when to run vs. upstream states (default all_success)
+}
+
+// DagRun is one concrete execution of a DAG, keyed by its logical period.
+type DagRun struct {
+	RunID       string      `json:"run_id"`
+	DagID       string      `json:"dag_id"`
+	LogicalDate time.Time   `json:"logical_date"`
+	State       RunState    `json:"state"`
+	TriggerType TriggerType `json:"trigger_type"`
+	StartedAt   *time.Time  `json:"started_at,omitempty"`
+	FinishedAt  *time.Time  `json:"finished_at,omitempty"`
+}
+
+// TaskInstance is the execution of one Task within one DagRun. It is the
+// smallest unit tracked by the state machine.
+type TaskInstance struct {
+	ID          int64      `json:"id"`
+	RunID       string     `json:"run_id"`
+	TaskID      string     `json:"task_id"`
+	State       TaskState  `json:"state"`
+	TryNumber   int        `json:"try_number"`
+	MaxRetries  int        `json:"max_retries"`
+	Pool        string     `json:"pool"`
+	Priority    int        `json:"priority"`
+	ExecutorRef string     `json:"executor_ref,omitempty"`
+	LogPath     string     `json:"log_path,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+}
+
+// Pool is a named set of concurrency slots.
+type Pool struct {
+	Name  string `json:"name"`
+	Slots int    `json:"slots"`
+}
+
+// DefaultPoolName is the pool tasks land in when none is specified.
+const DefaultPoolName = "default"

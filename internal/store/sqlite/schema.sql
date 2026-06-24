@@ -1,0 +1,71 @@
+-- cronova SQLite schema. Idempotent: safe to run on every startup.
+
+CREATE TABLE IF NOT EXISTS dags (
+    dag_id          TEXT PRIMARY KEY,
+    schedule        TEXT,
+    start_date      DATETIME,
+    catchup         INTEGER NOT NULL DEFAULT 0,
+    paused          INTEGER NOT NULL DEFAULT 0,
+    max_active_runs INTEGER NOT NULL DEFAULT 1,
+    definition_yaml TEXT NOT NULL DEFAULT '',
+    owner           TEXT NOT NULL DEFAULT '',
+    project         TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at      DATETIME -- NULL = active; non-null = soft-deleted (archived, recoverable)
+);
+
+CREATE TABLE IF NOT EXISTS dag_runs (
+    run_id        TEXT PRIMARY KEY,
+    dag_id        TEXT NOT NULL REFERENCES dags(dag_id),
+    logical_date  DATETIME NOT NULL,
+    state         TEXT NOT NULL,
+    trigger_type  TEXT NOT NULL,
+    started_at    DATETIME,
+    finished_at   DATETIME,
+    UNIQUE (dag_id, logical_date)
+);
+
+CREATE TABLE IF NOT EXISTS task_instances (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES dag_runs(run_id),
+    task_id       TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    try_number    INTEGER NOT NULL DEFAULT 0,
+    max_retries   INTEGER NOT NULL DEFAULT 0,
+    pool          TEXT NOT NULL DEFAULT 'default',
+    priority      INTEGER NOT NULL DEFAULT 0,
+    executor_ref  TEXT NOT NULL DEFAULT '',
+    log_path      TEXT NOT NULL DEFAULT '',
+    started_at    DATETIME,
+    finished_at   DATETIME,
+    UNIQUE (run_id, task_id)
+);
+
+CREATE TABLE IF NOT EXISTS pools (
+    name   TEXT PRIMARY KEY,
+    slots  INTEGER NOT NULL
+);
+
+-- No FK to dags: a DAG may declare trigger_after on an upstream that is loaded
+-- later (or not at all). A dangling upstream simply never fires the downstream.
+CREATE TABLE IF NOT EXISTS dag_dependencies (
+    upstream_dag    TEXT NOT NULL,
+    downstream_dag  TEXT NOT NULL,
+    PRIMARY KEY (upstream_dag, downstream_dag)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT NOT NULL,
+    event_key   TEXT NOT NULL,
+    payload     TEXT NOT NULL DEFAULT '',
+    consumed    INTEGER NOT NULL DEFAULT 0,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ti_state   ON task_instances(state);
+CREATE INDEX IF NOT EXISTS idx_ti_run     ON task_instances(run_id);
+CREATE INDEX IF NOT EXISTS idx_ti_pool    ON task_instances(pool, state);
+CREATE INDEX IF NOT EXISTS idx_runs_state ON dag_runs(state);
+CREATE INDEX IF NOT EXISTS idx_runs_dag   ON dag_runs(dag_id);
