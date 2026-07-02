@@ -19,6 +19,9 @@ let D = null;
 let ND = null;
 // SCHED: binding for the shared schedule UI {state, idp, host, onChange}.
 let SCHED = null;
+// coachDag: dag_id just created from a starter template -> show a one-time
+// "template ready, hit ▶" ribbon on its operation page (session-only).
+let coachDag = null;
 
 // ---- i18n ----
 const DICT = {
@@ -65,12 +68,24 @@ const DICT = {
     cron_help: "用法", ch_title: "Cron 写法", ch_format: "格式：分 时 日 月 周（5 段，空格分隔）",
     ch_fields: "字段", ch_ops: "符号", ch_examples: "常用示例（点击填入）", ch_shortcuts: "快捷写法",
     t_rule: "触发规则", tr_all_success: "全部成功", tr_all_done: "全部完成", tr_one_success: "任一成功", tr_one_failed: "任一失败", tr_all_failed: "全部失败", tr_none_failed: "无失败",
+    trd_all_success: "全部上游成功才运行(默认)", trd_all_done: "全部上游完成即运行(无论成败)——适合清理/汇总", trd_one_success: "任一上游成功即运行", trd_one_failed: "任一上游失败即运行——适合告警", trd_all_failed: "全部上游都失败才运行", trd_none_failed: "没有上游失败(成功或跳过)时运行",
+    pool_hint: "并发槽位,跨所有 DAG 共享;同名 pool 的任务竞争同一批槽位",
+    cb_interp: "解释器", cb_runas: "运行方式", cb_target: "模块 / 脚本", cb_args: "参数", cb_jar: "Jar 路径", cb_mainclass: "主类", cb_client: "SQL 客户端", cb_query: "SQL 查询",
+    cmdopt_module: "模块 (-m)", cmdopt_script: "脚本文件",
+    cmd_will_run: "将执行:", cmd_edit_raw: "编辑原始命令", cmd_use_form: "用表单填写", cmd_cant_parse: "当前命令无法解析成表单,已保留原始编辑",
+    var_insert: "点击插入到命令(模板变量)",
     graph_connect_hint: "提示：点上游任务、再点下游任务，即可连接/断开依赖",
     nav_graph: "关系图", graph_title: "DAG 关系图", graph_sub: "按 trigger_after 展示各 DAG 之间的触发依赖",
     graph_none: "暂无跨 DAG 依赖（没有 DAG 配置 trigger_after）", graph_view_hint: "提示：箭头表示「触发后」方向；点击节点查看该 DAG；虚线节点为未找到的 DAG",
     ss_saved: "已保存", ss_saving: "保存中…", ss_invalid: "待修复后保存", ss_error: "保存失败",
     dag_no_tasks_title: "暂无任务", dag_no_tasks_sub: "添加一个任务以启用此 DAG", dag_disabled_hint: "添加任务后可触发",
     nd_title: "新建 DAG", nd_create: "创建", nd_cancel: "取消", nd_dagid_dup: "该 DAG ID 已存在",
+    tpl_start: "从模板开始", tpl_tasks: "个任务",
+    tpl_blank: "空白", tpl_blank_d: "从零开始,稍后自己加任务",
+    tpl_etl: "每日 ETL", tpl_etl_d: "抽取 → 转换 → 加载 的三步流水线",
+    tpl_report: "定时报表", tpl_report_d: "取数 → 生成报表,预设每天 08:00",
+    tpl_fanout: "扇出-扇入", tpl_fanout_d: "start → 两个并行分支 → 汇合",
+    coach_tpl_ready: "模板已就绪 — 点「触发运行」看它跑一遍,再按需修改任务",
     back_dag: (d) => `← 返回 ${d}`, confirm_del_task_title: (id) => `删除任务 “${id}”？`,
   },
   en: {
@@ -116,12 +131,24 @@ const DICT = {
     cron_help: "help", ch_title: "Cron format", ch_format: "Format: min hour day month weekday (5 space-separated fields)",
     ch_fields: "Fields", ch_ops: "Operators", ch_examples: "Examples (click to fill)", ch_shortcuts: "Shortcuts",
     t_rule: "Trigger rule", tr_all_success: "all success", tr_all_done: "all done", tr_one_success: "one success", tr_one_failed: "one failed", tr_all_failed: "all failed", tr_none_failed: "none failed",
+    trd_all_success: "Runs only if all upstreams succeeded (default)", trd_all_done: "Runs once all upstreams finish, success or not — good for cleanup/summary", trd_one_success: "Runs as soon as any upstream succeeds", trd_one_failed: "Runs as soon as any upstream fails — good for alerts", trd_all_failed: "Runs only if all upstreams failed", trd_none_failed: "Runs if no upstream failed (succeeded or skipped)",
+    pool_hint: "Concurrency slots shared across all DAGs; tasks in the same pool compete for its slots",
+    cb_interp: "Interpreter", cb_runas: "Run as", cb_target: "Module / script", cb_args: "Arguments", cb_jar: "Jar path", cb_mainclass: "Main class", cb_client: "SQL client", cb_query: "SQL query",
+    cmdopt_module: "module (-m)", cmdopt_script: "script file",
+    cmd_will_run: "Will run:", cmd_edit_raw: "edit raw command", cmd_use_form: "use form", cmd_cant_parse: "This command can't be parsed into the form; keeping the raw editor",
+    var_insert: "click to insert into the command (template vars)",
     graph_connect_hint: "Tip: click an upstream task then a downstream task to add/remove a dependency",
     nav_graph: "Graph", graph_title: "DAG Graph", graph_sub: "Trigger dependencies between DAGs via trigger_after",
     graph_none: "No cross-DAG dependencies yet (no DAG declares trigger_after)", graph_view_hint: "Tip: arrows point in the trigger-after direction; click a node to open that DAG; dashed nodes are unknown DAGs",
     ss_saved: "Saved", ss_saving: "Saving…", ss_invalid: "Fix errors to save", ss_error: "Save failed",
     dag_no_tasks_title: "No tasks yet", dag_no_tasks_sub: "Add a task to enable this DAG", dag_disabled_hint: "Add a task to enable triggering",
     nd_title: "New DAG", nd_create: "Create", nd_cancel: "Cancel", nd_dagid_dup: "A DAG with this id already exists",
+    tpl_start: "Start from a template", tpl_tasks: "tasks",
+    tpl_blank: "Blank", tpl_blank_d: "Start empty and add tasks yourself",
+    tpl_etl: "Daily ETL", tpl_etl_d: "Three-step extract → transform → load pipeline",
+    tpl_report: "Scheduled report", tpl_report_d: "Fetch → render, preset to run daily at 08:00",
+    tpl_fanout: "Fan-out / fan-in", tpl_fanout_d: "start → two parallel branches → join",
+    coach_tpl_ready: "Template ready — hit “Trigger run” to watch it execute, then tweak the tasks",
     back_dag: (d) => `← Back to ${d}`, confirm_del_task_title: (id) => `Delete task “${id}”?`,
   },
 };
@@ -380,6 +407,7 @@ function renderDagPage() {
     <div class="crumb-bar"><a id="back">${t("back_dags")}</a> / ${esc(d.dag_id)}</div>
     <div class="page-h"><h1 class="mono">${esc(d.dag_id)}</h1><span class="tag">${typeLabel(typ)}</span><span class="savestate ss-saved" id="d-save"></span></div>
     <div class="page-sub">${esc(d.schedule || t("sub_manual"))} · ${t("max_active")} ${d.max_active_runs}</div>
+    ${coachDag === d.dag_id ? `<div class="coach-ribbon" id="coach"><span>✦ ${t("coach_tpl_ready")}</span><button class="primary" id="coach-run">${t("btn_trigger")}</button><button class="icon" id="coach-x" aria-label="${t("cancel_word")}">✕</button></div>` : ""}
     <div class="toolbar">
       <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
       <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
@@ -408,6 +436,8 @@ function renderDagPage() {
   $("trig").onclick = triggerActiveDag;
   $("pause").onclick = async () => { await api(`/api/dags/${d.dag_id}/pause?paused=${!d.paused}`, { method: "POST" }); d.paused = !d.paused; renderDagPage(); };
   $("del").onclick = deleteActiveDag;
+  const cr = $("coach-run"); if (cr) cr.onclick = () => { coachDag = null; $("coach").remove(); triggerActiveDag(); };
+  const cx = $("coach-x"); if (cx) cx.onclick = () => { coachDag = null; $("coach").remove(); };
   const max = $("d-max"); max.onblur = () => { d.max_active_runs = +max.value || 1; saveDag(); };
   const defr = $("d-defr"); defr.onblur = () => { d.default_retries = +defr.value || 0; saveDag(); };
   main.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
@@ -518,8 +548,98 @@ async function deleteTask(taskID) {
 // ============================================================================
 function showTask(dagID, taskID) {
   view = "task"; activeDag = dagID; D.activeTaskId = taskID; closeLog();
+  const tk = D.tasks.find((x) => x.id === taskID);
+  cmdRaw = tk ? computeCmdRaw(tk) : true; // structured form when the command fits the type
+  lastCmdField = null;
   setNav("dags", `${dagID} / ${taskID}`);
   renderTaskPage();
+}
+
+// ---- typed command builder ------------------------------------------------
+// The `type` selector drives a small structured form that COMPOSES the shell
+// command; the raw textarea is the escape hatch AND the stored source of truth
+// (no backend change — we still persist `command`). Best-effort parse on load;
+// fall back to raw when a command doesn't fit the type's shape.
+const TEMPLATE_VARS = ["logical_date", "logical_datetime", "run_id", "dag_id", "task_id", "try_number"];
+let cmdRaw = false, lastCmdField = null;
+const CMD_BUILDERS = {
+  python: {
+    fields: [
+      { k: "interp", label: "cb_interp", def: "python3", ph: "python3" },
+      { k: "mode", label: "cb_runas", sel: ["module", "script"], def: "module" },
+      { k: "target", label: "cb_target", ph: "pkg.main  ·  path/script.py", full: true },
+      { k: "args", label: "cb_args", ph: "--date {{ logical_date }}", full: true },
+    ],
+    compose: (f) => `${f.interp || "python3"} ${f.mode === "script" ? "" : "-m "}${f.target || ""}${f.args ? " " + f.args : ""}`.replace(/\s+/g, " ").trim(),
+    parse: (c) => { const m = c.match(/^(\S+)\s+(?:-m\s+(\S+)|(\S+))(?:\s+([\s\S]+))?$/); if (!m || !/python/i.test(m[1])) return null; return { interp: m[1], mode: m[2] ? "module" : "script", target: m[2] || m[3] || "", args: (m[4] || "").trim() }; },
+  },
+  jar: {
+    fields: [
+      { k: "jar", label: "cb_jar", ph: "app.jar", full: true },
+      { k: "mainclass", label: "cb_mainclass", ph: "(optional) com.example.Main" },
+      { k: "args", label: "cb_args", ph: "--in {{ logical_date }}", full: true },
+    ],
+    compose: (f) => (f.mainclass ? `java -cp ${f.jar || ""} ${f.mainclass}` : `java -jar ${f.jar || ""}`) + (f.args ? " " + f.args : ""),
+    parse: (c) => { let m = c.match(/^java -jar (\S+)(?:\s+([\s\S]+))?$/); if (m) return { jar: m[1], mainclass: "", args: (m[2] || "").trim() }; m = c.match(/^java -cp (\S+) (\S+)(?:\s+([\s\S]+))?$/); if (m) return { jar: m[1], mainclass: m[2], args: (m[3] || "").trim() }; return null; },
+  },
+  sql: {
+    fields: [
+      { k: "client", label: "cb_client", def: "psql -c", ph: "psql -c" },
+      { k: "query", label: "cb_query", area: true, ph: "SELECT count(*) FROM events WHERE day = '{{ logical_date }}'" },
+    ],
+    compose: (f) => `${f.client || "psql -c"} "${(f.query || "").replace(/"/g, '\\"')}"`,
+    parse: (c) => { const m = c.match(/^([\s\S]+?)\s+"([\s\S]*)"$/); if (!m) return null; return { client: m[1], query: m[2].replace(/\\"/g, '"') }; },
+  },
+};
+function computeCmdRaw(tk) { const b = CMD_BUILDERS[tk.type]; if (!b) return true; if (!tk.command) return false; return !b.parse(tk.command); }
+function insertAtCaret(el, text) {
+  el.focus();
+  const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, s) + text + el.value.slice(e);
+  const p = s + text.length; if (el.setSelectionRange) el.setSelectionRange(p, p);
+}
+// escape, then tint {{ template }} tokens so substitution is visible in previews
+function hlVars(cmd) { return esc(cmd).replace(/\{\{\s*\w+\s*\}\}/g, (m) => `<span class="varhl">${m}</span>`); }
+function commandFieldHtml(tk) {
+  const chips = `<div class="varchips" title="${t("var_insert")}">${TEMPLATE_VARS.map((v) => `<span class="chip varchip" data-var="${v}">{{ ${v} }}</span>`).join("")}</div>`;
+  const b = CMD_BUILDERS[tk.type];
+  if (cmdRaw || !b) {
+    const toForm = b ? ` <a class="raw-toggle" id="cmd-toform">${t("cmd_use_form")}</a>` : "";
+    return `<div class="b-field full"><label>${t("t_command")}${toForm}</label>${chips}
+      <textarea class="tf cmd" data-k="command" rows="4" spellcheck="false" placeholder="echo running {{ logical_date }}">${esc(tk.command)}</textarea>
+      <div class="cmd-preview"><span class="cp-label">${t("cmd_will_run")}</span> <code id="cmd-preview">${hlVars(tk.command || "")}</code></div></div>`;
+  }
+  const f = b.parse(tk.command) || {};
+  const fields = b.fields.map((fd) => {
+    const val = f[fd.k] ?? fd.def ?? "";
+    if (fd.sel) return `<div class="b-field"><label>${t(fd.label)}</label><select class="cf" data-cf="${fd.k}">${fd.sel.map((o) => `<option value="${o}" ${val === o ? "selected" : ""}>${t("cmdopt_" + o)}</option>`).join("")}</select></div>`;
+    if (fd.area) return `<div class="b-field full"><label>${t(fd.label)}</label><textarea class="cf cmd" data-cf="${fd.k}" rows="3" spellcheck="false" placeholder="${esc(fd.ph || "")}">${esc(val)}</textarea></div>`;
+    return `<div class="b-field${fd.full ? " full" : ""}"><label>${t(fd.label)}</label><input class="cf" data-cf="${fd.k}" value="${esc(val)}" placeholder="${esc(fd.ph || "")}"></div>`;
+  }).join("");
+  return `<div class="b-field full"><label>${t("t_command")} <span class="tag">${esc(tk.type)}</span> <a class="raw-toggle" id="cmd-toraw">${t("cmd_edit_raw")}</a></label>${chips}
+    <div class="cmd-builder tc-grid">${fields}</div>
+    <div class="cmd-preview"><span class="cp-label">${t("cmd_will_run")}</span> <code id="cmd-preview">${hlVars(tk.command || b.compose(f))}</code></div></div>`;
+}
+function wireCommandField(tk) {
+  const b = CMD_BUILDERS[tk.type];
+  const toForm = $("cmd-toform"); if (toForm) toForm.onclick = () => { if (!tk.command || (b && b.parse(tk.command))) { cmdRaw = false; renderTaskPage(); } else toast(t("cmd_cant_parse"), "warn"); };
+  const toRaw = $("cmd-toraw"); if (toRaw) toRaw.onclick = () => { cmdRaw = true; renderTaskPage(); };
+  if (!cmdRaw && b) {
+    const recompose = () => { const f = {}; main.querySelectorAll(".cf").forEach((el) => f[el.dataset.cf] = el.value); tk.command = b.compose(f); const pv = $("cmd-preview"); if (pv) pv.innerHTML = hlVars(tk.command); };
+    main.querySelectorAll(".cf").forEach((el) => {
+      el.onfocus = () => lastCmdField = el;
+      if (el.tagName === "SELECT") { el.onchange = () => { recompose(); saveDag(); }; return; }
+      el.oninput = recompose; el.onblur = () => { recompose(); saveDag(); };
+    });
+  }
+  main.querySelectorAll(".varchip").forEach((c) => c.onclick = () => {
+    const target = (lastCmdField && main.contains(lastCmdField)) ? lastCmdField
+      : main.querySelector('[data-k="command"]') || main.querySelector('.cf[data-cf="args"]') || main.querySelector('.cf[data-cf="query"]') || main.querySelector('.cf[data-cf="target"]');
+    if (!target) return;
+    insertAtCaret(target, `{{ ${c.dataset.var} }}`);
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    if (target.dataset.k === "command") { tk.command = target.value; } // raw textarea path
+  });
 }
 function renderTaskPage() {
   if (!D) { loadDags(); return; }
@@ -533,13 +653,15 @@ function renderTaskPage() {
       <div class="tc-grid">
         <div class="b-field"><label>${t("t_id")}</label><input class="tf" data-k="id" value="${esc(tk.id)}" placeholder="step_a"></div>
         <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
-        <div class="b-field"><label>${t("t_pool")}</label><input class="tf" data-k="pool" value="${esc(tk.pool)}" placeholder="default"></div>
-        <div class="b-field full"><label>${t("t_command")}</label><textarea class="tf cmd" data-k="command" rows="4" spellcheck="false" placeholder="echo running {{ logical_date }}">${esc(tk.command)}</textarea></div>
+        <div class="b-field"><label>${t("t_pool")}</label><input class="tf" data-k="pool" value="${esc(tk.pool)}" placeholder="default"><div class="field-hint">${t("pool_hint")}</div></div>
+      </div>
+      ${commandFieldHtml(tk)}
+      <div class="tc-grid">
         <div class="b-field"><label>${t("t_priority")}</label><input class="tf" data-k="priority" type="number" value="${esc(tk.priority)}"></div>
         <div class="b-field"><label>${t("t_retries")}</label><input class="tf" data-k="retries" type="number" min="0" value="${esc(tk.retries)}"></div>
         <div class="b-field"><label>${t("t_retrydelay")}</label><input class="tf" data-k="retry_delay" type="number" min="0" value="${esc(tk.retry_delay)}"></div>
         <div class="b-field"><label>${t("t_timeout")}</label><input class="tf" data-k="timeout" type="number" min="0" value="${esc(tk.timeout)}"></div>
-        <div class="b-field"><label>${t("t_rule")}</label><select class="tf" data-k="trigger_rule">${TRIGGER_RULES.map((r) => `<option value="${r}" ${tk.trigger_rule === r ? "selected" : ""}>${t("tr_" + r)}</option>`).join("")}</select></div>
+        <div class="b-field"><label>${t("t_rule")}</label><select class="tf" data-k="trigger_rule">${TRIGGER_RULES.map((r) => `<option value="${r}" ${tk.trigger_rule === r ? "selected" : ""}>${t("tr_" + r)}</option>`).join("")}</select><div class="field-hint" id="rule-desc">${t("trd_" + (tk.trigger_rule || "all_success"))}</div></div>
       </div>
       <div class="section-h">${t("t_deps")}</div>
       <div class="b-deps">${siblings.length ? siblings.map((id) => `<span class="chip dep ${tk.deps.includes(id) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${tk.deps.includes(id)}" data-dep="${esc(id)}">${esc(id)}</span>`).join("") : `<span class="chip empty-hint">${t("t_nodeps")}</span>`}</div>
@@ -553,11 +675,15 @@ function renderTaskPage() {
 
   main.querySelectorAll(".tf").forEach((el) => {
     const k = el.dataset.k;
+    if (k === "type") { el.onchange = () => { tk.type = el.value; cmdRaw = computeCmdRaw(tk); renderTaskPage(); saveDag(); }; return; } // switch the command builder
+    if (k === "trigger_rule") { el.onchange = () => { tk.trigger_rule = el.value; const rd = $("rule-desc"); if (rd) rd.textContent = t("trd_" + el.value); saveDag(); }; return; }
     if (el.tagName === "SELECT") { el.onchange = () => { tk[k] = el.value; saveDag(); }; return; }
     if (k === "id") { el.onblur = () => renameActiveTask(tk, el.value.trim()); return; } // keep old id stable until blur
+    if (k === "command") { el.oninput = () => { tk.command = el.value; const pv = $("cmd-preview"); if (pv) pv.innerHTML = hlVars(tk.command); }; el.onblur = () => saveDag(); el.onfocus = () => lastCmdField = el; return; }
     el.oninput = () => { tk[k] = el.type === "number" ? (el.value === "" ? "" : +el.value) : el.value; };
     el.onblur = () => saveDag();
   });
+  wireCommandField(tk);
   main.querySelectorAll(".chip.dep").forEach((c) => c.onclick = () => {
     const dep = c.dataset.dep, arr = tk.deps, j = arr.indexOf(dep);
     j < 0 ? arr.push(dep) : arr.splice(j, 1); c.classList.toggle("on");
@@ -877,17 +1003,45 @@ function wireSchedBody() {
 // New-DAG minimal modal: collects dag_id (+ optional schedule), creates a
 // 0-task shell, then drops into its operation page to add tasks.
 // ============================================================================
+// starter templates: selecting one creates a populated, editable DAG (client-side
+// spec -> the existing /api/dags/build). "blank" is the 0-task shell.
+const DAG_TEMPLATES = [
+  { key: "blank", name: "tpl_blank", desc: "tpl_blank_d", tasks: [] },
+  {
+    key: "etl", name: "tpl_etl", desc: "tpl_etl_d", tasks: [
+      { id: "extract", type: "shell", command: "echo extract {{ logical_date }} && sleep 1" },
+      { id: "transform", type: "shell", command: "echo transform && sleep 1", deps: ["extract"] },
+      { id: "load", type: "shell", command: "echo load run={{ run_id }} && sleep 1", deps: ["transform"] },
+    ],
+  },
+  {
+    key: "report", name: "tpl_report", desc: "tpl_report_d", schedule: "0 8 * * *", tasks: [
+      { id: "fetch", type: "shell", command: "echo fetch data for {{ logical_date }} && sleep 1" },
+      { id: "render", type: "shell", command: "echo render report && sleep 1", deps: ["fetch"] },
+    ],
+  },
+  {
+    key: "fanout", name: "tpl_fanout", desc: "tpl_fanout_d", tasks: [
+      { id: "start", type: "shell", command: "echo start && sleep 1" },
+      { id: "branch_a", type: "shell", command: "echo branch A && sleep 1", deps: ["start"] },
+      { id: "branch_b", type: "shell", command: "echo branch B && sleep 1", deps: ["start"] },
+      { id: "join", type: "shell", command: "echo join && sleep 1", deps: ["branch_a", "branch_b"] },
+    ],
+  },
+];
 function newDagModal() {
   const blank = () => parseScheduleState({ dag_id: "", schedule: "", start_date: "", catchup: false, max_active_runs: 1, default_retries: 0 });
-  api("/api/dags").then((list) => { ND = { existing: new Set(list.map((d) => d.dag_id)), dag: blank() }; renderNewDag(); })
-    .catch(() => { ND = { existing: new Set(), dag: blank() }; renderNewDag(); });
+  api("/api/dags").then((list) => { ND = { existing: new Set(list.map((d) => d.dag_id)), dag: blank(), template: "blank" }; renderNewDag(); })
+    .catch(() => { ND = { existing: new Set(), dag: blank(), template: "blank" }; renderNewDag(); });
 }
 function renderNewDag() {
   const opener = document.activeElement; // restore focus here on close
   $("modal-root").innerHTML = `<div class="overlay" id="ovl"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="nd-h2">
     <h2 id="nd-h2">${t("nd_title")}</h2>
     <div class="body">
-      <div class="b-field"><label>${t("f_dag_id")}</label><input id="nd-id" placeholder="my_workflow" value="${esc(ND.dag.dag_id)}"></div>
+      <div class="b-sec">${t("tpl_start")}</div>
+      <div class="tpl-cards">${DAG_TEMPLATES.map((tp) => `<div class="tpl-card ${ND.template === tp.key ? "on" : ""}" data-tpl="${tp.key}" role="button" tabindex="0" aria-pressed="${ND.template === tp.key}"><div class="tpl-name">${t(tp.name)}</div><div class="tpl-desc">${t(tp.desc)}</div>${tp.tasks.length ? `<div class="tpl-meta">${tp.tasks.length} ${t("tpl_tasks")}${tp.schedule ? " · cron" : ""}</div>` : ""}</div>`).join("")}</div>
+      <div class="b-field" style="margin-top:12px"><label>${t("f_dag_id")}</label><input id="nd-id" placeholder="my_workflow" value="${esc(ND.dag.dag_id)}"></div>
       <div class="nd-err" id="nd-err"></div>
       <div class="b-sec" style="margin-top:12px">${t("sched")}</div>
       <div id="nd-sched"></div>
@@ -910,6 +1064,12 @@ function renderNewDag() {
   document.addEventListener("keydown", onKey);
   $("nd-cancel").onclick = close;
   $("ovl").onclick = (e) => { if (e.target.id === "ovl") close(); };
+  main.ownerDocument.querySelectorAll("#modal-root .tpl-card").forEach((c) => c.onclick = () => {
+    ND.template = c.dataset.tpl;
+    const tp = DAG_TEMPLATES.find((x) => x.key === ND.template);
+    if (tp && tp.schedule) { ND.dag.schedule = tp.schedule; parseScheduleState(ND.dag); } // template may seed a schedule
+    renderNewDag(); // re-render to reflect selection + any seeded schedule
+  });
   const idEl = $("nd-id");
   idEl.oninput = () => { ND.dag.dag_id = idEl.value.trim(); updateNewDagValidity(); };
   idEl.focus();
@@ -928,8 +1088,10 @@ function updateNewDagValidity() {
 async function submitNewDag() {
   const btn = $("nd-create"); btn.disabled = true; $("nd-srv").textContent = "";
   computeSchedule(ND);
-  const spec = { dag_id: ND.dag.dag_id, schedule: ND.dag.schedule, start_date: ND.dag.start_date, catchup: false, max_active_runs: 1, default_retries: 0, trigger_after: [], tasks: [] };
-  try { await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }); $("modal-root").innerHTML = ""; showDag(ND.dag.dag_id); }
+  const tp = DAG_TEMPLATES.find((x) => x.key === ND.template) || DAG_TEMPLATES[0];
+  const tasks = (tp.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command, deps: tk.deps || [], pool: "default", priority: 0, timeout: 0, trigger_rule: "all_success", retries: null, retry_delay: null }));
+  const spec = { dag_id: ND.dag.dag_id, schedule: ND.dag.schedule, start_date: ND.dag.start_date, catchup: false, max_active_runs: 1, default_retries: 0, trigger_after: [], tasks };
+  try { await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }); if (tasks.length) coachDag = ND.dag.dag_id; $("modal-root").innerHTML = ""; showDag(ND.dag.dag_id); }
   catch (e) { $("nd-srv").textContent = e.message; btn.disabled = false; }
 }
 
