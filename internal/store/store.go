@@ -43,6 +43,8 @@ type Store interface {
 	GetDagRunByLogicalDate(ctx context.Context, dagID string, logicalDate time.Time) (*model.DagRun, error)
 	ListDagRuns(ctx context.Context, dagID string, limit int) ([]*model.DagRun, error)
 	ListDagRunsByState(ctx context.Context, state model.RunState) ([]*model.DagRun, error)
+	// RecentRuns returns the most recent runs across all live DAGs, newest first.
+	RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, error)
 	UpdateDagRunState(ctx context.Context, runID string, state model.RunState, startedAt, finishedAt *time.Time) error
 	CountActiveRuns(ctx context.Context, dagID string) (int, error)
 

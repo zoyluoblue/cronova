@@ -68,10 +68,18 @@ Principles:
   activated by **one delegated `keydown` on `document`** (Enter/Space → `.click()`,
   bound once at boot so it survives `innerHTML` re-renders). Keep `aria-checked`
   in sync at the toggle site.
-- **Sparkline honesty:** every real-state bar is the **same height** (color
-  carries the state); only no-run/skipped slots are short stubs. Do **not**
-  re-introduce decorative/pseudo-random height. Height-encoding real run
-  duration is the only legitimate upgrade (needs the overview payload to carry it).
+- **Sparkline honesty:** bars now **honestly encode real run duration** — height
+  ∝ `ms` (from the overview payload), scaled against a **dashboard-wide** max so
+  "taller = slower" reads consistently across DAG rows. No-run/skipped stay short
+  stubs; running/queued (no duration yet) get a neutral mid bar — **never** a
+  fabricated one. Color still carries state; the exact duration is in the bar's
+  title. Do **not** re-introduce decorative/pseudo-random height.
+- **Activity timeline honesty (`activityStrip`):** the dashboard's recent-run
+  strip places one state-colored tick per run at its **real** start time on a
+  shared axis (last ~24 runs across all live DAGs, from `/api/overview`). A tick
+  exists only where a run actually ran; hover shows dag·state·duration·time,
+  click opens the run. No fabricated cadence — regular ticks mean a regular
+  schedule.
 - **Empty states:** a truly empty instance gets a first-run hero with a CTA
   (`.empty-state`), distinct from the filtered "no matches" copy.
 - **Save indicator:** the `.savestate` pill (`saved`/`saving`/`invalid`/`error`)

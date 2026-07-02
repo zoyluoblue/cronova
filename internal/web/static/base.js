@@ -37,6 +37,7 @@ const DICT = {
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
+    act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -109,6 +110,7 @@ const DICT = {
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
+    act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -238,16 +240,26 @@ function confirmDialog(title, body, opts = {}) {
 function dur(a, b) { if (!a) return "—"; const ms = (b ? new Date(b) : new Date()) - new Date(a); if (ms < 0) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
 function badge(s) { const k = s || "none"; return `<span class="badge s-${k}"><span class="d"></span>${stateLabel(s)}</span>`; }
 function closeLog() { if (logES) { logES.close(); logES = null; } }
-function sparkline(states) {
-  const arr = (states || []).slice(-14); while (arr.length < 14) arr.unshift("noruns");
-  // Honest: every real-state bar is the same height (color carries the state);
-  // only no-run / skipped slots are short stubs. The old pseudo-random height
-  // (12 + i*5%11) fabricated a skyline unrelated to the runs. Height-encoding
-  // run duration is the upgrade once the overview payload carries it.
-  return `<div class="spark">${arr.map((s) => {
-    const k = s || "noruns", stub = k === "noruns" || k === "skipped";
-    const label = k === "noruns" ? stateLabel("none") : stateLabel(s);
-    return `<i class="${esc(k)}" style="height:${stub ? 6 : 16}px" title="${esc(label)}"></i>`;
+// compact duration label from a millisecond count (dashboard sparkline + activity)
+function fmtMs(ms) { if (!ms || ms < 0) return "—"; if (ms < 1000) return `${ms}ms`; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
+function sparkline(points, scaleMs) {
+  // points: [{state, ms}] oldest→newest (tolerates legacy [string]). Height now
+  // HONESTLY encodes real run duration for finished runs (taller = longer). We
+  // scale against a DASHBOARD-WIDE max (scaleMs, passed by renderDags) so "taller
+  // = slower" reads consistently across DAGs; no-run/skipped stay short stubs and
+  // running/queued (no duration yet) get a neutral mid bar — never a fabricated one.
+  const arr = (points || []).slice(-14).map((p) => (typeof p === "string" ? { state: p, ms: 0 } : p));
+  while (arr.length < 14) arr.unshift({ state: "noruns", ms: 0 });
+  const maxMs = Math.max(1, scaleMs || 0, ...arr.map((p) => p.ms || 0));
+  const LO = 6, HI = 22;
+  return `<div class="spark">${arr.map((p) => {
+    const k = p.state || "noruns", stub = k === "noruns" || k === "skipped";
+    let h;
+    if (stub) h = LO;
+    else if (p.ms > 0) h = Math.round(LO + (p.ms / maxMs) * (HI - LO)); // duration-scaled
+    else h = 15; // running/queued: active, duration unknown — neutral, not fabricated
+    const label = k === "noruns" ? stateLabel("none") : (p.ms > 0 ? `${stateLabel(k)} · ${fmtMs(p.ms)}` : stateLabel(k));
+    return `<i class="${esc(k)}" style="height:${h}px" title="${esc(label)}"></i>`;
   }).join("")}</div>`;
 }
 

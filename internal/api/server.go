@@ -431,15 +431,21 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	running, _ := s.store.ListDagRunsByState(ctx, model.RunRunning)
 
+	// sparkPoint: one recent run in the per-DAG sparkline; ms is real run
+	// duration (0 when not finished), so the bar can honestly encode height.
+	type sparkPoint struct {
+		State string `json:"state"`
+		MS    int64  `json:"ms"`
+	}
 	type dagRow struct {
-		DagID        string   `json:"dag_id"`
-		Type         string   `json:"type"`
-		Description  string   `json:"description"`
-		Paused       bool     `json:"paused"`
-		Pool         string   `json:"pool"`
-		LatestState  string   `json:"latest_state"`
-		Sparkline    []string `json:"sparkline"`
-		NextSchedule string   `json:"next_schedule"`
+		DagID        string       `json:"dag_id"`
+		Type         string       `json:"type"`
+		Description  string       `json:"description"`
+		Paused       bool         `json:"paused"`
+		Pool         string       `json:"pool"`
+		LatestState  string       `json:"latest_state"`
+		Sparkline    []sparkPoint `json:"sparkline"`
+		NextSchedule string       `json:"next_schedule"`
 	}
 	rows := make([]dagRow, 0, len(dags))
 	active, failedDags, success, terminal := 0, 0, 0, 0
@@ -449,10 +455,17 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			active++
 		}
 		runs, _ := s.store.ListDagRuns(ctx, d.DagID, 14) // newest first
-		spark := make([]string, 0, len(runs))
+		spark := make([]sparkPoint, 0, len(runs))
 		for i := len(runs) - 1; i >= 0; i-- { // oldest -> newest for the bar chart
-			spark = append(spark, string(runs[i].State))
-			switch runs[i].State {
+			rr := runs[i]
+			var ms int64
+			if rr.StartedAt != nil && rr.FinishedAt != nil {
+				if d := rr.FinishedAt.Sub(*rr.StartedAt).Milliseconds(); d > 0 {
+					ms = d
+				}
+			}
+			spark = append(spark, sparkPoint{State: string(rr.State), MS: ms})
+			switch rr.State {
 			case model.RunSuccess:
 				success++
 				terminal++
@@ -505,6 +518,34 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	if terminal > 0 {
 		rate = float64(success) / float64(terminal) * 100
 	}
+
+	// global recent-run timeline (across all live DAGs), newest first
+	type activityItem struct {
+		DagID    string `json:"dag_id"`
+		RunID    string `json:"run_id"`
+		State    string `json:"state"`
+		Started  string `json:"started,omitempty"`
+		Finished string `json:"finished,omitempty"`
+		MS       int64  `json:"ms"`
+	}
+	recent, _ := s.store.RecentRuns(ctx, 24)
+	activity := make([]activityItem, 0, len(recent))
+	for _, rr := range recent {
+		it := activityItem{DagID: rr.DagID, RunID: rr.RunID, State: string(rr.State)}
+		if rr.StartedAt != nil {
+			it.Started = rr.StartedAt.UTC().Format(time.RFC3339)
+		}
+		if rr.FinishedAt != nil {
+			it.Finished = rr.FinishedAt.UTC().Format(time.RFC3339)
+		}
+		if rr.StartedAt != nil && rr.FinishedAt != nil {
+			if d := rr.FinishedAt.Sub(*rr.StartedAt).Milliseconds(); d > 0 {
+				it.MS = d
+			}
+		}
+		activity = append(activity, it)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stats": map[string]any{
 			"active_dags":  active,
@@ -513,7 +554,8 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			"success_rate": rate,
 			"failed":       failedDags,
 		},
-		"dags": rows,
+		"dags":     rows,
+		"activity": activity,
 	})
 }
 

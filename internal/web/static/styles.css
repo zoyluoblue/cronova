@@ -172,6 +172,20 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .spark i.running { background: var(--run); } .spark i.queued, .spark i.scheduled, .spark i.up_for_retry { background: var(--warn); }
 .spark i.upstream_failed { background: var(--upstream); } .spark i.skipped, .spark i.noruns { background: color-mix(in srgb, var(--skip) 30%, transparent); }
 
+/* ---- dashboard activity timeline ---- */
+.act-strip { position: relative; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); padding: 12px 14px 8px; margin-bottom: 16px; }
+.act-strip.act-empty { color: var(--faint); font-size: 12.5px; padding: 13px 14px; }
+.act-track { position: relative; height: 30px; }
+.act-tick { position: absolute; top: 2px; bottom: 2px; width: 3px; margin-left: -1px; border-radius: 2px; cursor: pointer; opacity: .82; transition: opacity var(--dur) var(--ease), width var(--dur) var(--ease); }
+/* transparent hit area so a thin tick (esp. in a dense cluster) stays easy to hit */
+.act-tick::before { content: ""; position: absolute; inset: -3px -4px; }
+.act-tick:hover { opacity: 1; width: 5px; }
+.act-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 7px; }
+.act-tick.a-success { background: var(--ok); }
+.act-tick.a-failed { background: var(--fail); }
+.act-tick.a-running { background: var(--run); }
+.act-tick.a-queued, .act-tick.a-scheduled { background: var(--warn); }
+
 /* ---- detail / cards row ---- */
 .crumb-bar { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 .crumb-bar a:hover { text-decoration: underline; }

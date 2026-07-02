@@ -348,6 +348,38 @@ func (s *Store) ListDagRunsByState(ctx context.Context, state model.RunState) ([
 	return out, rows.Err()
 }
 
+// RecentRuns returns the most recent runs across all live (non-soft-deleted)
+// DAGs, newest first, ordered by when they actually ran (started_at, falling
+// back to logical_date). Powers the dashboard activity timeline.
+func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	// order by parsed epoch, not raw text: our RFC3339Nano timestamps trim
+	// trailing fractional zeros, so a whole-second value ("…05Z") and a
+	// sub-second one ("…05.3Z") don't compare lexicographically — strftime('%s')
+	// normalizes both to a numeric instant so same-second runs sort correctly.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at
+		 FROM dag_runs r JOIN dags d ON r.dag_id=d.dag_id
+		 WHERE d.deleted_at IS NULL
+		 ORDER BY COALESCE(CAST(strftime('%s', r.started_at) AS INTEGER), CAST(strftime('%s', r.logical_date) AS INTEGER)) DESC,
+		          r.started_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.DagRun
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateDagRunState(ctx context.Context, runID string, state model.RunState, startedAt, finishedAt *time.Time) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE dag_runs SET state=?, started_at=?, finished_at=? WHERE run_id=?`,

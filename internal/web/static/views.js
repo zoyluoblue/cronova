@@ -17,6 +17,8 @@ function renderDags() {
     $("es-new").onclick = () => newDagModal();
     return;
   }
+  // dashboard-wide longest run → sparkline bars scale consistently across DAGs
+  const sparkScaleMs = Math.max(1, ...dags.flatMap((d) => (d.sparkline || []).map((p) => (p && p.ms) || 0)));
   const list = dags.filter((d) => {
     if (query && !d.dag_id.toLowerCase().includes(query)) return false;
     if (filter === "running") return d.latest_state === "running";
@@ -33,9 +35,11 @@ function renderDags() {
       <div class="card"><div class="k"><span class="d" style="background:var(--run)"></span>${t("c_running")}</div><div class="v">${stats.running_runs}</div><div class="s">${t("c_running_s")}</div></div>
       <div class="card"><div class="k"><span class="d" style="background:var(--ok)"></span>${t("c_rate")}</div><div class="v">${stats.success_rate.toFixed(1)}%</div><div class="s">${t("c_rate_s")}</div></div>
       <div class="card${stats.failed ? " clickable" : ""}" ${stats.failed ? `data-card="failed" role="button" tabindex="0" aria-label="${t("c_failed")}"` : ""}><div class="k"><span class="d" style="background:var(--fail)"></span>${t("c_failed")}</div><div class="v">${stats.failed}</div><div class="s">${t("c_failed_s")}</div></div></div>
+    ${activityStrip(overviewCache.activity)}
     ${gettingStartedHtml(dags)}
     <table class="tbl"><thead><tr><th style="width:42px"></th><th>${t("h_dag")}</th><th>${t("h_last")}</th><th>${t("h_spark")}</th><th>${t("h_pool")}</th><th>${t("h_next")}</th><th style="width:80px">${t("h_act")}</th></tr></thead>
-    <tbody>${list.map(rowHtml).join("") || `<tr><td colspan="7"><div class="empty">${t("no_match")}</div></td></tr>`}</tbody></table>`;
+    <tbody>${list.map((d) => rowHtml(d, sparkScaleMs)).join("") || `<tr><td colspan="7"><div class="empty">${t("no_match")}</div></td></tr>`}</tbody></table>`;
+  main.querySelectorAll(".act-tick[data-run]").forEach((x) => x.onclick = () => showRun(x.dataset.run));
   main.querySelectorAll(".pill[data-f]").forEach((b) => b.onclick = () => { filter = b.dataset.f; renderDags(); });
   const fc = main.querySelector('[data-card="failed"]'); if (fc) fc.onclick = () => { filter = "failed"; renderDags(); }; // dead number -> one-click triage
   const gx = $("gs-x"); if (gx) gx.onclick = () => { localStorage.setItem("cnv_gs_done", "1"); $("gs-box").remove(); };
@@ -49,7 +53,8 @@ function gettingStartedHtml(dags) {
   if (localStorage.getItem("cnv_gs_done")) return "";
   const hasDag = dags.length > 0;
   const hasRun = dags.some((x) => (x.sparkline || []).length > 0);
-  const hasOk = dags.some((x) => (x.sparkline || []).includes("success") || x.latest_state === "success");
+  const sState = (p) => (typeof p === "string" ? p : p && p.state); // sparkline is now [{state,ms}]
+  const hasOk = dags.some((x) => (x.sparkline || []).some((p) => sState(p) === "success") || x.latest_state === "success");
   if (hasDag && hasRun && hasOk) { localStorage.setItem("cnv_gs_done", "1"); return ""; }
   const step = (done, label) => `<span class="gs-step ${done ? "done" : ""}"><span class="gs-ic">${done ? "✓" : "○"}</span>${label}</span>`;
   return `<div class="gs-box" id="gs-box">
@@ -58,11 +63,37 @@ function gettingStartedHtml(dags) {
     <button class="icon" id="gs-x" aria-label="${t("cancel_word")}">✕</button></div>`;
 }
 
-function rowHtml(d) {
+// global recent-run timeline: the last ~24 runs across all live DAGs, drawn as
+// state-colored ticks positioned by their REAL start time on a shared axis.
+// Honest — a tick only where a run actually ran; hover = detail, click = open run.
+function activityStrip(activity) {
+  const items = (activity || []).filter((a) => a.started || a.finished);
+  if (!items.length) return `<div class="act-strip act-empty">${t("act_none")}</div>`;
+  const ms = (x) => (x ? new Date(x).getTime() : null);
+  const times = items.flatMap((a) => [ms(a.started), ms(a.finished)]).filter(Boolean);
+  const t0 = Math.min(...times), t1 = Math.max(Math.max(...times), Date.now());
+  const span = Math.max(1000, t1 - t0);
+  // time-sort ascending, then nudge apart so a burst of near-simultaneous runs
+  // stays individually hoverable/clickable instead of stacking into one pixel
+  // (honest for the common case: natural gaps exceed MINGAP and aren't touched).
+  const MINGAP = 1.4; // percent
+  const placed = items.map((a) => ({ a, s: ms(a.started) || ms(a.finished) })).sort((x, y) => x.s - y.s);
+  let prev = -Infinity;
+  placed.forEach((o) => { let l = (o.s - t0) / span * 100; if (l < prev + MINGAP) l = prev + MINGAP; o.left = Math.min(100, l); prev = o.left; });
+  const ticks = placed.map(({ a, left }) => {
+    const title = `${a.dag_id} · ${stateLabel(a.state)}${a.ms ? ` · ${fmtMs(a.ms)}` : ""} · ${fmt(a.started || a.finished)}`;
+    return `<span class="act-tick a-${esc(a.state)}" style="left:${left.toFixed(2)}%" data-run="${esc(a.run_id)}" role="button" tabindex="0" title="${esc(title)}" aria-label="${esc(title)}"></span>`;
+  }).join("");
+  return `<div class="section-h" style="margin:6px 0 8px">${t("act_recent")}</div>
+    <div class="act-strip"><div class="act-track">${ticks}</div>
+    <div class="act-axis"><span>${esc(fmt(new Date(t0).toISOString()))}</span><span>${t("act_now")}</span></div></div>`;
+}
+
+function rowHtml(d, scaleMs) {
   return `<tr class="row" data-id="${esc(d.dag_id)}">
     <td><div class="toggle no-nav ${d.paused ? "" : "on"}" role="switch" tabindex="0" aria-checked="${!d.paused}" aria-label="${esc(d.dag_id)} — ${t(d.paused ? "btn_resume" : "btn_pause")}" data-id="${esc(d.dag_id)}" data-paused="${d.paused}"></div></td>
     <td><div class="dag-name" role="button" tabindex="0" aria-label="${esc(d.dag_id)}">${esc(d.dag_id)} <span class="tag">${typeLabel(d.type)}</span></div><div class="dag-desc">${esc(descLabel(d.description))}</div></td>
-    <td>${badge(d.latest_state)}</td><td>${sparkline(d.sparkline)}</td>
+    <td>${badge(d.latest_state)}</td><td>${sparkline(d.sparkline, scaleMs)}</td>
     <td class="mono muted">${esc(d.pool)}</td><td class="mono muted">${esc(nextLabel(d.next_schedule))}</td>
     <td><button class="icon play no-nav" data-id="${esc(d.dag_id)}" title="${t("trigger")}">▶</button></td></tr>`;
 }
