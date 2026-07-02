@@ -420,11 +420,15 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .dh-stat .v { font-size: 13px; display: flex; align-items: center; gap: 7px; }
 .tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .dag-tabs { margin: 4px 0 14px; }
-.tab-n { font-family: var(--mono); font-size: 10.5px; opacity: .75; }
+.tab-n { font-family: var(--mono); font-size: 10.5px; } /* muted color already de-emphasizes; opacity would drop below AA */
 /* settings rows: quiet one-line summaries; the form exists only while editing */
-.set-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); overflow: hidden; }
+/* NOT overflow:hidden — the schedule row's cron-help popover (position:absolute)
+   must escape the list. Corner rounding is applied to the edge rows instead. */
+.set-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); }
 .set-row { border-bottom: 1px solid var(--line); }
 .set-row:last-child { border-bottom: 0; }
+.set-row:first-child, .set-row:first-child .set-head { border-top-left-radius: var(--r); border-top-right-radius: var(--r); }
+.set-row:last-child, .set-row:last-child .set-head { border-bottom-left-radius: var(--r); border-bottom-right-radius: var(--r); }
 .set-head { display: flex; align-items: center; gap: 12px; padding: 13px 16px; }
 .set-row:not(.editing) .set-head { cursor: pointer; }
 .set-row:not(.editing) .set-head:hover { background: var(--panel-2); }

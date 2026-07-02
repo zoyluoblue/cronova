@@ -146,9 +146,11 @@ function wireSchedBody() {
   const { state, idp, onChange } = SCHED, d = state.dag;
   const body = $(idp + "-schedbody");
   const fire = () => { if (onChange) onChange(); };
-  const ev = $(idp + "-ev"); if (ev) { ev.oninput = () => { d.schedEvery = +ev.value || 0; computeSchedule(state); schedPreviewSoon(); }; ev.onblur = fire; }
+  // save on input (debounced by saveDag) so a button-click close never strands an
+  // unsaved schedule edit; fire() is a no-op where onChange is null (new-DAG modal).
+  const ev = $(idp + "-ev"); if (ev) { ev.oninput = () => { d.schedEvery = +ev.value || 0; computeSchedule(state); schedPreviewSoon(); fire(); }; }
   const eu = $(idp + "-eu"); if (eu) eu.onchange = () => { d.schedUnit = eu.value; computeSchedule(state); schedPreviewSoon(); fire(); };
-  const cron = $(idp + "-cron"); if (cron) { cron.oninput = () => { d.schedCron = cron.value; computeSchedule(state); schedPreviewSoon(); }; cron.onblur = fire; }
+  const cron = $(idp + "-cron"); if (cron) { cron.oninput = () => { d.schedCron = cron.value; computeSchedule(state); schedPreviewSoon(); fire(); }; }
   body.querySelectorAll(".chip.cronp").forEach((c) => c.onclick = () => { d.schedCron = c.dataset.cron; computeSchedule(state); renderSchedBody(); fire(); });
   const hb = $(idp + "-cronhelp"); if (hb) hb.onclick = () => { const p = $(idp + "-cronpop"); if (p) p.hidden = !p.hidden; };
   const hc = $(idp + "-cronclose"); if (hc) hc.onclick = () => { const p = $(idp + "-cronpop"); if (p) p.hidden = true; };
@@ -217,7 +219,13 @@ function renderNewDag() {
     <div class="body">${ND.yamlMode ? yamlBody : formBody}</div>
     <div class="foot"><span class="err" id="nd-srv"></span><button id="nd-cancel">${t("nd_cancel")}</button><button class="primary" id="nd-create">${ND.yamlMode ? t("nd_import") : t("nd_create")}</button></div>
   </div></div>`;
-  const close = () => { document.removeEventListener("keydown", onKey); $("modal-root").innerHTML = ""; if (opener && opener.focus) opener.focus(); };
+  const close = () => {
+    document.removeEventListener("keydown", onKey); $("modal-root").innerHTML = "";
+    if (opener && opener.focus) opener.focus();
+    // the modal's advanced fold rebinds the global SCHED to ND; if a DAG settings
+    // schedule row is open underneath, re-render it to restore SCHED → D.
+    if (view === "dag" && D && D.editKey === "sched") renderDagTab();
+  };
   // Escape closes the cron-help popover first (if open), else the modal. Enter
   // submits when the create button is enabled (not while typing in a textarea).
   const onKey = (e) => {
@@ -242,8 +250,12 @@ function renderNewDag() {
   main.ownerDocument.querySelectorAll("#modal-root .tpl-card").forEach((c) => c.onclick = () => {
     ND.template = c.dataset.tpl;
     const tp = DAG_TEMPLATES.find((x) => x.key === ND.template);
-    if (tp && tp.schedule) { ND.dag.schedule = tp.schedule; parseScheduleState(ND.dag); } // template may seed a schedule
-    renderNewDag(); // re-render to reflect selection + any seeded schedule
+    // reset the schedule to THIS template's (empty for schedule-less ones) — else a
+    // previously-explored template's cron sticks invisibly behind the collapsed fold.
+    ND.dag.schedule = tp && tp.schedule ? tp.schedule : "";
+    if (tp && tp.schedule) ND.advanced = true; // a seeded schedule must stay visible/correctable
+    parseScheduleState(ND.dag);
+    renderNewDag();
   });
   $("nd-adv").onclick = () => { ND.advanced = !ND.advanced; renderNewDag(); };
   const yl = $("nd-toyaml"); if (yl) yl.onclick = () => { ND.yamlMode = true; renderNewDag(); };

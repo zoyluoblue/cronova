@@ -427,7 +427,13 @@ function attachPanZoom(wrap, store) {
 // ---- sidebar/topbar ----
 // ---- hash routing: every drill-down is linkable and refresh-safe ----
 let suppressHash = false;
-function setHash(h) { if (location.hash === h) return; suppressHash = true; location.hash = h; }
+// replace=true rewrites the current entry (no new history entry, no hashchange) —
+// use it for in-page normalization (e.g. tab canonicalization) so Back isn't trapped.
+function setHash(h, replace) {
+  if (location.hash === h) return;
+  if (replace) { history.replaceState(null, "", h); return; }
+  suppressHash = true; location.hash = h;
+}
 function applyRoute() {
   const seg = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent).filter(Boolean);
   if (!seg.length || seg[0] === "dags") return loadDags();

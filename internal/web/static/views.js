@@ -140,7 +140,9 @@ async function showDag(id, tab) {
 function setDagHash() {
   if (!D) return;
   const base = "#/dag/" + encodeURIComponent(D.dag.dag_id);
-  setHash(D.tab === "runs" ? base : base + "/" + D.tab);
+  // replace, not push: tabs are in-page state, not navigation — Back should leave
+  // the DAG page in one press, not cycle through canonicalized tab entries.
+  setHash(D.tab === "runs" ? base : base + "/" + D.tab, true);
 }
 // re-render the operation page from the in-memory D (no refetch) — used when
 // returning from the task page so unsaved/just-saved edits are never clobbered.
@@ -174,7 +176,7 @@ function renderDagPage() {
       <div class="dh-top">
         <h1 class="mono">${esc(d.dag_id)}</h1>
         <span class="tag">${typeLabel(typ)}</span>
-        ${d.paused ? `<span class="tag warn">${t("btn_pause")}</span>` : ""}
+        ${d.paused ? `<span class="tag warn">${t("f_paused")}</span>` : ""}
         <span class="savestate ss-saved" id="d-save"></span>
         <div class="dh-actions">
           <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
@@ -193,7 +195,7 @@ function renderDagPage() {
     </div>
     ${coachDag === d.dag_id ? `<div class="coach-ribbon" id="coach"><span>✦ ${t("coach_tpl_ready")}</span><button class="primary" id="coach-run">${t("btn_trigger")}</button><button class="icon" id="coach-x" aria-label="${t("cancel_word")}">✕</button></div>` : ""}
     <div class="run-tabs dag-tabs" id="dag-tabs">
-      ${["runs", "structure", "settings"].map((k) => `<button class="pill ${D.tab === k ? "active" : ""}" data-dt="${k}">${t("tab_" + k)}${k === "structure" ? ` <span class="tab-n">${D.tasks.length}</span>` : ""}</button>`).join("")}
+      ${["runs", "structure", "settings"].map((k) => `<button class="pill ${D.tab === k ? "active" : ""}"${D.tab === k ? ' aria-current="true"' : ""} data-dt="${k}">${t("tab_" + k)}${k === "structure" ? ` <span class="tab-n">${D.tasks.length}</span>` : ""}</button>`).join("")}
     </div>
     <div class="b-errors" id="dag-errors"></div>
     <div id="dag-tab-body"></div>`;
@@ -208,6 +210,7 @@ function renderDagPage() {
   $("dag-tabs").querySelectorAll("[data-dt]").forEach((b) => b.onclick = () => {
     if (D.tab === b.dataset.dt) return;
     D.tab = b.dataset.dt; D.editKey = null; setDagHash(); renderDagPage();
+    const active = $("dag-tabs") && $("dag-tabs").querySelector(".pill.active"); if (active) active.focus(); // keep keyboard place
   });
   renderDagTab();
   reflectSaveState();
@@ -225,24 +228,28 @@ function renderDagTab() {
 function settingsTabHtml() {
   const d = D.dag;
   const others = [...new Set([...D.allDags.filter((x) => x !== d.dag_id), ...d.trigger_after])];
-  const row = (key, label, summary, editor, hint) => {
+  // summaryText: plain-text value folded into the collapsed row's accessible name
+  // (aria-label on role=button overrides the child summary, so SR users would
+  // otherwise hear only "Schedule — Edit" with no value).
+  const row = (key, label, summary, summaryText, editor, hint) => {
     const open = D.editKey === key;
     return `<div class="set-row ${open ? "editing" : ""}" data-set="${key}">
-      <div class="set-head" ${open ? "" : `role="button" tabindex="0" aria-label="${esc(label)} — ${t("set_edit")}"`}>
+      <div class="set-head" ${open ? "" : `role="button" tabindex="0" aria-label="${esc(label)}: ${esc(summaryText)} — ${t("set_edit")}"`}>
         <span class="set-k">${esc(label)}</span>
         ${open ? `<button class="icon set-close" data-close="${key}">${t("set_done")}</button>` : `<span class="set-v">${summary}</span><span class="set-pen" aria-hidden="true">✎</span>`}
       </div>
       ${open ? `<div class="set-body">${hint ? `<div class="field-hint" style="margin-bottom:8px">${esc(hint)}</div>` : ""}${editor}</div>` : ""}</div>`;
   };
+  const depsText = d.trigger_after.length ? d.trigger_after.join(", ") : t("set_none");
   const depsSummary = d.trigger_after.length ? d.trigger_after.map((x) => `<span class="mono">${esc(x)}</span>`).join(", ") : `<span class="muted">${t("set_none")}</span>`;
   const depsEditor = others.length
     ? `<div class="b-deps">${others.map((x) => `<span class="chip ta ${d.trigger_after.includes(x) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${d.trigger_after.includes(x)}" data-ta="${esc(x)}">${esc(x)}</span>`).join("")}</div>`
     : `<div class="muted">${t("set_no_deps_avail")}</div>`;
   return `<div class="set-list">
-    ${row("sched", t("set_sched"), esc(schedSummary(d)), `<div id="d-sched"></div>`)}
-    ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
-    ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
-    ${row("deps", t("set_deps"), depsSummary, depsEditor, t("set_deps_hint"))}
+    ${row("sched", t("set_sched"), esc(schedSummary(d)), schedSummary(d), `<div id="d-sched"></div>`)}
+    ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, String(d.max_active_runs), `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
+    ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, String(d.default_retries), `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
+    ${row("deps", t("set_deps"), depsSummary, depsText, depsEditor, t("set_deps_hint"))}
   </div>
   <div class="danger-zone">
     <div class="dz-t">${t("danger_title")}</div>
@@ -255,15 +262,23 @@ function wireSettingsTab() {
   body.querySelectorAll(".set-row:not(.editing) .set-head").forEach((h) => h.onclick = () => {
     D.editKey = h.parentElement.dataset.set;
     renderDagTab();
-    // focus the first control in the freshly opened editor
-    const first = body.querySelector(".set-row.editing input, .set-row.editing .pill, .set-row.editing .chip");
+    // focus the first control in the freshly opened editor, else the Done button
+    const b2 = $("dag-tab-body");
+    const first = b2.querySelector(".set-row.editing input, .set-row.editing .pill, .set-row.editing .chip") || b2.querySelector(".set-close");
     if (first) first.focus();
   });
-  // full re-render on close: the hero's schedule stat may have just changed
-  body.querySelectorAll(".set-close").forEach((b) => b.onclick = (e) => { e.stopPropagation(); D.editKey = null; renderDagPage(); });
+  // full re-render on close (hero facts may have changed), then return focus to
+  // the collapsed row's head so keyboard users don't get dumped to <body>.
+  body.querySelectorAll(".set-close").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation(); const key = b.dataset.close; D.editKey = null; renderDagPage();
+    const head = main.querySelector(`.set-row[data-set="${key}"] .set-head`); if (head) head.focus();
+  });
   if (D.editKey === "sched") { SCHED = { state: D, idp: "d", host: "d-sched", onChange: saveDag }; renderSchedUI(); }
-  const max = $("d-max"); if (max) { max.oninput = () => { d.max_active_runs = +max.value || 1; }; max.onblur = () => saveDag(); }
-  const defr = $("d-defr"); if (defr) { defr.oninput = () => { d.default_retries = +defr.value || 0; }; defr.onblur = () => saveDag(); }
+  // immediate-save on input (matches the rest of the model) — never leave an
+  // unsaved mutation that a button-click close could strand while the pill reads
+  // "saved" (blur doesn't fire when a <button> is clicked in some browsers).
+  const max = $("d-max"); if (max) max.oninput = () => { d.max_active_runs = +max.value || 1; saveDag(); };
+  const defr = $("d-defr"); if (defr) defr.oninput = () => { d.default_retries = +defr.value || 0; saveDag(); };
   body.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
   const del = $("del"); if (del) del.onclick = deleteActiveDag;
 }
@@ -349,7 +364,9 @@ async function triggerActiveDag() {
 }
 async function refreshDagRuns() {
   if (view !== "dag" || !D) return;
-  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25`)) || []; renderDagRuns(); } catch (_) {}
+  // re-render the whole page so the hero facts (last run, success rate) refresh
+  // alongside the runs table — unless a settings row is open (don't clobber the edit).
+  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25`)) || []; if (D.editKey) renderDagRuns(); else renderDagPage(); } catch (_) {}
 }
 function renderDagRuns() {
   const el = $("d-runs"); if (!el) return;
