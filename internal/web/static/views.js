@@ -284,9 +284,15 @@ function dagTaskTableHtml() {
       <td class="muted">${esc((tk.deps || []).join(", ") || "—")}</td>
       <td><button class="icon no-nav" data-dup="${esc(tk.id)}" title="${t("btn_duplicate")}">⧉</button><button class="icon rm no-nav" data-del="${esc(tk.id)}" title="${t("b_remove")}">✕</button></td></tr>`).join("")}</tbody></table>`;
 }
+// per-DAG pan/zoom view, kept OUT of the serialized DAG model so it survives the
+// immediate-save re-render (click-to-connect rebuilds #d-graph) without leaking
+// into the API payload. Cleared per DAG-id, so switching DAGs starts fresh.
+const graphViews = {};
 function wireDagStructure() {
   const add = $("d-addtask"); if (add) add.onclick = addTask;
   document.querySelectorAll("#d-graph [data-node]").forEach((n) => n.onclick = () => onDagGraphNodeClick(n.dataset.node));
+  const dgid = D.dag.dag_id;
+  attachPanZoom(document.querySelector("#d-graph .graph-wrap"), graphViews[dgid] || (graphViews[dgid] = {}));
   const sct = $("d-structure");
   sct.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showTask(D.dag.dag_id, tr.dataset.task); });
   sct.querySelectorAll("[data-del]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); deleteTask(b.dataset.del); });
@@ -612,6 +618,7 @@ async function showRun(runID) {
     </div>
     <div id="run-body"></div>
     <div id="logwrap"></div>`;
+  attachPanZoom(main.querySelector("#run-graph .graph-wrap"));
   $("back").onclick = () => showDag(r.dag_id);
   $("run-tabs").querySelectorAll("[data-rt]").forEach((b) => b.onclick = () => {
     runTab = b.dataset.rt;
@@ -763,4 +770,5 @@ async function showGraph() {
   main.querySelectorAll("#dag-graph [data-node]").forEach((n) => {
     if (known.has(n.dataset.node)) n.onclick = () => showDag(n.dataset.node);
   });
+  attachPanZoom(main.querySelector("#dag-graph .graph-wrap"));
 }

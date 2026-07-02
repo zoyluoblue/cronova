@@ -88,6 +88,17 @@ Principles:
   safe precisely because the page is read-only (no save pipeline to race). This
   is the one sanctioned exception to whole-app re-render; it does not generalize
   to the editable pages.
+- **Graph pan/zoom (`attachPanZoom`):** every `renderGraph` surface (editable
+  builder, global dependency, live run) is pannable/zoomable via a CSS transform
+  on the inner `<svg>` (vectors stay crisp; node click handlers and live rect-fill
+  patching are untouched). Drag to pan; **Ctrl/⌘ + wheel** to zoom (plain wheel is
+  never trapped — the page scrolls); `+ / ⤢ / −` chrome reveals on hover/focus. A
+  graph larger than its box **auto-fits on attach** (replacing the old
+  `overflow:auto` scroll); one that fits keeps the identity transform (natural,
+  top-left). The transform is instant (no motion to reduce). The editable graph is
+  rebuilt on every dependency edit, so its view is persisted in a per-DAG-id store
+  (`graphViews`, kept out of the serialized model) and reseeded — otherwise
+  click-to-connect would reset the pan on every click.
 - **Gantt honesty:** the Timeline tab positions one bar per task from its real
   `started_at`/`finished_at`; the empty track between bars is genuine waiting
   (queued time isn't stored — we do **not** draw a fabricated queued segment).

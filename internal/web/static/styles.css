@@ -182,9 +182,18 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .kv .card .v { font-size: 15px; }
 
 /* ---- graph ---- */
-.graph-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 10px; overflow: auto; }
+/* touch-action: pan-y lets a touch drag scroll the page vertically (mouse/trackpad
+   drag-pan is unaffected — touch-action ignores non-touch pointers) */
+.graph-wrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; cursor: grab; touch-action: pan-y; }
+.graph-wrap.panning { cursor: grabbing; }
+.graph-svg { transform-origin: 0 0; will-change: transform; display: block; }
 .graph-node text { font: 12px var(--mono); fill: var(--text); }
 .graph-edge { fill: none; stroke: var(--line-2); stroke-width: 1.4; }
+/* zoom chrome — reveals on hover/focus, so the resting canvas stays clean */
+.graph-zoom { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; opacity: 0; transition: opacity var(--dur) var(--ease); }
+.graph-wrap:hover .graph-zoom, .graph-zoom:focus-within { opacity: 1; }
+.gz { width: 27px; height: 27px; padding: 0; display: grid; place-items: center; font-size: 15px; line-height: 1; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); border-radius: var(--r-sm); }
+.gz:hover { color: var(--text); border-color: var(--line-2); }
 
 /* ---- log ---- */
 .logbox { background: #06070a; border: 1px solid var(--line); border-radius: var(--r); padding: 13px 15px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 54vh; overflow: auto; color: #cdd6e3; }

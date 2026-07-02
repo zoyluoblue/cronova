@@ -36,6 +36,7 @@ const DICT = {
     back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
+    gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -107,6 +108,7 @@ const DICT = {
     back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
+    gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -289,7 +291,102 @@ function renderGraph(tasks, stateByTask, opts) {
     // fill/stroke via inline style (SVG presentation attributes don't resolve color-mix reliably)
     nodes += `<g class="${cls}"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text></g>`;
   });
-  return `<div class="graph-wrap"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg></div>`;
+  // compact height for small graphs; capped so a big graph pans/zooms instead of
+  // dominating the page. attachPanZoom() wires drag-pan + ctrl/⌘-wheel zoom.
+  const wrapH = Math.min(H + 24, 460);
+  const zoom = `<div class="graph-zoom" aria-hidden="false">
+    <button class="gz" data-z="in" aria-label="${t("gz_in")}" title="${t("gz_in")}">+</button>
+    <button class="gz" data-z="fit" aria-label="${t("gz_fit")}" title="${esc(t("gz_hint"))}">⤢</button>
+    <button class="gz" data-z="out" aria-label="${t("gz_out")}" title="${t("gz_out")}">−</button></div>`;
+  return `<div class="graph-wrap" style="height:${wrapH}px" title="${esc(t("gz_hint"))}"><svg class="graph-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg>${zoom}</div>`;
+}
+// Pan/zoom controller for a .graph-wrap. Operates via a CSS transform on the
+// inner <svg> (vectors stay crisp; node click handlers + live rect-fill patching
+// are untouched). Idempotent per element. Never traps plain page scroll — wheel
+// zoom requires Ctrl/⌘. A drag past a small threshold suppresses the trailing
+// click, so panning over a node doesn't activate it.
+//   store: optional {s,tx,ty} holder that survives the element (e.g. the editable
+//   graph is destroyed + rebuilt on every dependency edit). When it carries a
+//   saved view we reseed from it; otherwise a graph larger than its box auto-fits
+//   on attach (the old overflow:auto used to expose oversized graphs via scroll).
+function attachPanZoom(wrap, store) {
+  if (!wrap || wrap.dataset.pz) return; wrap.dataset.pz = "1";
+  const svg = wrap.querySelector("svg"); if (!svg) return;
+  const cw = svg.viewBox.baseVal.width, ch = svg.viewBox.baseVal.height; // content bounds
+  const MIN = 0.25, MAX = 4;
+  const seeded = store && store.s != null;
+  let s = seeded ? store.s : 1, tx = seeded ? store.tx : 0, ty = seeded ? store.ty : 0;
+  // viewport size, robust to a transient 0 (pre-layout / offscreen reflow)
+  const vpW = () => wrap.clientWidth || wrap.getBoundingClientRect().width || 0;
+  const vpH = () => wrap.clientHeight || wrap.getBoundingClientRect().height || 0;
+  const apply = () => {
+    svg.style.transform = `translate(${tx.toFixed(2)}px,${ty.toFixed(2)}px) scale(${s.toFixed(4)})`;
+    if (store) { store.s = s; store.tx = tx; store.ty = ty; } // persist across re-render
+  };
+  const clamp = () => { // keep a margin of content on-screen so it can't be lost
+    const vw = vpW(), vh = vpH(), m = 44;
+    if (vw < 10 || vh < 10) return; // not laid out — don't clamp against garbage
+    tx = Math.min(vw - m, Math.max(m - cw * s, tx));
+    ty = Math.min(vh - m, Math.max(m - ch * s, ty));
+  };
+  const zoomAt = (px, py, ns) => {
+    ns = Math.min(MAX, Math.max(MIN, ns));
+    tx = px - (px - tx) * (ns / s); ty = py - (py - ty) * (ns / s);
+    s = ns; clamp(); apply();
+  };
+  const fit = () => {
+    const vw = vpW(), vh = vpH(), pad = 18;
+    if (vw < 10 || vh < 10) return; // keep current view rather than compute a garbage scale
+    s = Math.min(1, Math.max(MIN, Math.min((vw - pad * 2) / cw, (vh - pad * 2) / ch))); // never enlarge past natural
+    tx = (vw - cw * s) / 2; ty = (vh - ch * s) / 2; apply();
+  };
+  wrap.addEventListener("wheel", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return; // plain wheel → page scrolls normally
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, s * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+  }, { passive: false });
+  let drag = false, moved = false, sx = 0, sy = 0, otx = 0, oty = 0;
+  wrap.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    wrap._sup = 0; // any fresh press clears a stale suppress-latch (e.g. drag released off-element)
+    if (e.target.closest(".graph-zoom")) return; // let the zoom buttons handle themselves
+    drag = true; moved = false; sx = e.clientX; sy = e.clientY; otx = tx; oty = ty;
+    try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  wrap.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (!moved && Math.hypot(dx, dy) < 4) return; // below threshold: still a click
+    moved = true; wrap.classList.add("panning");
+    tx = otx + dx; ty = oty + dy; clamp(); apply();
+  });
+  const end = () => { if (!drag) return; drag = false; wrap.classList.remove("panning"); if (moved) wrap._sup = 1; };
+  wrap.addEventListener("pointerup", end);
+  wrap.addEventListener("pointercancel", end);
+  // capture-phase: swallow the click synthesized after a pan so node handlers don't
+  // fire — but never suppress the zoom controls (a keyboard/mouse zoom-button click
+  // has no preceding wrap pointerdown, so it must not be eaten by a stale latch).
+  wrap.addEventListener("click", (e) => {
+    if (e.target.closest(".graph-zoom")) return;
+    if (wrap._sup) { e.stopPropagation(); e.preventDefault(); wrap._sup = 0; }
+  }, true);
+  wrap.querySelector(".graph-zoom").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-z]"); if (!b) return;
+    e.stopPropagation();
+    const vw = vpW(), vh = vpH();
+    if (b.dataset.z === "in") zoomAt(vw / 2, vh / 2, s * 1.25);
+    else if (b.dataset.z === "out") zoomAt(vw / 2, vh / 2, s / 1.25);
+    else fit();
+  });
+  apply(); // identity (or reseeded view) — avoids a first-frame flash
+  if (!seeded) {
+    // frame an oversized graph once layout is known (clientWidth is 0 synchronously)
+    requestAnimationFrame(() => {
+      const vw = vpW(), vh = vpH();
+      if (vw >= 10 && vh >= 10 && (cw > vw + 1 || ch > vh + 1)) fit();
+    });
+  }
 }
 
 // ---- sidebar/topbar ----
