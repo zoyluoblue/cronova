@@ -102,9 +102,9 @@ function rowHtml(d, scaleMs) {
 // DAG operation page (view='dag') — integrated: info + structure (editable
 // graph + task list) + schedule + run history. Edits persist immediately.
 // ============================================================================
-async function showDag(id) {
+async function showDag(id, tab) {
   closeLog();
-  setHash("#/dag/" + encodeURIComponent(id));
+  setHash("#/dag/" + encodeURIComponent(id) + (tab && tab !== "runs" ? "/" + tab : ""));
   await flushPendingSaves(); // land any debounced edit before we refetch + replace D
   let dag, runs, allDags = [];
   try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=25`)]); }
@@ -126,76 +126,146 @@ async function showDag(id) {
     }),
     tasks: (dag.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success" })),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
+    // default tab: a 0-task shell opens on Structure (its obvious next step is
+    // adding tasks); anything else opens on Runs (the monitoring intent).
+    tab: tab === "structure" || tab === "settings" ? tab : (tab === "runs" || (dag.tasks || []).length ? "runs" : "structure"),
+    editKey: null, // which settings row is expanded for editing
   };
   view = "dag"; activeDag = id;
+  setDagHash();
   setNav("dags", id);
   renderDagPage();
+}
+// hash mirrors the active tab so every tab is linkable; Runs (default) stays clean
+function setDagHash() {
+  if (!D) return;
+  const base = "#/dag/" + encodeURIComponent(D.dag.dag_id);
+  setHash(D.tab === "runs" ? base : base + "/" + D.tab);
 }
 // re-render the operation page from the in-memory D (no refetch) — used when
 // returning from the task page so unsaved/just-saved edits are never clobbered.
 function gotoDagPage() {
   if (!D) { loadDags(); return; }
   view = "dag"; activeDag = D.dag.dag_id; closeLog();
+  setDagHash();
   setNav("dags", D.dag.dag_id);
   renderDagPage();
 }
 
+// one-line schedule summary for the hero + settings row (honest: only glosses
+// shapes we know; otherwise shows the raw expression)
+function schedSummary(d) {
+  if (d.schedMode === "manual" || !d.schedule) return t("sub_manual");
+  const s = schedSentence(d);
+  return s ? `${s} · ${d.schedule}` : d.schedule;
+}
 function renderDagPage() {
   if (!D) return;
   const d = D.dag;
   const typ = d.schedule ? "schedule" : (d.trigger_after.length ? "dependency" : "manual");
   const noTasks = D.tasks.length === 0;
-  // include any existing trigger_after target even if it's not (or no longer) a
-  // known DAG, so a dangling upstream ref shows as a removable chip.
-  const others = [...new Set([...D.allDags.filter((x) => x !== d.dag_id), ...d.trigger_after])];
+  // hero facts, honestly derived from the runs we already fetched
+  const last = D.runs[0];
+  const terminal = D.runs.filter((r) => r.state === "success" || r.state === "failed");
+  const okN = terminal.filter((r) => r.state === "success").length;
   main.innerHTML = `
     <div class="crumb-bar"><a id="back">${t("back_dags")}</a> / ${esc(d.dag_id)}</div>
-    <div class="page-h"><h1 class="mono">${esc(d.dag_id)}</h1><span class="tag">${typeLabel(typ)}</span><span class="savestate ss-saved" id="d-save"></span></div>
-    <div class="page-sub">${esc(d.schedule || t("sub_manual"))} · ${t("max_active")} ${d.max_active_runs}</div>
+    <div class="dag-hero">
+      <div class="dh-top">
+        <h1 class="mono">${esc(d.dag_id)}</h1>
+        <span class="tag">${typeLabel(typ)}</span>
+        ${d.paused ? `<span class="tag warn">${t("btn_pause")}</span>` : ""}
+        <span class="savestate ss-saved" id="d-save"></span>
+        <div class="dh-actions">
+          <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
+          <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
+          <button class="icon" id="dup" title="${t("btn_duplicate")}">⧉ ${t("btn_duplicate")}</button>
+          <button class="icon" id="yaml-btn">YAML</button>
+        </div>
+      </div>
+      <div class="dh-stats">
+        <div class="dh-stat"><span class="k">${t("dh_last")}</span>
+          ${last ? `<span class="v">${badge(last.state)} <span class="muted">${fmt(last.started_at)} · ${dur(last.started_at, last.finished_at)}</span></span>` : `<span class="v muted">${t("dh_never")}</span>`}</div>
+        <div class="dh-stat"><span class="k">${t("dh_next")}</span><span class="v">${esc(schedSummary(d))}</span></div>
+        <div class="dh-stat"><span class="k">${t("dh_rate")}</span><span class="v">${terminal.length ? `${okN}/${terminal.length} ${stateLabel("success")}` : t("dh_norate")}</span></div>
+      </div>
+      ${noTasks ? `<div class="page-sub" style="margin:8px 0 0">${t("dag_disabled_hint")}</div>` : ""}
+    </div>
     ${coachDag === d.dag_id ? `<div class="coach-ribbon" id="coach"><span>✦ ${t("coach_tpl_ready")}</span><button class="primary" id="coach-run">${t("btn_trigger")}</button><button class="icon" id="coach-x" aria-label="${t("cancel_word")}">✕</button></div>` : ""}
-    <div class="toolbar">
-      <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
-      <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
-      <button id="dup">${t("btn_duplicate")}</button>
-      <button id="yaml-btn">YAML</button>
-      ${noTasks ? `<span class="muted hint-inline">${t("dag_disabled_hint")}</span>` : ""}
-      <button class="danger" id="del" style="margin-left:auto">${t("btn_delete")}</button>
+    <div class="run-tabs dag-tabs" id="dag-tabs">
+      ${["runs", "structure", "settings"].map((k) => `<button class="pill ${D.tab === k ? "active" : ""}" data-dt="${k}">${t("tab_" + k)}${k === "structure" ? ` <span class="tab-n">${D.tasks.length}</span>` : ""}</button>`).join("")}
     </div>
-
-    <div class="section-h">${t("b_dag_info")}</div>
-    <div class="b-grid">
-      <div class="b-field"><label>${t("f_maxactive")}</label><input id="d-max" type="number" min="1" value="${d.max_active_runs}"></div>
-      <div class="b-field"><label>${t("f_defretries")}</label><input id="d-defr" type="number" min="0" value="${d.default_retries}"></div>
-      ${others.length ? `<div class="b-field full"><label>${t("f_trigger_after")}</label><div class="b-deps">${others.map((x) => `<span class="chip ta ${d.trigger_after.includes(x) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${d.trigger_after.includes(x)}" data-ta="${esc(x)}">${esc(x)}</span>`).join("")}</div></div>` : ""}
-    </div>
-
-    <div class="section-h">${t("sec_structure")}</div>
-    <div id="d-structure"></div>
-
-    <div class="section-h">${t("sched")}</div>
-    <div id="d-sched"></div>
-
     <div class="b-errors" id="dag-errors"></div>
-
-    <div class="section-h">${t("sec_runs")}</div><div id="d-runs"></div>`;
+    <div id="dag-tab-body"></div>`;
 
   $("back").onclick = loadDags;
   $("trig").onclick = triggerActiveDag;
   $("pause").onclick = async () => { await api(`/api/dags/${d.dag_id}/pause?paused=${!d.paused}`, { method: "POST" }); d.paused = !d.paused; renderDagPage(); };
-  $("del").onclick = deleteActiveDag;
   $("dup").onclick = duplicateActiveDag;
   $("yaml-btn").onclick = openYamlDrawer;
   const cr = $("coach-run"); if (cr) cr.onclick = () => { coachDag = null; $("coach").remove(); triggerActiveDag(); };
   const cx = $("coach-x"); if (cx) cx.onclick = () => { coachDag = null; $("coach").remove(); };
-  const max = $("d-max"); max.onblur = () => { d.max_active_runs = +max.value || 1; saveDag(); };
-  const defr = $("d-defr"); defr.onblur = () => { d.default_retries = +defr.value || 0; saveDag(); };
-  main.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
-
-  SCHED = { state: D, idp: "d", host: "d-sched", onChange: saveDag };
-  renderSchedUI();
-  renderDagStructure();
-  renderDagRuns();
+  $("dag-tabs").querySelectorAll("[data-dt]").forEach((b) => b.onclick = () => {
+    if (D.tab === b.dataset.dt) return;
+    D.tab = b.dataset.dt; D.editKey = null; setDagHash(); renderDagPage();
+  });
+  renderDagTab();
   reflectSaveState();
+}
+// renders the active tab's body only (hero + tabs stay put)
+function renderDagTab() {
+  const el = $("dag-tab-body"); if (!el) return;
+  if (D.tab === "structure") { el.innerHTML = `<div id="d-structure"></div>`; renderDagStructure(); }
+  else if (D.tab === "settings") { el.innerHTML = settingsTabHtml(); wireSettingsTab(); }
+  else { el.innerHTML = `<div id="d-runs"></div>`; renderDagRuns(); }
+}
+
+// --- settings tab: each setting is a one-line summary; click to edit in place
+// (immediate-save preserved — the form appears only while you're changing it) ---
+function settingsTabHtml() {
+  const d = D.dag;
+  const others = [...new Set([...D.allDags.filter((x) => x !== d.dag_id), ...d.trigger_after])];
+  const row = (key, label, summary, editor, hint) => {
+    const open = D.editKey === key;
+    return `<div class="set-row ${open ? "editing" : ""}" data-set="${key}">
+      <div class="set-head" ${open ? "" : `role="button" tabindex="0" aria-label="${esc(label)} — ${t("set_edit")}"`}>
+        <span class="set-k">${esc(label)}</span>
+        ${open ? `<button class="icon set-close" data-close="${key}">${t("set_done")}</button>` : `<span class="set-v">${summary}</span><span class="set-pen" aria-hidden="true">✎</span>`}
+      </div>
+      ${open ? `<div class="set-body">${hint ? `<div class="field-hint" style="margin-bottom:8px">${esc(hint)}</div>` : ""}${editor}</div>` : ""}</div>`;
+  };
+  const depsSummary = d.trigger_after.length ? d.trigger_after.map((x) => `<span class="mono">${esc(x)}</span>`).join(", ") : `<span class="muted">${t("set_none")}</span>`;
+  const depsEditor = others.length
+    ? `<div class="b-deps">${others.map((x) => `<span class="chip ta ${d.trigger_after.includes(x) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${d.trigger_after.includes(x)}" data-ta="${esc(x)}">${esc(x)}</span>`).join("")}</div>`
+    : `<div class="muted">${t("set_no_deps_avail")}</div>`;
+  return `<div class="set-list">
+    ${row("sched", t("set_sched"), esc(schedSummary(d)), `<div id="d-sched"></div>`)}
+    ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
+    ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
+    ${row("deps", t("set_deps"), depsSummary, depsEditor, t("set_deps_hint"))}
+  </div>
+  <div class="danger-zone">
+    <div class="dz-t">${t("danger_title")}</div>
+    <div class="dz-row"><span class="muted">${t("danger_del_hint")}</span><button class="danger" id="del">${t("btn_delete")}</button></div>
+  </div>`;
+}
+function wireSettingsTab() {
+  const d = D.dag;
+  const body = $("dag-tab-body");
+  body.querySelectorAll(".set-row:not(.editing) .set-head").forEach((h) => h.onclick = () => {
+    D.editKey = h.parentElement.dataset.set;
+    renderDagTab();
+    // focus the first control in the freshly opened editor
+    const first = body.querySelector(".set-row.editing input, .set-row.editing .pill, .set-row.editing .chip");
+    if (first) first.focus();
+  });
+  // full re-render on close: the hero's schedule stat may have just changed
+  body.querySelectorAll(".set-close").forEach((b) => b.onclick = (e) => { e.stopPropagation(); D.editKey = null; renderDagPage(); });
+  if (D.editKey === "sched") { SCHED = { state: D, idp: "d", host: "d-sched", onChange: saveDag }; renderSchedUI(); }
+  const max = $("d-max"); if (max) { max.oninput = () => { d.max_active_runs = +max.value || 1; }; max.onblur = () => saveDag(); }
+  const defr = $("d-defr"); if (defr) { defr.oninput = () => { d.default_retries = +defr.value || 0; }; defr.onblur = () => saveDag(); }
+  body.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
+  const del = $("del"); if (del) del.onclick = deleteActiveDag;
 }
 
 async function deleteActiveDag() {
@@ -291,7 +361,8 @@ function renderDagRuns() {
 
 // --- structure section (editable graph + task list) ---
 function renderDagStructure() {
-  $("d-structure").innerHTML = dagStructureHtml();
+  const el = $("d-structure"); if (!el) return; // structure tab not active
+  el.innerHTML = dagStructureHtml();
   wireDagStructure();
 }
 function dagStructureHtml() {
@@ -363,6 +434,7 @@ async function deleteTask(taskID) {
 // ============================================================================
 function showTask(dagID, taskID) {
   view = "task"; activeDag = dagID; D.activeTaskId = taskID; closeLog();
+  D.tab = "structure"; // task pages are entered from Structure — back lands there
   setHash(`#/dag/${encodeURIComponent(dagID)}/task/${encodeURIComponent(taskID)}`);
   const tk = D.tasks.find((x) => x.id === taskID);
   cmdRaw = tk ? computeCmdRaw(tk) : true; // structured form when the command fits the type

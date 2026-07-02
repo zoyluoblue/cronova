@@ -408,3 +408,34 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .uc-name { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .uc-role { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .5px; }
 .uc-logout { margin-left: auto; font-size: 11.5px; padding: 4px 9px; flex: none; }
+
+/* ---- DAG page: hero + tabs + click-to-edit settings ---- */
+.dag-hero { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px 16px; margin-bottom: 14px; }
+.dh-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dh-top h1 { font-size: 24px; margin: 0; font-weight: 700; letter-spacing: -.3px; }
+.dh-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.dh-stats { display: flex; gap: 34px; margin-top: 14px; flex-wrap: wrap; }
+.dh-stat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dh-stat .k { font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase; color: var(--faint); }
+.dh-stat .v { font-size: 13px; display: flex; align-items: center; gap: 7px; }
+.tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.dag-tabs { margin: 4px 0 14px; }
+.tab-n { font-family: var(--mono); font-size: 10.5px; opacity: .75; }
+/* settings rows: quiet one-line summaries; the form exists only while editing */
+.set-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); overflow: hidden; }
+.set-row { border-bottom: 1px solid var(--line); }
+.set-row:last-child { border-bottom: 0; }
+.set-head { display: flex; align-items: center; gap: 12px; padding: 13px 16px; }
+.set-row:not(.editing) .set-head { cursor: pointer; }
+.set-row:not(.editing) .set-head:hover { background: var(--panel-2); }
+.set-k { flex: none; width: 130px; font-size: 12.5px; color: var(--muted); }
+.set-v { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-pen { margin-left: auto; color: var(--faint); font-size: 12px; opacity: 0; transition: opacity var(--dur) var(--ease); }
+.set-row:not(.editing) .set-head:hover .set-pen, .set-row:not(.editing) .set-head:focus-visible .set-pen { opacity: 1; }
+.set-row.editing { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.set-row.editing .set-head { padding-bottom: 4px; }
+.set-close { margin-left: auto; color: var(--accent); font-weight: 600; }
+.set-body { padding: 4px 16px 16px calc(16px + 130px + 12px); }
+.danger-zone { margin-top: 22px; border: 1px solid color-mix(in srgb, var(--fail) 30%, var(--line)); border-radius: var(--r); padding: 14px 16px; }
+.dz-t { font-size: 11px; letter-spacing: .6px; text-transform: uppercase; color: var(--fail); margin-bottom: 9px; }
+.dz-row { display: flex; align-items: center; gap: 14px; justify-content: space-between; font-size: 12.5px; }

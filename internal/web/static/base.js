@@ -40,6 +40,12 @@ const DICT = {
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
+    tab_runs: "运行", tab_structure: "结构", tab_settings: "设置",
+    dh_last: "上次运行", dh_next: "调度", dh_rate: "近期成功率", dh_never: "还没有运行", dh_norate: "—",
+    set_done: "完成", set_edit: "编辑", set_none: "无", set_sched: "调度", set_max: "最大并发", set_retries: "默认重试", set_deps: "上游依赖",
+    set_deps_hint: "上游 DAG 成功后自动触发本 DAG", set_no_deps_avail: "暂无其他 DAG 可选",
+    danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
+    nd_more: "调度与更多选项", nd_less: "收起",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -114,6 +120,12 @@ const DICT = {
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
+    tab_runs: "Runs", tab_structure: "Structure", tab_settings: "Settings",
+    dh_last: "Last run", dh_next: "Schedule", dh_rate: "Success rate", dh_never: "No runs yet", dh_norate: "—",
+    set_done: "Done", set_edit: "Edit", set_none: "None", set_sched: "Schedule", set_max: "Max active runs", set_retries: "Default retries", set_deps: "Upstream DAGs",
+    set_deps_hint: "Triggered automatically after these DAGs succeed", set_no_deps_avail: "No other DAGs available",
+    danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
+    nd_more: "Schedule & more options", nd_less: "Hide",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -425,7 +437,7 @@ function applyRoute() {
   if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {
     return showDag(seg[1]).then(() => { if (D && D.dag.dag_id === seg[1] && D.tasks.some((x) => x.id === seg[3])) showTask(seg[1], seg[3]); });
   }
-  if (seg[0] === "dag" && seg[1]) return showDag(seg[1]);
+  if (seg[0] === "dag" && seg[1]) return showDag(seg[1], seg[2]); // seg[2]: runs|structure|settings (optional)
   return loadDags();
 }
 window.addEventListener("hashchange", () => { if (suppressHash) { suppressHash = false; return; } Promise.resolve(applyRoute()).catch(() => {}); });

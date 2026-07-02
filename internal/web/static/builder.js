@@ -194,14 +194,20 @@ function newDagModal() {
 }
 function renderNewDag() {
   const opener = document.activeElement; // restore focus here on close
+  // minimal by default: pick a template, name it, create. Schedule + YAML import
+  // live behind one "more options" fold — schedule is editable any time later
+  // from the DAG's Settings tab, so the happy path stays two decisions.
+  const advanced = `
+      <div class="b-sec" style="margin-top:14px">${t("sched")}</div>
+      <div id="nd-sched"></div>
+      <div style="margin-top:14px"><a class="raw-toggle" id="nd-toyaml">${t("nd_import_yaml")}</a></div>`;
   const formBody = `
       <div class="b-sec">${t("tpl_start")}</div>
       <div class="tpl-cards">${DAG_TEMPLATES.map((tp) => `<div class="tpl-card ${ND.template === tp.key ? "on" : ""}" data-tpl="${tp.key}" role="button" tabindex="0" aria-pressed="${ND.template === tp.key}"><div class="tpl-name">${t(tp.name)}</div><div class="tpl-desc">${t(tp.desc)}</div>${tp.tasks.length ? `<div class="tpl-meta">${tp.tasks.length} ${t("tpl_tasks")}${tp.schedule ? " · cron" : ""}</div>` : ""}</div>`).join("")}</div>
-      <div class="b-field" style="margin-top:12px"><label>${t("f_dag_id")}</label><input id="nd-id" placeholder="my_workflow" value="${esc(ND.dag.dag_id)}"></div>
+      <div class="b-field" style="margin-top:14px"><label>${t("f_dag_id")}</label><input id="nd-id" placeholder="my_workflow" value="${esc(ND.dag.dag_id)}"></div>
       <div class="nd-err" id="nd-err"></div>
-      <div class="b-sec" style="margin-top:12px">${t("sched")}</div>
-      <div id="nd-sched"></div>
-      <div style="margin-top:14px"><a class="raw-toggle" id="nd-toyaml">${t("nd_import_yaml")}</a></div>`;
+      <div style="margin-top:12px"><a class="raw-toggle" id="nd-adv">${ND.advanced ? t("nd_less") : t("nd_more")}</a></div>
+      ${ND.advanced ? advanced : ""}`;
   const yamlBody = `
       <div class="b-sec">${t("nd_import_yaml")}</div>
       <textarea id="nd-yaml" class="yaml-input" rows="14" spellcheck="false" placeholder="dag_id: my_workflow\ntasks:\n  - id: hello\n    command: echo hi"></textarea>
@@ -239,12 +245,12 @@ function renderNewDag() {
     if (tp && tp.schedule) { ND.dag.schedule = tp.schedule; parseScheduleState(ND.dag); } // template may seed a schedule
     renderNewDag(); // re-render to reflect selection + any seeded schedule
   });
-  $("nd-toyaml").onclick = () => { ND.yamlMode = true; renderNewDag(); };
+  $("nd-adv").onclick = () => { ND.advanced = !ND.advanced; renderNewDag(); };
+  const yl = $("nd-toyaml"); if (yl) yl.onclick = () => { ND.yamlMode = true; renderNewDag(); };
   const idEl = $("nd-id");
   idEl.oninput = () => { ND.dag.dag_id = idEl.value.trim(); updateNewDagValidity(); };
   idEl.focus();
-  SCHED = { state: ND, idp: "nd", host: "nd-sched", onChange: null };
-  renderSchedUI();
+  if (ND.advanced) { SCHED = { state: ND, idp: "nd", host: "nd-sched", onChange: null }; renderSchedUI(); }
   $("nd-create").onclick = submitNewDag;
   updateNewDagValidity();
 }

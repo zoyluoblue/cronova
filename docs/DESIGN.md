@@ -85,6 +85,19 @@ Principles:
 - **Save indicator:** the `.savestate` pill (`saved`/`saving`/`invalid`/`error`)
   reflects the real in-memory validity after every render — never hardcode
   "saved" at the end of a re-render.
+- **DAG page = hero + tabs (one focus per screen):** the detail page opens with
+  a hero card (name, type, honest facts — last run, schedule, recent success
+  rate — and the primary actions) and then exactly ONE concern below it, chosen
+  by tabs: **Runs** (default; a 0-task shell defaults to Structure instead),
+  **Structure** (graph + tasks), **Settings**. Tabs are linkable
+  (`#/dag/<id>/<tab>`) and refresh-safe. Never re-flatten all sections onto one
+  scroll — the density was the original complaint.
+- **Click-to-edit settings (immediate save, no resident forms):** every setting
+  renders as a one-line summary row (`.set-row`); clicking it swaps in the
+  editor in place, edits save immediately (same debounced pipeline), and "完成"
+  collapses back to the summary (full page re-render so the hero facts stay in
+  sync). Only one row edits at a time. Destructive actions live in a separate
+  danger zone at the bottom of Settings — never in the hero.
 - **Auth gate (`initAuth`):** boot resolves identity via `GET /api/me` before
   rendering anything data-bearing. 200 → start the app; 401 → a full-screen
   login overlay (`#login-root`), and `startApp()` runs only after a successful
