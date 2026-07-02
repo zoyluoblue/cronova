@@ -21,7 +21,6 @@
       <div class="nav-item active" data-nav="dags" role="link" tabindex="0"><span class="ic">▦</span> DAGs <span class="count" id="nav-dags">·</span></div>
       <div class="nav-item" data-nav="graph" role="link" tabindex="0"><span class="ic">⛓</span> <span data-i18n="nav_graph">关系图</span></div>
       <div class="nav-item" data-nav="pools" role="link" tabindex="0"><span class="ic">▥</span> Pools <span class="count" id="nav-pools">·</span></div>
-      <div class="nav-item disabled" title="Coming soon / 计划中 (M6)" aria-disabled="true"><span class="ic">◇</span> Events <span class="count">M6</span></div>
     </nav>
     <div class="side-foot">
       <div class="stat-row"><span class="dot"></span><span class="lbl">executor</span><span class="sub" id="f-exec">—</span></div>
@@ -33,7 +32,7 @@
       <div class="crumb">cronova / <b id="crumb">DAGs</b></div>
       <div class="grow"></div>
       <div class="search"><input id="search" placeholder="筛选 DAG…" /></div>
-      <div class="tick"><span class="dot"></span><span id="tick">tick —</span></div>
+      <div class="tick"><span class="dot"></span><span id="tick">tick —</span><span class="tzlab" id="tzlab"></span></div>
       <button class="icon" id="theme" title="主题 / Theme" style="font-size:15px">☀</button>
       <button class="icon" id="lang" title="切换语言 / Switch language" style="font-weight:600">EN</button>
       <button class="primary" id="newdag" data-i18n="newdag">+ 新建 DAG</button>
@@ -43,6 +42,11 @@
 </div>
 <div id="modal-root"></div>
 <div id="toast-root" class="toast-stack" aria-live="polite"></div>
-<script src="/app.js"></script>
+<!-- classic scripts in load order share one global scope (no build step):
+     base = state/i18n/helpers · views = pages · builder = schedule/templates/new-DAG · boot = wiring -->
+<script src="/base.js"></script>
+<script src="/views.js"></script>
+<script src="/builder.js"></script>
+<script src="/boot.js"></script>
 </body>
 </html>

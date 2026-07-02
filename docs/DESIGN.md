@@ -1,9 +1,11 @@
 # cronova Console — Design System & Principles
 
-The web console is a single embedded **vanilla-JS SPA** (`internal/web/static/`:
-`index.html` + `app.js` + `styles.css`), served by the Go binary via `go:embed`.
-No build step, no framework, no external libraries, web fonts, or icon packs.
-This document is the contract a polish/feature pass must respect.
+The web console is an embedded **vanilla-JS SPA** (`internal/web/static/`:
+`index.html` + `styles.css` + four classic scripts loaded in order sharing one
+global scope — `base.js` state/i18n/helpers, `views.js` pages, `builder.js`
+schedule/templates/new-DAG, `boot.js` wiring), served by the Go binary via
+`go:embed`. No build step, no framework, no external libraries, web fonts, or
+icon packs. This document is the contract a polish/feature pass must respect.
 
 ## Direction
 
@@ -20,8 +22,13 @@ Principles:
   definition so both themes and both languages fall out for free.
 - **Access is not optional.** Visible focus, full keyboard operation, AA
   contrast, reduced-motion support are table stakes, not delight.
-- **Instant beats animated.** The hard cut on navigation is a feature for a tool
-  hit dozens of times an hour. Motion is reserved for meaningful, small moments.
+- **Instant beats animated.** Motion is reserved for meaningful, small moments:
+  navigation gets a single 120ms fade (`.main.enter`, applied only when the
+  breadcrumb actually changes — data refreshes never animate); everything else
+  is an instant cut.
+- **Times are honest.** Schedules evaluate in **UTC** (the engine anchors on UTC
+  timestamps) — the topbar label says so; fire-time previews come from the
+  server's own parser (`GET /api/schedule/preview`), never client-side cron math.
 
 ## Foundations (CSS variables — `styles.css` `:root` + `:root[data-theme="light"]`)
 

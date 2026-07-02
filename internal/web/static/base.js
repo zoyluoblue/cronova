@@ -1,0 +1,344 @@
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const main = $("main");
+
+let view = "dags";       // dags | dag | task | run | pools | graph
+let activeDag = null;
+let currentRun = null;
+let filter = "all";
+let query = "";
+let overviewCache = null;
+let logES = null;
+let lang = localStorage.getItem("cnv_lang") || "zh";
+let theme = localStorage.getItem("cnv_theme") || "dark";
+
+// D: in-memory editable spec for the active DAG operation page (immediate-save).
+let D = null;
+// ND: transient state for the minimal new-DAG modal.
+let ND = null;
+// SCHED: binding for the shared schedule UI {state, idp, host, onChange}.
+let SCHED = null;
+// coachDag: dag_id just created from a starter template -> show a one-time
+// "template ready, hit ▶" ribbon on its operation page (session-only).
+let coachDag = null;
+
+// ---- i18n ----
+const DICT = {
+  zh: {
+    workspace: "工作区", newdag: "+ 新建 DAG", search_ph: "筛选 DAG…",
+    f_all: "全部", f_running: "运行中", f_failed: "失败", f_paused: "已暂停",
+    dags_sub: "所有工作流定义 · 开关 · 调度 · 查看最近运行",
+    c_active: "活跃 DAG", c_running: "运行中 run", c_rate: "近期成功率", c_failed: "失败 DAG",
+    c_active_s: (n) => `共 ${n} 个定义`, c_running_s: "across all pools", c_rate_s: "最近运行", c_failed_s: "最近一次失败",
+    h_dag: "DAG", h_last: "最近运行", h_spark: "最近 14 次", h_pool: "POOL", h_next: "下次调度", h_act: "操作",
+    no_match: "没有匹配的 DAG", no_dags_title: "还没有 DAG", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
+    back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
+    sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
+    btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
+    confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
+    confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
+    dag_archived: "该 DAG 已归档(已删除)。",
+    confirm_word: "确定", cancel_word: "取消", aria_theme: "切换主题", aria_lang: "切换语言",
+    toast_run_queued: "已触发，run 已排队", toast_pool_saved: "池已保存", toast_dag_deleted: "DAG 已归档",
+    th_id: "id", th_type: "类型", th_command: "命令", th_deps: "依赖",
+    th_logical: "逻辑时间", th_state: "状态", th_trig: "触发", th_started: "开始", th_dur: "耗时",
+    th_task: "任务", th_try: "尝试", th_logs: "日志",
+    no_runs: "还没有运行记录 — 触发一次。",
+    k_logical: "逻辑时间", k_trig: "触发", k_dur: "耗时", k_started: "开始",
+    log_word: "日志", live: "实时",
+    pools_sub: "全局并发槽位，跨所有 DAG 与 run 共享。", p_name: "名称", p_slots: "槽位", p_save: "保存",
+    p_newname: "新池名称", p_create: "创建池", p_need: "需要名称和正整数槽位",
+    trig_fail: "触发失败", api_err: "API 错误",
+    nx_paused: "已暂停", nx_due: "就绪", nx_in: (m) => `${m} 分钟后`,
+    b_dag_info: "DAG 信息",
+    f_dag_id: "DAG ID", f_start: "开始日期",
+    f_catchup: "补跑 catchup", f_maxactive: "最大并发", f_defretries: "默认重试",
+    f_trigger_after: "上游依赖 (成功后触发)",
+    b_addtask: "+ 添加任务", b_remove: "移除",
+    t_id: "任务 ID", t_type: "类型", t_command: "命令", t_pool: "Pool", t_priority: "优先级",
+    t_retries: "重试 (空=默认)", t_retrydelay: "重试间隔(秒)", t_timeout: "超时(秒)", t_deps: "依赖",
+    t_nodeps: "暂无其他任务",
+    err_dagid: "请填写合法 DAG ID（字母/数字/_-.）", err_taskid: "任务 ID 不合法（字母/数字/_-.）",
+    err_dup: "任务 ID 重复", err_emptyid: "存在空任务 ID", err_emptycmd: "存在空命令", err_cycle: "依赖存在环",
+    sched: "调度", sm_manual: "手动", sm_every: "固定间隔", sm_cron: "Cron 表达式",
+    sched_manual_hint: "仅手动触发或被上游 DAG 触发", sched_every_pre: "每隔",
+    unit_s: "秒", unit_m: "分钟", unit_h: "小时", disabled_note: "(暂不可用)",
+    cp_min: "每分钟", cp_hour: "每小时", cp_day: "每天 0:00", cp_2am: "每天 2:00", cp_mon: "每周一 0:00",
+    cron_help: "用法", ch_title: "Cron 写法", ch_format: "格式：分 时 日 月 周（5 段，空格分隔）",
+    ch_fields: "字段", ch_ops: "符号", ch_examples: "常用示例（点击填入）", ch_shortcuts: "快捷写法",
+    t_rule: "触发规则", tr_all_success: "全部成功", tr_all_done: "全部完成", tr_one_success: "任一成功", tr_one_failed: "任一失败", tr_all_failed: "全部失败", tr_none_failed: "无失败",
+    trd_all_success: "全部上游成功才运行(默认)", trd_all_done: "全部上游完成即运行(无论成败)——适合清理/汇总", trd_one_success: "任一上游成功即运行", trd_one_failed: "任一上游失败即运行——适合告警", trd_all_failed: "全部上游都失败才运行", trd_none_failed: "没有上游失败(成功或跳过)时运行",
+    pool_hint: "并发槽位,跨所有 DAG 共享;同名 pool 的任务竞争同一批槽位",
+    cb_interp: "解释器", cb_runas: "运行方式", cb_target: "模块 / 脚本", cb_args: "参数", cb_jar: "Jar 路径", cb_mainclass: "主类", cb_client: "SQL 客户端", cb_query: "SQL 查询",
+    cmdopt_module: "模块 (-m)", cmdopt_script: "脚本文件",
+    cmd_will_run: "将执行:", cmd_edit_raw: "编辑原始命令", cmd_use_form: "用表单填写", cmd_cant_parse: "当前命令无法解析成表单,已保留原始编辑",
+    var_insert: "点击插入到命令(模板变量)",
+    graph_connect_hint: "提示：点上游任务、再点下游任务，即可连接/断开依赖",
+    nav_graph: "关系图", graph_title: "DAG 关系图", graph_sub: "按 trigger_after 展示各 DAG 之间的触发依赖",
+    graph_none: "暂无跨 DAG 依赖（没有 DAG 配置 trigger_after）", graph_view_hint: "提示：箭头表示「触发后」方向；点击节点查看该 DAG；虚线节点为未找到的 DAG",
+    ss_saved: "已保存", ss_saving: "保存中…", ss_invalid: "待修复后保存", ss_error: "保存失败",
+    dag_no_tasks_title: "暂无任务", dag_no_tasks_sub: "添加一个任务以启用此 DAG", dag_disabled_hint: "添加任务后可触发",
+    nd_title: "新建 DAG", nd_create: "创建", nd_cancel: "取消", nd_dagid_dup: "该 DAG ID 已存在",
+    tpl_start: "从模板开始", tpl_tasks: "个任务",
+    tpl_blank: "空白", tpl_blank_d: "从零开始,稍后自己加任务",
+    tpl_etl: "每日 ETL", tpl_etl_d: "抽取 → 转换 → 加载 的三步流水线",
+    tpl_report: "定时报表", tpl_report_d: "取数 → 生成报表,预设每天 08:00",
+    tpl_fanout: "扇出-扇入", tpl_fanout_d: "start → 两个并行分支 → 汇合",
+    coach_tpl_ready: "模板已就绪 — 点「触发运行」看它跑一遍,再按需修改任务",
+    sp_every: (n, u) => `每 ${n} ${u}运行一次`, sp_next: "接下来", sp_invalid: "表达式无效,无法计算触发时间",
+    tz_note: "调度按 UTC 计算;页面时间按你的本地时区显示",
+    btn_duplicate: "⧉ 复制", dup_dag_title: "复制为新 DAG(输入新 ID)", dup_done: "已复制",
+    y_copy: "复制", y_download: "下载", y_close: "关闭", y_copied: "YAML 已复制到剪贴板", y_copy_fail: "复制失败,请手动选择文本",
+    nd_import_yaml: "或粘贴 YAML 导入…", nd_back_form: "← 返回表单创建", nd_import: "导入", nd_yaml_empty: "请先粘贴 YAML 内容", nd_imported: "YAML 已导入",
+    gs_title: "快速上手", gs_create: "创建第一个 DAG", gs_trigger: "触发一次运行", gs_green: "拿到一次成功运行",
+    adv_options: "高级选项", log_find_ph: "在日志中查找…", log_download: "下载完整日志", log_matches: (n) => `${n} 行匹配`, log_capped: (n) => `仅显示最近 ${n} 行`,
+    back_dag: (d) => `← 返回 ${d}`, confirm_del_task_title: (id) => `删除任务 “${id}”？`,
+  },
+  en: {
+    workspace: "Workspace", newdag: "+ New DAG", search_ph: "Filter DAGs…",
+    f_all: "All", f_running: "Running", f_failed: "Failed", f_paused: "Paused",
+    dags_sub: "All workflow definitions · toggle · schedule · recent runs",
+    c_active: "Active DAGs", c_running: "Running runs", c_rate: "Recent success", c_failed: "Failed DAGs",
+    c_active_s: (n) => `${n} defined`, c_running_s: "across all pools", c_rate_s: "recent runs", c_failed_s: "last run failed",
+    h_dag: "DAG", h_last: "LAST RUN", h_spark: "LAST 14", h_pool: "POOL", h_next: "NEXT", h_act: "ACTIONS",
+    no_match: "No matching DAGs", no_dags_title: "No DAGs yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
+    back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
+    sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
+    btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
+    confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
+    confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
+    dag_archived: "This DAG is archived (deleted).",
+    confirm_word: "Confirm", cancel_word: "Cancel", aria_theme: "Toggle theme", aria_lang: "Switch language",
+    toast_run_queued: "Triggered — run queued", toast_pool_saved: "Pool saved", toast_dag_deleted: "DAG archived",
+    th_id: "id", th_type: "type", th_command: "command", th_deps: "deps",
+    th_logical: "logical date", th_state: "state", th_trig: "trigger", th_started: "started", th_dur: "duration",
+    th_task: "task", th_try: "try", th_logs: "logs",
+    no_runs: "No runs yet — trigger one.",
+    k_logical: "logical date", k_trig: "trigger", k_dur: "duration", k_started: "started",
+    log_word: "Log", live: "live",
+    pools_sub: "Global concurrency slots, shared across all DAGs and runs.", p_name: "name", p_slots: "slots", p_save: "Save",
+    p_newname: "new pool name", p_create: "Create pool", p_need: "name + positive slots required",
+    trig_fail: "trigger failed", api_err: "API error",
+    nx_paused: "paused", nx_due: "due", nx_in: (m) => `in ${m}m`,
+    b_dag_info: "DAG info",
+    f_dag_id: "DAG ID", f_start: "Start date",
+    f_catchup: "Catchup", f_maxactive: "Max active", f_defretries: "Default retries",
+    f_trigger_after: "Trigger after (upstream success)",
+    b_addtask: "+ Add task", b_remove: "Remove",
+    t_id: "Task ID", t_type: "Type", t_command: "Command", t_pool: "Pool", t_priority: "Priority",
+    t_retries: "Retries (empty=default)", t_retrydelay: "Retry delay (s)", t_timeout: "Timeout (s)", t_deps: "Depends on",
+    t_nodeps: "no other tasks",
+    err_dagid: "Valid DAG ID required (letters/digits/_-.)", err_taskid: "Invalid task ID (letters/digits/_-.)",
+    err_dup: "Duplicate task ID", err_emptyid: "Empty task ID", err_emptycmd: "Empty command", err_cycle: "Dependency cycle detected",
+    sched: "Schedule", sm_manual: "Manual", sm_every: "Interval", sm_cron: "Cron expression",
+    sched_manual_hint: "Manual trigger or triggered by an upstream DAG only", sched_every_pre: "Every",
+    unit_s: "sec", unit_m: "min", unit_h: "hr", disabled_note: "(coming soon)",
+    cp_min: "every minute", cp_hour: "hourly", cp_day: "daily 0:00", cp_2am: "daily 2:00", cp_mon: "Mon 0:00",
+    cron_help: "help", ch_title: "Cron format", ch_format: "Format: min hour day month weekday (5 space-separated fields)",
+    ch_fields: "Fields", ch_ops: "Operators", ch_examples: "Examples (click to fill)", ch_shortcuts: "Shortcuts",
+    t_rule: "Trigger rule", tr_all_success: "all success", tr_all_done: "all done", tr_one_success: "one success", tr_one_failed: "one failed", tr_all_failed: "all failed", tr_none_failed: "none failed",
+    trd_all_success: "Runs only if all upstreams succeeded (default)", trd_all_done: "Runs once all upstreams finish, success or not — good for cleanup/summary", trd_one_success: "Runs as soon as any upstream succeeds", trd_one_failed: "Runs as soon as any upstream fails — good for alerts", trd_all_failed: "Runs only if all upstreams failed", trd_none_failed: "Runs if no upstream failed (succeeded or skipped)",
+    pool_hint: "Concurrency slots shared across all DAGs; tasks in the same pool compete for its slots",
+    cb_interp: "Interpreter", cb_runas: "Run as", cb_target: "Module / script", cb_args: "Arguments", cb_jar: "Jar path", cb_mainclass: "Main class", cb_client: "SQL client", cb_query: "SQL query",
+    cmdopt_module: "module (-m)", cmdopt_script: "script file",
+    cmd_will_run: "Will run:", cmd_edit_raw: "edit raw command", cmd_use_form: "use form", cmd_cant_parse: "This command can't be parsed into the form; keeping the raw editor",
+    var_insert: "click to insert into the command (template vars)",
+    graph_connect_hint: "Tip: click an upstream task then a downstream task to add/remove a dependency",
+    nav_graph: "Graph", graph_title: "DAG Graph", graph_sub: "Trigger dependencies between DAGs via trigger_after",
+    graph_none: "No cross-DAG dependencies yet (no DAG declares trigger_after)", graph_view_hint: "Tip: arrows point in the trigger-after direction; click a node to open that DAG; dashed nodes are unknown DAGs",
+    ss_saved: "Saved", ss_saving: "Saving…", ss_invalid: "Fix errors to save", ss_error: "Save failed",
+    dag_no_tasks_title: "No tasks yet", dag_no_tasks_sub: "Add a task to enable this DAG", dag_disabled_hint: "Add a task to enable triggering",
+    nd_title: "New DAG", nd_create: "Create", nd_cancel: "Cancel", nd_dagid_dup: "A DAG with this id already exists",
+    tpl_start: "Start from a template", tpl_tasks: "tasks",
+    tpl_blank: "Blank", tpl_blank_d: "Start empty and add tasks yourself",
+    tpl_etl: "Daily ETL", tpl_etl_d: "Three-step extract → transform → load pipeline",
+    tpl_report: "Scheduled report", tpl_report_d: "Fetch → render, preset to run daily at 08:00",
+    tpl_fanout: "Fan-out / fan-in", tpl_fanout_d: "start → two parallel branches → join",
+    coach_tpl_ready: "Template ready — hit “Trigger run” to watch it execute, then tweak the tasks",
+    sp_every: (n, u) => `Runs every ${n} ${u}`, sp_next: "Next", sp_invalid: "Invalid expression — cannot compute fire times",
+    tz_note: "Schedules evaluate in UTC; times shown in your local timezone",
+    btn_duplicate: "⧉ Duplicate", dup_dag_title: "Duplicate as a new DAG (enter a new id)", dup_done: "Duplicated",
+    y_copy: "Copy", y_download: "Download", y_close: "Close", y_copied: "YAML copied to clipboard", y_copy_fail: "Copy failed — select the text manually",
+    nd_import_yaml: "or paste YAML to import…", nd_back_form: "← back to the form", nd_import: "Import", nd_yaml_empty: "Paste some YAML first", nd_imported: "YAML imported",
+    gs_title: "Getting started", gs_create: "Create your first DAG", gs_trigger: "Trigger a run", gs_green: "Get a green run",
+    adv_options: "Advanced options", log_find_ph: "Find in log…", log_download: "Download full log", log_matches: (n) => `${n} matching lines`, log_capped: (n) => `showing last ${n} lines`,
+    back_dag: (d) => `← Back to ${d}`, confirm_del_task_title: (id) => `Delete task “${id}”?`,
+  },
+};
+const STATE = {
+  zh: { success: "成功", failed: "失败", running: "运行中", queued: "排队", scheduled: "待运行", up_for_retry: "重试中", upstream_failed: "上游失败", skipped: "跳过", "": "未运行", none: "未运行" },
+  en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", "": "no runs", none: "no runs" },
+};
+const TYPEL = {
+  zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件" },
+  en: { schedule: "scheduled", manual: "manual", dependency: "dependency", event: "event" },
+};
+function t(k, ...a) { const v = (DICT[lang][k] ?? DICT.zh[k] ?? k); return typeof v === "function" ? v(...a) : v; }
+const stateLabel = (s) => STATE[lang][s] ?? STATE.zh[s] ?? s;
+const typeLabel = (s) => TYPEL[lang][s] ?? s;
+// next_schedule label from backend ("paused"/"due"/"in Nm"/"—"/date) -> localized
+function nextLabel(s) {
+  if (s === "paused") return t("nx_paused");
+  if (s === "due") return t("nx_due");
+  const m = /^in (\d+)m$/.exec(s);
+  if (m) return t("nx_in", m[1]);
+  return s; // "—" or absolute date
+}
+function descLabel(d) { return d === "manual trigger" ? t("manual_trigger") : d; }
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+// ---- helpers ----
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : r.text();
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (x) => (x ? new Date(x).toLocaleString() : "—");
+
+// ---- toast + in-app confirm (themed + bilingual; replaces native alert/confirm) ----
+// kind: ok | fail | warn | info. Success/info auto-dismiss; errors persist until clicked.
+function toast(msg, kind = "ok") {
+  const host = $("toast-root"); if (!host) return;
+  const el = document.createElement("div");
+  el.className = "toast t-" + kind;
+  el.setAttribute("role", kind === "fail" ? "alert" : "status");
+  el.textContent = msg;
+  const dismiss = () => { el.classList.remove("in"); setTimeout(() => el.remove(), 220); };
+  el.onclick = dismiss;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("in"));
+  if (kind !== "fail") setTimeout(dismiss, 3200);
+}
+// Promise<bool> confirm dialog reusing the .overlay/.modal markup. Escape=cancel,
+// Enter=confirm, click-outside=cancel. opts: {danger, okLabel}.
+function confirmDialog(title, body, opts = {}) {
+  return new Promise((resolve) => {
+    const root = $("modal-root");
+    root.innerHTML = `<div class="overlay" id="cfm-ovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <h2>${esc(title)}</h2>
+      <div class="body">${body ? `<p class="cfm-body">${esc(body)}</p>` : ""}</div>
+      <div class="foot"><button id="cfm-cancel">${esc(t("cancel_word"))}</button><button class="${opts.danger ? "danger" : "primary"}" id="cfm-ok">${esc(opts.okLabel || t("confirm_word"))}</button></div>
+    </div></div>`;
+    const close = (v) => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") close(false); else if (e.key === "Enter") close(true); };
+    document.addEventListener("keydown", onKey);
+    $("cfm-cancel").onclick = () => close(false);
+    $("cfm-ok").onclick = () => close(true);
+    $("cfm-ovl").onclick = (e) => { if (e.target.id === "cfm-ovl") close(false); };
+    $("cfm-ok").focus();
+  });
+}
+function dur(a, b) { if (!a) return "—"; const ms = (b ? new Date(b) : new Date()) - new Date(a); if (ms < 0) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
+function badge(s) { const k = s || "none"; return `<span class="badge s-${k}"><span class="d"></span>${stateLabel(s)}</span>`; }
+function closeLog() { if (logES) { logES.close(); logES = null; } }
+function sparkline(states) {
+  const arr = (states || []).slice(-14); while (arr.length < 14) arr.unshift("noruns");
+  // Honest: every real-state bar is the same height (color carries the state);
+  // only no-run / skipped slots are short stubs. The old pseudo-random height
+  // (12 + i*5%11) fabricated a skyline unrelated to the runs. Height-encoding
+  // run duration is the upgrade once the overview payload carries it.
+  return `<div class="spark">${arr.map((s) => {
+    const k = s || "noruns", stub = k === "noruns" || k === "skipped";
+    const label = k === "noruns" ? stateLabel("none") : stateLabel(s);
+    return `<i class="${esc(k)}" style="height:${stub ? 6 : 16}px" title="${esc(label)}"></i>`;
+  }).join("")}</div>`;
+}
+
+// ---- graph ----
+// [fill, stroke] for a task/run state, single-sourced from the theme vars (via
+// color-mix) so the graph re-themes live. Injected into the node rect's inline
+// `style` — only literal token strings here, never user data.
+function colorForState(s) {
+  const tint = (v, p) => [`color-mix(in srgb, var(${v}) ${p}%, transparent)`, `var(${v})`];
+  const m = {
+    success: tint("--ok", 15), failed: tint("--fail", 16), running: tint("--run", 16),
+    up_for_retry: tint("--warn", 16), queued: tint("--warn", 12), scheduled: tint("--warn", 10),
+    upstream_failed: tint("--upstream", 12), skipped: tint("--skip", 18),
+  };
+  return m[s] || ["var(--panel-2)", "var(--line-2)"]; // neutral: follows theme
+}
+function renderGraph(tasks, stateByTask, opts) {
+  opts = opts || {};
+  if (!tasks || !tasks.length) return `<div class="empty">—</div>`;
+  const byId = {}; tasks.forEach((t2) => byId[t2.id] = t2);
+  const level = {};
+  const lvl = (id, seen) => { if (level[id] != null) return level[id]; if (seen.has(id)) return 0; seen.add(id); const deps = (byId[id]?.deps || []).filter((d) => byId[d]); return level[id] = deps.length ? 1 + Math.max(...deps.map((d) => lvl(d, seen))) : 0; };
+  tasks.forEach((t2) => lvl(t2.id, new Set()));
+  const cols = {}; tasks.forEach((t2) => (cols[level[t2.id]] ||= []).push(t2.id));
+  const NW = 150, NH = 36, CG = 200, RG = 52, PAD = 16, pos = {};
+  Object.keys(cols).forEach((L) => cols[L].forEach((id, i) => pos[id] = { x: PAD + L * CG, y: PAD + i * RG }));
+  const maxL = Math.max(...Object.keys(cols).map(Number)), maxR = Math.max(...Object.values(cols).map((c) => c.length));
+  const W = PAD * 2 + maxL * CG + NW, H = PAD * 2 + (maxR - 1) * RG + NH;
+  let edges = "", nodes = "";
+  tasks.forEach((t2) => (t2.deps || []).forEach((d) => { if (!pos[d]) return; const x1 = pos[d].x + NW, y1 = pos[d].y + NH / 2, x2 = pos[t2.id].x, y2 = pos[t2.id].y + NH / 2, mx = (x1 + x2) / 2; edges += `<path class="graph-edge" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`; }));
+  tasks.forEach((t2) => {
+    let [f, st] = colorForState(stateByTask ? stateByTask[t2.id] : null);
+    let sw = 1.2;
+    if (opts.pending === t2.id) { st = "var(--accent)"; sw = 2.6; }
+    const dash = opts.dashed && opts.dashed.has(t2.id) ? ` stroke-dasharray="5 4"` : "";
+    const p = pos[t2.id];
+    const attrs = (opts.editable || opts.clickable) ? ` data-node="${esc(t2.id)}" style="cursor:pointer"` : "";
+    // fill/stroke via inline style (SVG presentation attributes don't resolve color-mix reliably)
+    nodes += `<g class="graph-node"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text></g>`;
+  });
+  return `<div class="graph-wrap"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg></div>`;
+}
+
+// ---- sidebar/topbar ----
+// ---- hash routing: every drill-down is linkable and refresh-safe ----
+let suppressHash = false;
+function setHash(h) { if (location.hash === h) return; suppressHash = true; location.hash = h; }
+function applyRoute() {
+  const seg = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent).filter(Boolean);
+  if (!seg.length || seg[0] === "dags") return loadDags();
+  if (seg[0] === "pools") return showPools();
+  if (seg[0] === "graph") return showGraph();
+  if (seg[0] === "run" && seg[1]) return showRun(seg[1]);
+  if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {
+    return showDag(seg[1]).then(() => { if (D && D.dag.dag_id === seg[1] && D.tasks.some((x) => x.id === seg[3])) showTask(seg[1], seg[3]); });
+  }
+  if (seg[0] === "dag" && seg[1]) return showDag(seg[1]);
+  return loadDags();
+}
+window.addEventListener("hashchange", () => { if (suppressHash) { suppressHash = false; return; } Promise.resolve(applyRoute()).catch(() => {}); });
+
+let serverTZ = "";
+async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }
+// navKey highlights a sidebar item; crumb (optional) overrides the topbar breadcrumb text.
+let lastNavLabel = null;
+function setNav(navKey, crumb) {
+  document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : "DAGs");
+  $("crumb").textContent = label;
+  // the topbar search only filters the dashboard list — hide it elsewhere.
+  const s = document.querySelector(".search"); if (s) s.classList.toggle("off", navKey !== "dags");
+  // 120ms crossfade — only when actually navigating, never on a data refresh
+  if (label !== lastNavLabel) {
+    lastNavLabel = label;
+    main.classList.remove("enter"); void main.offsetWidth; main.classList.add("enter");
+  }
+}
+
+// fill static [data-i18n] / [data-i18n-ph] + lang button
+function applyStaticI18n() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach((e) => e.textContent = t(e.dataset.i18n));
+  $("search").placeholder = t("search_ph");
+  $("lang").textContent = lang === "zh" ? "EN" : "中";
+  $("lang").setAttribute("aria-label", t("aria_lang"));
+  $("theme").setAttribute("aria-label", t("aria_theme"));
+}
+function setLang(l) {
+  lang = l; localStorage.setItem("cnv_lang", l); applyStaticI18n();
+  // dag/task re-render from in-memory D (no refetch) so unsaved edits survive.
+  if (view === "dags") renderDags();
+  else if (view === "dag") renderDagPage();
+  else if (view === "task") renderTaskPage();
+  else if (view === "run") showRun(currentRun);
+  else if (view === "pools") showPools();
+  else if (view === "graph") showGraph();
+}
+
