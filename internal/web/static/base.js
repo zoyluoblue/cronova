@@ -35,6 +35,7 @@ const DICT = {
     no_match: "没有匹配的 DAG", no_dags_title: "还没有 DAG", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
     back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
+    g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -105,6 +106,7 @@ const DICT = {
     no_match: "No matching DAGs", no_dags_title: "No DAGs yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
     back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
+    g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -280,9 +282,12 @@ function renderGraph(tasks, stateByTask, opts) {
     if (opts.pending === t2.id) { st = "var(--accent)"; sw = 2.6; }
     const dash = opts.dashed && opts.dashed.has(t2.id) ? ` stroke-dasharray="5 4"` : "";
     const p = pos[t2.id];
-    const attrs = (opts.editable || opts.clickable) ? ` data-node="${esc(t2.id)}" style="cursor:pointer"` : "";
+    // tag: expose data-node for live patching without making the node clickable
+    const clickable = opts.editable || opts.clickable;
+    const attrs = clickable ? ` data-node="${esc(t2.id)}" style="cursor:pointer"` : (opts.tag ? ` data-node="${esc(t2.id)}"` : "");
+    const cls = opts.tag && stateByTask && stateByTask[t2.id] === "running" ? "graph-node g-running" : "graph-node";
     // fill/stroke via inline style (SVG presentation attributes don't resolve color-mix reliably)
-    nodes += `<g class="graph-node"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text></g>`;
+    nodes += `<g class="${cls}"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text></g>`;
   });
   return `<div class="graph-wrap"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg></div>`;
 }

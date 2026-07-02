@@ -583,28 +583,112 @@ async function flushSave() {
 }
 
 // ---- run detail ----
+let runPoll = null, runTab = "instances", runDag = null;
+const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1 };
+const runLive = (s) => s === "queued" || s === "running";
+
 async function showRun(runID) {
-  view = "run"; currentRun = runID; closeLog(); setHash("#/run/" + encodeURIComponent(runID));
-  const data = await api(`/api/runs/${encodeURIComponent(runID)}`);
-  const r = data.run, dag = await api(`/api/dags/${r.dag_id}`);
+  view = "run"; currentRun = runID; closeLog(); clearInterval(runPoll); setHash("#/run/" + encodeURIComponent(runID));
+  let data;
+  try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  const r = data.run;
+  runDag = await api(`/api/dags/${r.dag_id}`);
   setNav("dags", `${r.dag_id} / ${t("run_word")}`);
-  const tasks = data.tasks || []; // a freshly-queued run has no task instances yet
-  const sbt = {}; tasks.forEach((tk) => sbt[tk.task_id] = tk.state);
+  const initSbt = {}; (data.tasks || []).forEach((tk) => initSbt[tk.task_id] = tk.state);
+  // static shell — the graph and #logwrap are built ONCE; polling patches only
+  // the leaf containers below, so a live log stream (in #logwrap) is never torn down.
   main.innerHTML = `
     <div class="crumb-bar"><a id="back">← ${esc(r.dag_id)}</a> / ${t("run_word")}</div>
-    <div class="page-h"><h1 class="mono" style="font-size:16px">${esc(r.run_id)}</h1>${badge(r.state)}</div>
+    <div class="page-h"><h1 class="mono" style="font-size:16px">${esc(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span></div>
     <div class="kv" style="margin:14px 0 4px">
       <div class="card"><div class="k">${t("k_logical")}</div><div class="v mono" style="font-size:13px">${esc(r.logical_date)}</div></div>
       <div class="card"><div class="k">${t("k_trig")}</div><div class="v">${typeLabel(r.trigger_type)}</div></div>
-      <div class="card"><div class="k">${t("k_dur")}</div><div class="v">${dur(r.started_at, r.finished_at)}</div></div>
+      <div class="card"><div class="k">${t("k_dur")}</div><div class="v" id="run-dur">${dur(r.started_at, r.finished_at)}</div></div>
       <div class="card"><div class="k">${t("k_started")}</div><div class="v" style="font-size:13px">${fmt(r.started_at)}</div></div></div>
-    <div class="section-h">${t("sec_graph")}</div>${renderGraph(dag.tasks, sbt)}
-    <div class="section-h">${t("sec_instances")}</div>
-    <table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th>${t("th_dur")}</th><th></th></tr></thead>
-    <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td>${dur(tk.started_at, tk.finished_at)}</td><td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button></td></tr>`).join("")}</tbody></table>
+    <div class="section-h">${t("sec_graph")}</div><div id="run-graph">${renderGraph(runDag.tasks, initSbt, { tag: true })}</div>
+    <div class="run-tabs" id="run-tabs">
+      <button class="pill ${runTab === "instances" ? "active" : ""}" data-rt="instances">${t("sec_instances")}</button>
+      <button class="pill ${runTab === "timeline" ? "active" : ""}" data-rt="timeline">${t("g_timeline")}</button>
+    </div>
+    <div id="run-body"></div>
     <div id="logwrap"></div>`;
   $("back").onclick = () => showDag(r.dag_id);
-  main.querySelectorAll(".logbtn").forEach((b) => b.onclick = () => showLog(b.dataset.ti, b.dataset.task));
+  $("run-tabs").querySelectorAll("[data-rt]").forEach((b) => b.onclick = () => {
+    runTab = b.dataset.rt;
+    $("run-tabs").querySelectorAll(".pill").forEach((x) => x.classList.toggle("active", x === b));
+    renderRunBody(runDataCache);
+  });
+  renderRunDynamic(data);
+  if (runLive(r.state)) startRunPoll(runID);
+}
+let runDataCache = null;
+function startRunPoll(runID) {
+  runPoll = setInterval(async () => {
+    if (view !== "run" || currentRun !== runID) { clearInterval(runPoll); return; } // navigated away
+    let data; try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (_) { return; }
+    if (view !== "run" || currentRun !== runID) return;
+    renderRunDynamic(data);
+    if (!runLive(data.run.state)) {
+      clearInterval(runPoll);
+      toast(data.run.state === "success" ? t("run_done_ok") : t("run_done_fail"), data.run.state === "success" ? "ok" : "fail");
+    }
+  }, 2000);
+}
+function renderRunDynamic(data) {
+  runDataCache = data;
+  const r = data.run, tasks = data.tasks || [];
+  const sbt = {}; tasks.forEach((tk) => sbt[tk.task_id] = tk.state);
+  $("run-badge").innerHTML = badge(r.state);
+  $("run-dur").textContent = dur(r.started_at, r.finished_at);
+  const done = tasks.filter((tk) => TASK_TERMINAL[tk.state]).length, running = tasks.filter((tk) => tk.state === "running").length;
+  $("run-progress").textContent = tasks.length ? `${done}/${tasks.length}${running ? ` · ${running} ${stateLabel("running")}` : ""}` : "";
+  patchGraphStates(sbt);
+  renderRunBody(data);
+}
+// patch existing graph node fills/strokes (never rebuild) so nodes light up with
+// the CSS fill transition as tasks execute
+function patchGraphStates(sbt) {
+  document.querySelectorAll("#run-graph [data-node]").forEach((g) => {
+    const s = sbt[g.dataset.node], [f, st] = colorForState(s), rect = g.querySelector("rect");
+    if (rect) { rect.style.fill = f; rect.style.stroke = st; }
+    g.classList.toggle("g-running", s === "running");
+  });
+}
+function renderRunBody(data) {
+  const el = $("run-body"); if (!el) return;
+  el.innerHTML = runTab === "timeline" ? ganttHtml(data) : instancesTableHtml(data);
+  el.querySelectorAll(".logbtn").forEach((b) => b.onclick = () => showLog(b.dataset.ti, b.dataset.task));
+  el.querySelectorAll(".gantt-row[data-ti]").forEach((row) => row.onclick = () => showLog(row.dataset.ti, row.dataset.task));
+}
+function instancesTableHtml(data) {
+  const tasks = data.tasks || [];
+  if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
+  return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th></th></tr></thead>
+    <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td><td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button></td></tr>`).join("")}</tbody></table>`;
+}
+// honest Gantt: bars positioned by real started_at/finished_at; tasks that never
+// ran show a muted marker (no fabricated "queued" segment); one bar per task
+// (the store keeps a single started/finished pair — no per-try segments).
+function ganttHtml(data) {
+  const r = data.run, tasks = data.tasks || [];
+  if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
+  const ms = (x) => x ? new Date(x).getTime() : null;
+  const starts = tasks.map((tk) => ms(tk.started_at)).filter(Boolean);
+  const ends = tasks.map((tk) => ms(tk.finished_at)).filter(Boolean);
+  let t0 = ms(r.started_at) || (starts.length ? Math.min(...starts) : Date.now());
+  let t1 = ms(r.finished_at) || (runLive(r.state) ? Date.now() : (ends.length ? Math.max(...ends) : t0 + 1000));
+  const span = Math.max(1000, t1 - t0);
+  const rows = tasks.map((tk) => {
+    const s = ms(tk.started_at);
+    if (!s) return `<div class="gantt-row"><div class="gantt-label mono">${esc(tk.task_id)}</div><div class="gantt-track"><span class="gantt-none">${stateLabel(tk.state) || t("g_never_ran")}</span></div></div>`;
+    const f = ms(tk.finished_at) || (tk.state === "running" ? Date.now() : s);
+    const left = (s - t0) / span * 100, w = Math.max(0.4, (Math.min(f, t1) - s) / span * 100);
+    const title = `${tk.task_id} · ${stateLabel(tk.state)} · ${dur(tk.started_at, tk.finished_at)} · ${fmt(tk.started_at)} → ${tk.finished_at ? fmt(tk.finished_at) : "…"}`;
+    const tryb = tk.try_number > 1 ? `<span class="g-try" title="${t("th_try")} ${tk.try_number}">×${tk.try_number}</span>` : "";
+    return `<div class="gantt-row" data-ti="${tk.id}" data-task="${esc(tk.task_id)}"><div class="gantt-label mono">${esc(tk.task_id)}${tryb}</div><div class="gantt-track"><div class="gantt-bar g-${esc(tk.state)}" style="left:${left.toFixed(2)}%;width:${w.toFixed(2)}%" title="${esc(title)}"></div></div></div>`;
+  }).join("");
+  return `<div class="gantt"><div class="gantt-rows">${rows}</div>
+    <div class="gantt-axis"><span>${esc(fmt(new Date(t0).toISOString()))}</span><span class="mono">${esc(dur(new Date(t0).toISOString(), new Date(t1).toISOString()))}</span><span>${runLive(r.state) ? "…" : esc(fmt(new Date(t1).toISOString()))}</span></div></div>`;
 }
 const LOG_CAP = 5000; // live-view buffer cap; the download link always serves the full file
 function showLog(tiID, taskID) {

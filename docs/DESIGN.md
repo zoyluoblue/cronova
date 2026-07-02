@@ -77,6 +77,24 @@ Principles:
 - **Save indicator:** the `.savestate` pill (`saved`/`saving`/`invalid`/`error`)
   reflects the real in-memory validity after every render — never hardcode
   "saved" at the end of a re-render.
+- **Live run view (read-only):** while a run is `queued`/`running`, `showRun`
+  polls `/api/runs/{id}` every 2s and patches only the leaf containers
+  (`#run-badge`, `#run-dur`, `#run-progress`, `#run-body`) plus the graph node
+  fills (`patchGraphStates` — the run graph is built once with `renderGraph(…,
+  {tag})` and thereafter only re-tinted, so the running-node `.g-running` pulse
+  and the fill transition read as live). `#logwrap` is **never** rebuilt, so an
+  open log stream survives a refresh. The poll **self-terminates** on a terminal
+  run state (then fires one success/fail toast) or on navigating away — this is
+  safe precisely because the page is read-only (no save pipeline to race). This
+  is the one sanctioned exception to whole-app re-render; it does not generalize
+  to the editable pages.
+- **Gantt honesty:** the Timeline tab positions one bar per task from its real
+  `started_at`/`finished_at`; the empty track between bars is genuine waiting
+  (queued time isn't stored — we do **not** draw a fabricated queued segment).
+  A task that never ran shows a muted state marker, not a zero-width bar. One bar
+  per task with a `×N` try badge — **no** per-try segments (the store keeps a
+  single started/finished pair). Bar colors are the same single-sourced state
+  vars as badges/graph (`.gantt-bar.g-<state>`).
 
 ## Explicitly NOT doing (anti-over-engineering)
 
@@ -86,8 +104,11 @@ Decided against in the design review; do not add without a real, measured reason
 - Loading skeletons / shimmer — localhost+SQLite fetches are sub-50ms; a flash reads as jank.
   (We instead guard the auto-refresh against no-op table rebuilds.)
 - Optimistic synthetic run rows — fabricating a run that may never exist is a trust violation.
-- A surgical no-re-render path for the graph — the one exception to the whole-app
-  re-render model; an inconsistency tax and bug farm.
+- A surgical no-re-render path for the graph on the **editable/dashboard** pages —
+  an inconsistency tax and bug farm there. (The **live run view** is the single
+  sanctioned exception: it is read-only, so patching leaf nodes + graph fills has
+  no save pipeline to race, and it must preserve a live log stream. See the
+  live-run-view convention above.)
 - Responsive sidebar collapse / mobile reflow — this is a desktop operator tool.
 - Brand gradients / decorative chrome — restraint is the identity.
 
