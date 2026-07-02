@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -23,9 +24,11 @@ import (
 	"time"
 
 	"github.com/zoyluo/cronova/internal/api"
+	"github.com/zoyluo/cronova/internal/auth"
 	"github.com/zoyluo/cronova/internal/executor"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/scheduler"
+	"github.com/zoyluo/cronova/internal/store"
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 	"github.com/zoyluo/cronova/internal/web"
 )
@@ -49,6 +52,8 @@ func main() {
 		err = cmdRuns(args)
 	case "pools":
 		err = cmdPools(args)
+	case "users":
+		err = cmdUsers(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -72,6 +77,10 @@ usage:
   cronova runs <dag_id>      show recent runs and task states
   cronova pools              list resource pools
   cronova pools set <name> <slots>   create or resize a pool
+  cronova users              list console accounts
+  cronova users add <name> -role admin|viewer -password ...   create an account
+  cronova users passwd <name> -password ...   change a password
+  cronova users delete <name>                 remove an account
 
 run "cronova <command> -h" for command flags
 `)
@@ -114,40 +123,79 @@ func openStore(dbPath string) (*sqlite.Store, error) {
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	configPath := fs.String("config", "cronova.yaml", "path to YAML config file (optional)")
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
 	logDir := fs.String("logs", "logs", "directory for task log files")
 	tick := fs.Duration("tick", 2*time.Second, "scheduling loop interval")
 	executorAddr := fs.String("executor", "", "gRPC executor target (e.g. unix:///tmp/cronova-executor.sock); empty = in-process executor")
 	httpAddr := fs.String("http", ":8090", "HTTP address for the console API + web UI (empty to disable)")
+	authFlag := fs.Bool("auth", false, "require login for the console/API (overrides config)")
 	_ = fs.Parse(args)
 
-	st, err := openStore(*dbPath)
+	// resolve settings: defaults <- config file <- CRONOVA_* env <- explicit flags
+	cfg := defaultConfig()
+	configExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configExplicit = true
+		}
+	})
+	if err := loadConfigFile(&cfg, *configPath, configExplicit); err != nil {
+		return err
+	}
+	applyEnv(&cfg)
+	overlaySetFlags(&cfg, fs, map[string]any{
+		"db": dbPath, "dags": dagDir, "logs": logDir, "tick": tick,
+		"executor": executorAddr, "http": httpAddr, "auth": authFlag,
+	})
+
+	tickDur, err := time.ParseDuration(cfg.Tick)
+	if err != nil || tickDur <= 0 {
+		return fmt.Errorf("invalid tick %q: %v", cfg.Tick, err)
+	}
+
+	st, err := openStore(cfg.DB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
+	// seed the initial admin (idempotent) before enabling auth, so a fresh
+	// deployment isn't locked out.
+	if cfg.Auth.AdminUser != "" && cfg.Auth.AdminPassword != "" {
+		if err := seedAdmin(context.Background(), st, cfg.Auth.AdminUser, cfg.Auth.AdminPassword); err != nil {
+			return err
+		}
+	}
+	if cfg.Auth.Enabled {
+		if n, _ := st.CountUsers(context.Background()); n == 0 {
+			log.Print("cronova: WARNING auth enabled but no users exist — create one with 'cronova users add' or set CRONOVA_ADMIN_USER/CRONOVA_ADMIN_PASSWORD")
+		}
+	} else {
+		log.Print("cronova: WARNING authentication is DISABLED — anyone who can reach the console may trigger/delete DAGs and run commands (enable with -auth or auth.enabled)")
+	}
+
 	var exec executor.Executor
 	executorLabel := "in-process"
-	if *executorAddr != "" {
-		client, err := executor.Dial(*executorAddr)
+	if cfg.Executor != "" {
+		client, err := executor.Dial(cfg.Executor)
 		if err != nil {
 			return err
 		}
 		defer client.Close()
 		exec = client
-		executorLabel = *executorAddr
-		log.Printf("cronova: using remote executor at %s", *executorAddr)
+		executorLabel = cfg.Executor
+		log.Printf("cronova: using remote executor at %s", cfg.Executor)
 	} else {
 		exec = executor.NewLocal()
 		log.Print("cronova: using in-process executor (tasks die on restart; use -executor for crash recovery)")
 	}
 
 	sch := scheduler.New(st, exec, scheduler.Options{
-		DagDir: *dagDir,
-		LogDir: *logDir,
-		Tick:   *tick,
+		DagDir: cfg.Dags,
+		LogDir: cfg.Logs,
+		Tick:   tickDur,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -156,11 +204,12 @@ func cmdServe(args []string) error {
 	// Console (REST API + web UI) runs in-process alongside the scheduler loop.
 	var httpSrv *http.Server
 	httpErrCh := make(chan error, 1)
-	if *httpAddr != "" {
-		apiSrv := api.New(st, sch, *logDir, web.FS(), api.Info{Executor: executorLabel, Tick: tick.String()})
-		httpSrv = &http.Server{Addr: *httpAddr, Handler: apiSrv.Handler()}
+	if cfg.HTTP != "" {
+		apiSrv := api.New(st, sch, cfg.Logs, web.FS(), api.Info{Executor: executorLabel, Tick: tickDur.String()})
+		apiSrv.SetAuth(api.AuthConfig{Enabled: cfg.Auth.Enabled, SessionTTL: cfg.sessionTTL(), SecureCookie: cfg.Auth.SecureCookie})
+		httpSrv = &http.Server{Addr: cfg.HTTP, Handler: apiSrv.Handler()}
 		go func() {
-			log.Printf("cronova: console on http://%s", *httpAddr)
+			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)
 			err := httpSrv.ListenAndServe()
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("cronova: http server error: %v", err)
@@ -328,4 +377,138 @@ func cmdRuns(args []string) error {
 			r.RunID, r.LogicalDate.Format(time.RFC3339), r.State, r.TriggerType, summary)
 	}
 	return w.Flush()
+}
+
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// seedAdmin creates an admin account if the username does not yet exist (idempotent).
+func seedAdmin(ctx context.Context, st *sqlite.Store, username, password string) error {
+	if _, err := st.GetUserByUsername(ctx, username); err == nil {
+		return nil // already present
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	log.Printf("cronova: seeding admin account %q", username)
+	return st.CreateUser(ctx, &model.User{Username: username, PasswordHash: hash, Role: model.RoleAdmin})
+}
+
+// cmdUsers manages console/API accounts: add | list | passwd | delete.
+func cmdUsers(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cronova users <add|list|passwd|delete> [name]")
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("users", flag.ExitOnError)
+	dbPath := fs.String("db", envOr("CRONOVA_DB", "data/cronova.db"), "SQLite metadata database path")
+	role := fs.String("role", "viewer", "role for 'add': admin or viewer")
+	pw := fs.String("password", "", "password (for add/passwd); if empty, read from stdin")
+	pos := parsePositionals(fs, rest)
+
+	st, err := openStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	switch sub {
+	case "list":
+		users, err := st.ListUsers(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(w, "USERNAME\tROLE\tCREATED")
+		for _, u := range users {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", u.Username, u.Role, u.CreatedAt.Format(time.RFC3339))
+		}
+		return w.Flush()
+
+	case "add":
+		if len(pos) < 1 {
+			return fmt.Errorf("usage: cronova users add <name> -role admin|viewer")
+		}
+		r := model.Role(*role)
+		if r != model.RoleAdmin && r != model.RoleViewer {
+			return fmt.Errorf("invalid role %q (want admin or viewer)", *role)
+		}
+		pass, err := resolvePassword(*pw)
+		if err != nil {
+			return err
+		}
+		hash, err := auth.HashPassword(pass)
+		if err != nil {
+			return err
+		}
+		if err := st.CreateUser(ctx, &model.User{Username: pos[0], PasswordHash: hash, Role: r}); err != nil {
+			return fmt.Errorf("create user (already exists?): %w", err)
+		}
+		fmt.Printf("created %s account %q\n", r, pos[0])
+		return nil
+
+	case "passwd":
+		if len(pos) < 1 {
+			return fmt.Errorf("usage: cronova users passwd <name>")
+		}
+		u, err := st.GetUserByUsername(ctx, pos[0])
+		if err != nil {
+			return fmt.Errorf("user %q: %w", pos[0], err)
+		}
+		pass, err := resolvePassword(*pw)
+		if err != nil {
+			return err
+		}
+		hash, err := auth.HashPassword(pass)
+		if err != nil {
+			return err
+		}
+		if err := st.UpdateUserPassword(ctx, u.ID, hash); err != nil {
+			return err
+		}
+		fmt.Printf("password updated for %q (existing sessions revoked)\n", pos[0])
+		return nil
+
+	case "delete":
+		if len(pos) < 1 {
+			return fmt.Errorf("usage: cronova users delete <name>")
+		}
+		u, err := st.GetUserByUsername(ctx, pos[0])
+		if err != nil {
+			return fmt.Errorf("user %q: %w", pos[0], err)
+		}
+		if err := st.DeleteUser(ctx, u.ID); err != nil {
+			return err
+		}
+		fmt.Printf("deleted account %q\n", pos[0])
+		return nil
+
+	default:
+		return fmt.Errorf("unknown users subcommand %q (want add|list|passwd|delete)", sub)
+	}
+}
+
+// resolvePassword returns the flag value, or reads a line from stdin when empty.
+func resolvePassword(flagVal string) (string, error) {
+	if flagVal != "" {
+		return flagVal, nil
+	}
+	fmt.Fprint(os.Stderr, "password: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	pass := strings.TrimRight(line, "\r\n")
+	if pass == "" {
+		return "", fmt.Errorf("empty password")
+	}
+	return pass, nil
 }

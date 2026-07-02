@@ -64,6 +64,27 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Console/API accounts. Passwords are bcrypt hashes (never plaintext). role is
+-- 'admin' (full access) or 'viewer' (read-only). Auth is opt-in (auth.enabled).
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'viewer',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Opaque server-side sessions (DB-backed so they survive restart and can be
+-- revoked on logout). token is a random 256-bit value stored in an httpOnly cookie.
+CREATE TABLE IF NOT EXISTS sessions (
+    token       TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at  DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_ti_state   ON task_instances(state);
 CREATE INDEX IF NOT EXISTS idx_ti_run     ON task_instances(run_id);
 CREATE INDEX IF NOT EXISTS idx_ti_pool    ON task_instances(pool, state);

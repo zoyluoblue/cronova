@@ -34,9 +34,10 @@ type Engine interface {
 
 // Info is static runtime metadata shown in the console's status panel.
 type Info struct {
-	Executor string `json:"executor"`
-	Tick     string `json:"tick"`
-	TZ       string `json:"tz"` // server timezone label, e.g. "CST (UTC+08:00)"
+	Executor    string `json:"executor"`
+	Tick        string `json:"tick"`
+	TZ          string `json:"tz"` // server timezone label, e.g. "CST (UTC+08:00)"
+	AuthEnabled bool   `json:"auth_enabled"`
 }
 
 // Server holds the API dependencies.
@@ -46,6 +47,7 @@ type Server struct {
 	logDir string
 	web    fs.FS
 	info   Info
+	auth   AuthConfig
 }
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
@@ -56,6 +58,12 @@ func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Serve
 		info.TZ = "UTC"
 	}
 	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info}
+}
+
+// SetAuth enables/configures authentication. Must be called before Handler().
+func (s *Server) SetAuth(cfg AuthConfig) {
+	s.auth = cfg
+	s.info.AuthEnabled = cfg.Enabled
 }
 
 // Handler builds the HTTP routes (Go 1.22+ method+pattern mux).
@@ -78,6 +86,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{tiID}/log/stream", s.streamLog)
 	mux.HandleFunc("GET /api/pools", s.listPools)
 	mux.HandleFunc("POST /api/pools/{name}", s.setPool)
+	// auth + ops endpoints
+	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("POST /api/logout", s.logout)
+	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
 	if s.web != nil {
 		// no-cache: embedded assets share a fixed modtime, so without this a
 		// browser can serve a stale console after the binary is upgraded.
@@ -87,7 +101,7 @@ func (s *Server) Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 		}))
 	}
-	return mux
+	return s.withAuth(mux)
 }
 
 // --- helpers ---
@@ -100,6 +114,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func httpErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// decodeJSON reads a JSON request body (capped at 1 MiB) into v.
+func decodeJSON(r *http.Request, v any) error {
+	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
 func mapErr(w http.ResponseWriter, err error) {

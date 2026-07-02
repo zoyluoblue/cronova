@@ -591,3 +591,133 @@ func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error
 		Scan(&n)
 	return n, err
 }
+
+// ---- auth: users + sessions ----
+
+const userCols = `id, username, password_hash, role, created_at`
+
+func scanUser(sc scanner) (*model.User, error) {
+	var u model.User
+	var role, created string
+	if err := sc.Scan(&u.ID, &u.Username, &u.PasswordHash, &role, &created); err != nil {
+		return nil, err
+	}
+	u.Role = model.Role(role)
+	u.CreatedAt = parseLoose(created)
+	return &u, nil
+}
+
+func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (username, password_hash, role) VALUES (?,?,?)`,
+		u.Username, u.PasswordHash, string(u.Role))
+	if err != nil {
+		return err
+	}
+	u.ID, _ = res.LastInsertId()
+	return nil
+}
+
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*model.User, error) {
+	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username=?`, username))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return u, err
+}
+
+func (s *Store) GetUserByID(ctx context.Context, id int64) (*model.User, error) {
+	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return u, err
+}
+
+func (s *Store) ListUsers(ctx context.Context) ([]*model.User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) UpdateUserPassword(ctx context.Context, id int64, passwordHash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, passwordHash, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, id) // revoke on password change
+	return err
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id int64) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, id); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CreateSession(ctx context.Context, se *model.Session) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)`,
+		se.Token, se.UserID, fmtTime(se.ExpiresAt))
+	return err
+}
+
+func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
+	var se model.Session
+	var created, expires string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT token, user_id, created_at, expires_at FROM sessions WHERE token=?`, token).
+		Scan(&se.Token, &se.UserID, &created, &expires)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	se.CreatedAt = parseLoose(created)
+	se.ExpiresAt = parseLoose(expires)
+	if !se.ExpiresAt.After(time.Now()) { // expired: prune + treat as absent
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, token)
+		return nil, store.ErrNotFound
+	}
+	return &se, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, token)
+	return err
+}
+
+func (s *Store) DeleteExpiredSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, fmtTime(time.Now()))
+	return err
+}

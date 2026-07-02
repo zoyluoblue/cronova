@@ -71,5 +71,21 @@ type Store interface {
 	// slot in the named pool (states queued + running).
 	CountRunningInPool(ctx context.Context, pool string) (int, error)
 
+	// --- auth: users + sessions ---
+	CreateUser(ctx context.Context, u *model.User) error
+	GetUserByUsername(ctx context.Context, username string) (*model.User, error)
+	GetUserByID(ctx context.Context, id int64) (*model.User, error)
+	ListUsers(ctx context.Context) ([]*model.User, error)
+	CountUsers(ctx context.Context) (int, error)
+	// UpdateUserPassword sets a new bcrypt hash and revokes the user's sessions.
+	UpdateUserPassword(ctx context.Context, id int64, passwordHash string) error
+	DeleteUser(ctx context.Context, id int64) error
+	CreateSession(ctx context.Context, s *model.Session) error
+	// GetSession returns the session only if it exists and has not expired.
+	GetSession(ctx context.Context, token string) (*model.Session, error)
+	DeleteSession(ctx context.Context, token string) error
+	// DeleteExpiredSessions prunes sessions past their expiry.
+	DeleteExpiredSessions(ctx context.Context) error
+
 	Close() error
 }

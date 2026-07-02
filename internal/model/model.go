@@ -130,3 +130,28 @@ type Pool struct {
 
 // DefaultPoolName is the pool tasks land in when none is specified.
 const DefaultPoolName = "default"
+
+// Role is a console/API authorization level.
+type Role string
+
+const (
+	RoleAdmin  Role = "admin"  // full access: trigger, edit, delete
+	RoleViewer Role = "viewer" // read-only
+)
+
+// User is a console/API account. PasswordHash is bcrypt and is never serialized.
+type User struct {
+	ID           int64     `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
+	Role         Role      `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// Session is an opaque server-side session bound to a user.
+type Session struct {
+	Token     string    `json:"-"`
+	UserID    int64     `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
