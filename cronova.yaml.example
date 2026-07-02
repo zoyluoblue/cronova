@@ -1,0 +1,19 @@
+# cronova configuration — copy to cronova.yaml (all keys optional).
+# Precedence, highest first:  flag  >  CRONOVA_* env  >  this file  >  built-in default.
+
+db: data/cronova.db
+dags: dags
+logs: logs
+tick: 2s
+# executor: unix:///tmp/cronova-executor.sock   # empty = in-process executor
+http: ":8090"                                    # empty disables the console/API
+
+auth:
+  enabled: false          # set true to require login for the console + API
+  session_ttl: 24h
+  secure_cookie: false    # set true when served over HTTPS (marks the cookie Secure)
+  # Seed an initial admin on first start (idempotent). You can also run:
+  #   cronova users add <name> -role admin
+  # Prefer the CRONOVA_ADMIN_PASSWORD env var over storing a password in this file.
+  admin_user: ""
+  admin_password: ""

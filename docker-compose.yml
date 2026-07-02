@@ -1,0 +1,22 @@
+services:
+  cronova:
+    build: .
+    image: cronova:latest
+    ports:
+      - "8090:8090"
+    environment:
+      # auth is ON in the compose deployment; seed the first admin from .env
+      CRONOVA_AUTH: "true"
+      CRONOVA_ADMIN_USER: "${CRONOVA_ADMIN_USER:-admin}"
+      CRONOVA_ADMIN_PASSWORD: "${CRONOVA_ADMIN_PASSWORD:?set CRONOVA_ADMIN_PASSWORD in .env}"
+      # set true when serving over HTTPS (marks the session cookie Secure)
+      CRONOVA_SECURE_COOKIE: "${CRONOVA_SECURE_COOKIE:-false}"
+    volumes:
+      - cronova-data:/app/data   # SQLite metadata (persisted)
+      - cronova-logs:/app/logs   # task logs (persisted)
+      - ./dags:/app/dags         # DAG YAML — edit locally, the console also writes here
+    restart: unless-stopped
+
+volumes:
+  cronova-data:
+  cronova-logs:

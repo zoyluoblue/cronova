@@ -54,6 +54,8 @@ func main() {
 		err = cmdPools(args)
 	case "users":
 		err = cmdUsers(args)
+	case "healthcheck":
+		err = cmdHealthcheck(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -81,6 +83,7 @@ usage:
   cronova users add <name> -role admin|viewer -password ...   create an account
   cronova users passwd <name> -password ...   change a password
   cronova users delete <name>                 remove an account
+  cronova healthcheck        probe /readyz and exit non-zero if unhealthy
 
 run "cronova <command> -h" for command flags
 `)
@@ -377,6 +380,31 @@ func cmdRuns(args []string) error {
 			r.RunID, r.LogicalDate.Format(time.RFC3339), r.State, r.TriggerType, summary)
 	}
 	return w.Flush()
+}
+
+// cmdHealthcheck probes /readyz over HTTP and exits non-zero if unhealthy. It
+// exists so a distroless container (no shell/curl) can define a Docker HEALTHCHECK
+// using the cronova binary itself.
+func cmdHealthcheck(args []string) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
+	addr := fs.String("http", envOr("CRONOVA_HTTP", ":8090"), "server HTTP address")
+	path := fs.String("path", "/readyz", "path to probe")
+	_ = fs.Parse(args)
+	host := *addr
+	if strings.HasPrefix(host, ":") {
+		host = "localhost" + host
+	}
+	host = strings.Replace(host, "0.0.0.0", "127.0.0.1", 1)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + host + *path)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unhealthy: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func envOr(key, def string) string {

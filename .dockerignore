@@ -1,0 +1,14 @@
+.git
+.gitignore
+data
+logs
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+scratchpad
+node_modules
+.env
+Dockerfile
+docker-compose.yml
+.dockerignore
