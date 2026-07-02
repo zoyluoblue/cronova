@@ -9,6 +9,7 @@ let currentRun = null;
 let filter = "all";
 let query = "";
 let overviewCache = null;
+let authUser = null; // {username, role, auth} when signed in; null before auth resolves
 let logES = null;
 let lang = localStorage.getItem("cnv_lang") || "zh";
 let theme = localStorage.getItem("cnv_theme") || "dark";
@@ -38,6 +39,7 @@ const DICT = {
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
+    login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -111,6 +113,7 @@ const DICT = {
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
+    login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -197,7 +200,15 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 // ---- helpers ----
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {} throw new Error(m); }
+  if (!r.ok) {
+    let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {}
+    const err = new Error(m); err.status = r.status;
+    // session expired mid-use → bounce to login (not during the auth calls themselves)
+    if (r.status === 401 && authUser && !path.startsWith("/api/login") && !path.startsWith("/api/me")) {
+      authUser = null; showLogin(true);
+    }
+    throw err;
+  }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
 }
@@ -421,6 +432,69 @@ window.addEventListener("hashchange", () => { if (suppressHash) { suppressHash =
 
 let serverTZ = "";
 async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }
+// ---- auth: login gate + user chip ----
+// Resolve who we are. /api/me is 200 (authed, or auth-disabled → implicit admin)
+// or 401 (login required). Returns whether the app may start.
+async function initAuth() {
+  try { authUser = await api("/api/me"); }
+  catch (e) {
+    if (e.status === 401) { showLogin(false); return false; }
+    authUser = { role: "admin", auth: false }; // transient error: don't hard-block
+    return true;
+  }
+  document.body.dataset.role = authUser.role || "admin";
+  renderUserChip();
+  return true;
+}
+function renderUserChip() {
+  const el = $("user-chip"); if (!el) return;
+  if (!authUser || authUser.auth === false || !authUser.username) { el.hidden = true; el.innerHTML = ""; return; }
+  const roleLbl = authUser.role === "viewer" ? t("role_viewer") : t("role_admin");
+  el.hidden = false;
+  el.innerHTML = `<div class="uc-id"><span class="uc-name">${esc(authUser.username)}</span><span class="uc-role">${roleLbl}</span></div><button class="uc-logout" id="uc-logout">${t("logout")}</button>`;
+  $("uc-logout").onclick = doLogout;
+  const nd = $("newdag"); if (nd) nd.style.display = authUser.role === "admin" ? "" : "none"; // hide write CTA for viewers
+}
+async function doLogout() {
+  try { await api("/api/logout", { method: "POST" }); } catch (_) {}
+  authUser = null; showLogin(false);
+}
+function showLogin(expired) {
+  const root = $("login-root"); if (!root) return;
+  root.innerHTML = `
+    <div class="login-overlay">
+      <form class="login-card" id="login-form" novalidate>
+        <div class="login-logo"><span class="logo" style="width:22px;height:22px;font-size:13px">c</span> cronova</div>
+        <div class="login-h">${t("login_title")}</div>
+        <div class="login-sub">${expired ? t("sess_expired") : t("login_sub")}</div>
+        <label class="login-lbl">${t("login_user")}<input id="login-user" autocomplete="username"></label>
+        <label class="login-lbl">${t("login_pass")}<input id="login-pass" type="password" autocomplete="current-password"></label>
+        <div class="login-err" id="login-err" hidden></div>
+        <button class="primary login-submit" type="submit">${t("login_btn")}</button>
+      </form>
+    </div>`;
+  const form = $("login-form"), errEl = $("login-err"), btn = form.querySelector("button");
+  form.onsubmit = async (e) => {
+    e.preventDefault(); btn.disabled = true; errEl.hidden = true;
+    try {
+      await api("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: $("login-user").value, password: $("login-pass").value }) });
+      root.innerHTML = "";
+      if (await initAuth()) startApp();
+    } catch (err) {
+      errEl.textContent = err.status === 401 ? t("login_bad") : (err.message || t("api_err"));
+      errEl.hidden = false; btn.disabled = false;
+      $("login-pass").value = ""; $("login-pass").focus();
+    }
+  };
+  $("login-user").focus();
+}
+// startApp runs the normal boot once we know the user is authorized.
+function startApp() {
+  loadInfo();
+  Promise.resolve(applyRoute()).catch((e) => { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; });
+}
+
 // navKey highlights a sidebar item; crumb (optional) overrides the topbar breadcrumb text.
 let lastNavLabel = null;
 function setNav(navKey, crumb) {

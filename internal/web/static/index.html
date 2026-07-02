@@ -23,6 +23,7 @@
       <div class="nav-item" data-nav="pools" role="link" tabindex="0"><span class="ic">▥</span> Pools <span class="count" id="nav-pools">·</span></div>
     </nav>
     <div class="side-foot">
+      <div class="user-chip" id="user-chip" hidden></div>
       <div class="stat-row"><span class="dot"></span><span class="lbl">executor</span><span class="sub" id="f-exec">—</span></div>
       <div class="stat-row"><span class="dot" style="background:var(--accent);box-shadow:0 0 0 3px rgba(107,123,255,.15)"></span><span class="lbl">scheduler</span><span class="sub" id="f-tick">—</span></div>
     </div>
@@ -42,6 +43,7 @@
 </div>
 <div id="modal-root"></div>
 <div id="toast-root" class="toast-stack" aria-live="polite"></div>
+<div id="login-root"></div>
 <!-- classic scripts in load order share one global scope (no build step):
      base = state/i18n/helpers · views = pages · builder = schedule/templates/new-DAG · boot = wiring -->
 <script src="/base.js"></script>

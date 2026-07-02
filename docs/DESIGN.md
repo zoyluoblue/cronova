@@ -85,6 +85,16 @@ Principles:
 - **Save indicator:** the `.savestate` pill (`saved`/`saving`/`invalid`/`error`)
   reflects the real in-memory validity after every render — never hardcode
   "saved" at the end of a re-render.
+- **Auth gate (`initAuth`):** boot resolves identity via `GET /api/me` before
+  rendering anything data-bearing. 200 → start the app; 401 → a full-screen
+  login overlay (`#login-root`), and `startApp()` runs only after a successful
+  `POST /api/login`. When auth is **disabled** the server reports an implicit
+  admin (`auth:false`) so the console opens exactly as before — no login, no
+  user chip. A 401 from any later `api()` call bounces back to the overlay
+  ("session expired"). Role is mirrored to `body[data-role]`; the write CTA is
+  hidden for `viewer`, and the **server** is the real gate (writes → 403), so
+  the frontend only avoids offering doomed actions, never relies on hiding for
+  security. Cookies are httpOnly; the token never touches JS.
 - **Live run view (read-only):** while a run is `queued`/`running`, `showRun`
   polls `/api/runs/{id}` every 2s and patches only the leaf containers
   (`#run-badge`, `#run-dur`, `#run-progress`, `#run-body`) plus the graph node

@@ -21,15 +21,15 @@ document.addEventListener("keydown", (e) => {
   if (el && el.matches && el.matches('[tabindex="0"][role]:not(input):not(textarea):not(select)')) { e.preventDefault(); el.click(); }
 });
 applyStaticI18n();
-loadInfo();
-// boot from the URL hash, so deep links / refresh land on the right page
-Promise.resolve(applyRoute()).catch((e) => { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; });
+// auth gate: resolve identity first. If a login is required, initAuth shows the
+// overlay and startApp() runs only after a successful sign-in; otherwise start now.
+initAuth().then((ok) => { if (ok) startApp(); });
 // Heartbeat: refresh the executor/scheduler footer (honest tick) every cycle,
 // and the dashboard ONLY when it's showing AND the data actually changed (no
 // gratuitous table rebuild / flash). Never touches the edit pages; pauses
 // entirely while the tab is hidden.
 setInterval(async () => {
-  if (document.hidden) return;
+  if (document.hidden || !authUser) return; // paused until signed in
   loadInfo();
   if (view !== "dags" || logES || $("modal-root").innerHTML) return;
   try {
