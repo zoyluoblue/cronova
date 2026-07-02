@@ -36,6 +36,7 @@ type Engine interface {
 type Info struct {
 	Executor string `json:"executor"`
 	Tick     string `json:"tick"`
+	TZ       string `json:"tz"` // server timezone label, e.g. "CST (UTC+08:00)"
 }
 
 // Server holds the API dependencies.
@@ -48,6 +49,12 @@ type Server struct {
 }
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
+	if info.TZ == "" {
+		// The engine evaluates schedules against UTC anchors (all persisted
+		// timestamps are UTC), so UTC — not the server's wall clock — is the
+		// honest label for "what timezone do cron fields mean".
+		info.TZ = "UTC"
+	}
 	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info}
 }
 
@@ -58,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/dags", s.listDAGs)
 	mux.HandleFunc("GET /api/dag-graph", s.dagGraph)
+	mux.HandleFunc("GET /api/schedule/preview", s.schedulePreview)
 	mux.HandleFunc("POST /api/dags", s.createDAG)
 	mux.HandleFunc("POST /api/dags/build", s.buildDAG)
 	mux.HandleFunc("GET /api/dags/{id}", s.getDAG)
@@ -111,6 +119,46 @@ func mapErr(w http.ResponseWriter, err error) {
 
 func (s *Server) getInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.info)
+}
+
+// schedulePreview returns the next n fire times for a schedule expression,
+// computed by the SAME parser the engine uses — the console never does
+// client-side cron math (it would drift and lie). Stateless editing preview:
+// anchored at now (or start_date, if later), NOT at the engine's run anchor.
+func (s *Server) schedulePreview(w http.ResponseWriter, r *http.Request) {
+	spec := r.URL.Query().Get("schedule")
+	if spec == "" {
+		httpErr(w, http.StatusBadRequest, "schedule is required")
+		return
+	}
+	sched, err := parser.ParseSchedule(spec)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid schedule: "+err.Error())
+		return
+	}
+	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+	if n <= 0 {
+		n = 3
+	}
+	if n > 10 {
+		n = 10
+	}
+	anchor := time.Now().UTC()
+	if sd := r.URL.Query().Get("start_date"); sd != "" {
+		if ts, terr := time.Parse("2006-01-02", sd); terr == nil && ts.After(anchor) {
+			anchor = ts.UTC()
+		}
+	}
+	fires := make([]string, 0, n)
+	cur := anchor
+	for i := 0; i < n; i++ {
+		cur = sched.Next(cur)
+		if cur.IsZero() {
+			break
+		}
+		fires = append(fires, cur.Format(time.RFC3339))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"fires": fires})
 }
 
 func (s *Server) listDAGs(w http.ResponseWriter, r *http.Request) {

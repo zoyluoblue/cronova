@@ -332,6 +332,54 @@ func TestDeleteDAG(t *testing.T) {
 	}
 }
 
+// The stateless schedule preview must reuse the engine's parser and return
+// ascending future fire times; invalid expressions are client errors.
+func TestSchedulePreview(t *testing.T) {
+	h, _, _, _ := setup(t)
+	rec, body := get(t, h, "GET", "/api/schedule/preview?schedule="+strings.ReplaceAll("@every 1m", " ", "%20")+"&n=3")
+	if rec.Code != 200 {
+		t.Fatalf("preview: %d %v", rec.Code, body)
+	}
+	fires := body.(map[string]any)["fires"].([]any)
+	if len(fires) != 3 {
+		t.Fatalf("want 3 fires, got %d", len(fires))
+	}
+	var prev time.Time
+	for i, f := range fires {
+		ts, err := time.Parse(time.RFC3339, f.(string))
+		if err != nil {
+			t.Fatalf("fire %d not RFC3339: %v", i, err)
+		}
+		if !ts.After(prev) {
+			t.Errorf("fires not ascending at %d", i)
+		}
+		if ts.Before(time.Now().Add(-time.Minute)) {
+			t.Errorf("fire %d in the past: %v", i, ts)
+		}
+		prev = ts
+	}
+
+	// future start_date anchors the first fire after it
+	rec, body = get(t, h, "GET", "/api/schedule/preview?schedule=%40every%201h&start_date=2030-01-01&n=1")
+	if rec.Code != 200 {
+		t.Fatalf("anchored preview: %d", rec.Code)
+	}
+	first, _ := time.Parse(time.RFC3339, body.(map[string]any)["fires"].([]any)[0].(string))
+	if first.Year() != 2030 {
+		t.Errorf("start_date anchor ignored: first fire %v", first)
+	}
+
+	// invalid cron -> 400; missing schedule -> 400
+	rec, _ = get(t, h, "GET", "/api/schedule/preview?schedule=not%20a%20cron")
+	if rec.Code != 400 {
+		t.Errorf("invalid schedule should 400, got %d", rec.Code)
+	}
+	rec, _ = get(t, h, "GET", "/api/schedule/preview")
+	if rec.Code != 400 {
+		t.Errorf("missing schedule should 400, got %d", rec.Code)
+	}
+}
+
 func TestPools(t *testing.T) {
 	h, st, _, _ := setup(t)
 	rec, _ := get(t, h, "POST", "/api/pools/heavy?slots=3")
