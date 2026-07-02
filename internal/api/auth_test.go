@@ -66,12 +66,14 @@ func loginCookie(t *testing.T, h http.Handler, user, pass string) *http.Cookie {
 func TestAuthProtectsAPIAndPublicPaths(t *testing.T) {
 	h := authServer(t, model.RoleAdmin)
 
-	// protected without a cookie → 401
-	if rec := do(h, "GET", "/api/overview", "", nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth overview = %d, want 401", rec.Code)
+	// protected without a cookie → 401 (incl. /api/info: it discloses infra metadata)
+	for _, p := range []string{"/api/overview", "/api/info"} {
+		if rec := do(h, "GET", p, "", nil); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauth %s = %d, want 401", p, rec.Code)
+		}
 	}
-	// public paths reachable without auth
-	for _, p := range []string{"/api/info", "/healthz", "/readyz"} {
+	// only login + health probes are public
+	for _, p := range []string{"/healthz", "/readyz"} {
 		if rec := do(h, "GET", p, "", nil); rec.Code != http.StatusOK {
 			t.Fatalf("public %s = %d, want 200", p, rec.Code)
 		}

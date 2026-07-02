@@ -51,11 +51,13 @@ func (s *Server) currentUser(r *http.Request) (*model.User, error) {
 	return s.store.GetUserByID(r.Context(), sess.UserID)
 }
 
-// withAuth guards /api/* when auth is enabled. Static assets, /api/info, login,
-// and health probes stay public so the login screen can load and probes work.
+// withAuth guards /api/* when auth is enabled. Static assets, login, and health
+// probes stay public so the login screen can load and probes work; /api/info is
+// NOT public (it discloses the executor target/tick) — the pre-auth flow only
+// needs /api/login and /api/me, and loadInfo() runs after auth resolves.
 // Reads (GET) allow any authenticated user; writes require the admin role.
 func (s *Server) withAuth(next http.Handler) http.Handler {
-	public := map[string]bool{"/api/login": true, "/api/info": true, "/healthz": true, "/readyz": true}
+	public := map[string]bool{"/api/login": true, "/healthz": true, "/readyz": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.auth.Enabled {
 			next.ServeHTTP(w, r)
