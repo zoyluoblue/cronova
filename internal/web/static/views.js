@@ -377,7 +377,7 @@ function triggerParamsDialog() {
       <h2>${t("trig_params")}</h2>
       <div class="body">
         <div class="field-hint" style="margin-bottom:12px">${esc(t("p_hint"))}</div>
-        <div id="tp-rows">${rows.map((r, i) => `<div class="tp-row"><input class="tp-k mono" data-i="${i}" placeholder="${t("p_key")}" value="${esc(r.k)}"><input class="tp-v mono" data-i="${i}" placeholder="${t("p_val")}" value="${esc(r.v)}"><button class="icon tp-rm" data-i="${i}" aria-label="✕">✕</button></div>`).join("")}</div>
+        <div id="tp-rows">${rows.map((r, i) => `<div class="tp-row"><input class="tp-k mono" data-i="${i}" placeholder="${t("p_key")}" value="${esc(r.k)}"><input class="tp-v mono" data-i="${i}" placeholder="${t("p_val")}" value="${esc(r.v)}"><button class="icon tp-rm" data-i="${i}" aria-label="${t("btn_delete")}">✕</button></div>`).join("")}</div>
         <button class="icon" id="tp-add" style="margin-top:8px">+ ${t("p_add")}</button>
       </div>
       <div class="foot"><button id="tp-cancel">${t("nd_cancel")}</button><button class="primary" id="tp-go">${t("p_trigger")}</button></div>
@@ -932,17 +932,27 @@ function varsTabHtml() {
     <div class="toolbar" style="margin-top:16px"><input id="nv-key" class="mono" placeholder="${t("v_key")}" style="width:240px"><input id="nv-val" class="mono" placeholder="${t("v_value")}"><button class="primary" id="nv-add">${t("v_add")}</button></div>`;
 }
 function wireVarsTab() {
+  // keep RES in sync with each row input so a re-render (add/delete/lang toggle)
+  // preserves sibling rows' unsaved edits instead of reverting them.
+  main.querySelectorAll(".v-val").forEach((el) => el.oninput = () => { const v = RES.vars.find((x) => x.key === el.dataset.key); if (v) v.value = el.value; });
   main.querySelectorAll("[data-vsave]").forEach((b) => b.onclick = () => saveVar(b.dataset.vsave, main.querySelector(`.v-val[data-key="${CSS.escape(b.dataset.vsave)}"]`).value));
   main.querySelectorAll("[data-vdel]").forEach((b) => b.onclick = () => delVar(b.dataset.vdel));
   $("nv-add").onclick = () => { const k = $("nv-key").value.trim(); if (!k) { toast(t("v_key"), "warn"); return; } if (!CFG_KEY_RE.test(k)) { toast(t("err_key"), "warn"); return; } saveVar(k, $("nv-val").value); };
 }
 async function saveVar(key, value) {
-  try { await api(`/api/variables/${encodeURIComponent(key)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) }); toast(t("res_saved"), "ok"); showResources(); }
-  catch (e) { toast(e.message, "fail"); }
+  try {
+    await api(`/api/variables/${encodeURIComponent(key)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) });
+    // update RES in place (no refetch — that would wipe unsaved sibling rows). An
+    // existing row needs no re-render (its input already shows the value); a new
+    // one re-renders, and the input sync above keeps the other rows intact.
+    const v = RES.vars.find((x) => x.key === key);
+    if (v) { v.value = value; } else { RES.vars.push({ key, value }); RES.vars.sort((a, b) => (a.key < b.key ? -1 : 1)); renderResources(); }
+    toast(t("res_saved"), "ok");
+  } catch (e) { toast(e.message, "fail"); }
 }
 async function delVar(key) {
   if (!(await confirmDialog(t("v_del_title", key), t("del_body"), { danger: true, okLabel: t("btn_delete") }))) return;
-  try { await api(`/api/variables/${encodeURIComponent(key)}`, { method: "DELETE" }); toast(t("res_deleted"), "ok"); showResources(); }
+  try { await api(`/api/variables/${encodeURIComponent(key)}`, { method: "DELETE" }); RES.vars = RES.vars.filter((v) => v.key !== key); renderResources(); toast(t("res_deleted"), "ok"); }
   catch (e) { toast(e.message, "fail"); }
 }
 function connsTabHtml() {
@@ -961,7 +971,7 @@ function wireConnsTab() {
 }
 async function delConn(id) {
   if (!(await confirmDialog(t("c_del_title", id), t("del_body"), { danger: true, okLabel: t("btn_delete") }))) return;
-  try { await api(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }); toast(t("res_deleted"), "ok"); showResources(); }
+  try { await api(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }); RES.conns = RES.conns.filter((c) => c.id !== id); renderResources(); toast(t("res_deleted"), "ok"); }
   catch (e) { toast(e.message, "fail"); }
 }
 // connection editor modal. Password is write-only: on edit it starts blank and a
@@ -995,8 +1005,12 @@ function connDialog(conn) {
     if (!id) { $("c-err").textContent = t("c_id"); return; }
     if (!CFG_KEY_RE.test(id)) { $("c-err").textContent = t("err_key"); return; }
     const body = { type: $("c-type").value.trim(), host: $("c-host").value.trim(), port: +$("c-port").value || 0, login: $("c-login").value.trim(), password: $("c-pw").value, extra: $("c-extra").value.trim() };
-    try { await api(`/api/connections/${encodeURIComponent(id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); close(); toast(t("res_saved"), "ok"); showResources(); }
-    catch (e) { $("c-err").textContent = e.message; }
+    try {
+      const resp = await api(`/api/connections/${encodeURIComponent(id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const i = RES.conns.findIndex((x) => x.id === id); // masked resp (has_password, no secret)
+      if (i >= 0) RES.conns[i] = resp; else { RES.conns.push(resp); RES.conns.sort((a, b) => (a.id < b.id ? -1 : 1)); }
+      close(); renderResources(); toast(t("res_saved"), "ok");
+    } catch (e) { $("c-err").textContent = e.message; }
   };
   $(isEdit ? "c-type" : "c-id").focus();
 }

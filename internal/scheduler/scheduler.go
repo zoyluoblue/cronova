@@ -1007,10 +1007,19 @@ func connField(c *model.Connection, field string) (string, bool) {
 		return c.Type, true
 	}
 	if name, ok := strings.CutPrefix(field, "extra."); ok && c.Extra != "" {
-		var m map[string]string
+		// RawMessage per key so one non-string value doesn't poison the whole
+		// object; a JSON string decodes to its text, other scalars use raw text.
+		var m map[string]json.RawMessage
 		if json.Unmarshal([]byte(c.Extra), &m) == nil {
-			v, ok := m[name]
-			return v, ok
+			raw, ok := m[name]
+			if !ok {
+				return "", false
+			}
+			var s string
+			if json.Unmarshal(raw, &s) == nil {
+				return s, true // JSON string → decoded value
+			}
+			return strings.TrimSpace(string(raw)), true // number/bool/etc → literal text
 		}
 	}
 	return "", false

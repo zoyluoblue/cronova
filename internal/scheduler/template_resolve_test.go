@@ -23,8 +23,10 @@ func TestRenderCommandDotted(t *testing.T) {
 }
 
 func TestConnField(t *testing.T) {
-	c := &model.Connection{ID: "mysql", Type: "mysql", Host: "h", Port: 3306, Login: "u", Password: "p", Extra: `{"schema":"prod"}`}
-	cases := map[string]string{"host": "h", "port": "3306", "login": "u", "user": "u", "password": "p", "type": "mysql", "extra.schema": "prod"}
+	// extra mixes a string and a number — a non-string value must not poison the
+	// lookup of sibling string keys, and scalars resolve to their literal text.
+	c := &model.Connection{ID: "mysql", Type: "mysql", Host: "h", Port: 3306, Login: "u", Password: "p", Extra: `{"schema":"prod","timeout":30,"tls":true}`}
+	cases := map[string]string{"host": "h", "port": "3306", "login": "u", "user": "u", "password": "p", "type": "mysql", "extra.schema": "prod", "extra.timeout": "30", "extra.tls": "true"}
 	for field, want := range cases {
 		if got, ok := connField(c, field); !ok || got != want {
 			t.Errorf("connField(%q) = %q,%v want %q", field, got, ok, want)
@@ -32,6 +34,9 @@ func TestConnField(t *testing.T) {
 	}
 	if _, ok := connField(c, "nope"); ok {
 		t.Error("unknown field should be not-found")
+	}
+	if _, ok := connField(c, "extra.missing"); ok {
+		t.Error("missing extra key should be not-found")
 	}
 }
 

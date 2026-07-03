@@ -536,7 +536,7 @@ function startApp() {
 let lastNavLabel = null;
 function setNav(navKey, crumb) {
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
-  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : "DAGs");
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : "DAGs");
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
   const s = document.querySelector(".search"); if (s) s.classList.toggle("off", navKey !== "dags");
@@ -564,6 +564,7 @@ function setLang(l) {
   else if (view === "task") renderTaskPage();
   else if (view === "run") showRun(currentRun);
   else if (view === "pools") showPools();
+  else if (view === "resources") renderResources(); // from in-memory RES, no refetch
   else if (view === "graph") showGraph();
 }
 
