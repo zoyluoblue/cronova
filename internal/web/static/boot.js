@@ -6,7 +6,16 @@ function applyTheme() {
 }
 
 // ---- boot ----
-$("search").oninput = (e) => { query = e.target.value.toLowerCase(); renderDags(); };
+// topbar search: filters the dashboard AND is a global jump-to-DAG box everywhere
+$("search").oninput = (e) => { query = e.target.value.toLowerCase(); if (view === "dags") renderDags(); updateJump(e.target.value); };
+$("search").onfocus = () => { ensureJumpDags().then(() => { if ($("search").value) updateJump($("search").value); }); };
+$("search").onblur = () => setTimeout(closeJump, 150); // let a menu mousedown land first
+$("search").onkeydown = (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); jumpMove(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); jumpMove(-1); }
+  else if (e.key === "Enter") { if (jumpEnter()) e.preventDefault(); }
+  else if (e.key === "Escape") { closeJump(); }
+};
 $("newdag").onclick = () => newDagModal();
 $("lang").onclick = () => setLang(lang === "zh" ? "en" : "zh");
 $("theme").onclick = () => { theme = theme === "dark" ? "light" : "dark"; localStorage.setItem("cnv_theme", theme); applyTheme(); };
@@ -20,6 +29,15 @@ document.addEventListener("keydown", (e) => {
   const el = e.target;
   if (el && el.matches && el.matches('[tabindex="0"][role]:not(input):not(textarea):not(select)')) { e.preventDefault(); el.click(); }
 });
+// One delegated click for copy-to-clipboard: any [data-copy] element copies its
+// value. stopPropagation so a copyable inside a clickable row copies without also
+// triggering the row's navigation.
+document.addEventListener("click", (e) => {
+  const el = e.target.closest && e.target.closest("[data-copy]"); if (!el) return;
+  e.stopPropagation();
+  const ok = () => toast(t("copied"), "ok"), no = () => toast(t("copy_fail"), "warn");
+  try { navigator.clipboard.writeText(el.dataset.copy).then(ok, no); } catch (_) { no(); }
+}, true); // capture phase: run before a row's bubble-phase onclick
 applyStaticI18n();
 // auth gate: resolve identity first. If a login is required, initAuth shows the
 // overlay and startApp() runs only after a successful sign-in; otherwise start now.

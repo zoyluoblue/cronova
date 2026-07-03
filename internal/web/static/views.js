@@ -1,7 +1,7 @@
 "use strict";
 // ---- DAGs dashboard ----
 async function loadDags() {
-  view = "dags"; activeDag = null; closeLog(); setNav("dags"); setHash("#/dags");
+  view = "dags"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("dags"); setHash("#/dags");
   overviewCache = await api("/api/overview");
   $("nav-dags").textContent = overviewCache.stats.total_dags;
   renderDags();
@@ -174,7 +174,7 @@ function renderDagPage() {
     <div class="crumb-bar"><a id="back">${t("back_dags")}</a> / ${esc(d.dag_id)}</div>
     <div class="dag-hero">
       <div class="dh-top">
-        <h1 class="mono">${esc(d.dag_id)}</h1>
+        <h1 class="mono">${copySpan(d.dag_id)}</h1>
         <span class="tag">${typeLabel(typ)}</span>
         ${d.paused ? `<span class="tag warn">${t("f_paused")}</span>` : ""}
         <span class="savestate ss-saved" id="d-save"></span>
@@ -223,6 +223,28 @@ function renderDagTab() {
   if (D.tab === "structure") { el.innerHTML = `<div id="d-structure"></div>`; renderDagStructure(); }
   else if (D.tab === "settings") { el.innerHTML = settingsTabHtml(); wireSettingsTab(); }
   else { el.innerHTML = `<div id="d-runs"></div>`; renderDagRuns(); }
+  maybePollDagRuns(); // live-refresh the Runs tab while a run is active (self-stops otherwise)
+}
+// poll the run history while on the Runs tab AND a run is active, so the list and
+// hero facts update without a manual refresh (read-only tab → no save race).
+let dagRunsPoll = null;
+function stopDagRunsPoll() { clearInterval(dagRunsPoll); dagRunsPoll = null; }
+function maybePollDagRuns() {
+  stopDagRunsPoll();
+  if (view !== "dag" || !D || D.tab !== "runs" || D.editKey) return;
+  if (!D.runs.some((r) => runLive(r.state))) return; // nothing active → static
+  const dagID = D.dag.dag_id;
+  dagRunsPoll = setInterval(async () => {
+    if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs" || D.editKey) { stopDagRunsPoll(); return; }
+    let runs; try { runs = await api(`/api/dags/${encodeURIComponent(dagID)}/runs?limit=25`); } catch (_) { return; }
+    if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs") return;
+    if (JSON.stringify(runs) === JSON.stringify(D.runs)) {
+      if (!(runs || []).some((r) => runLive(r.state))) stopDagRunsPoll(); // settled
+      return;
+    }
+    D.runs = runs || [];
+    renderDagPage(); // refresh hero facts + runs table; renderDagTab re-arms the poll
+  }, 3000);
 }
 
 // --- settings tab: each setting is a one-line summary; click to edit in place
@@ -402,9 +424,28 @@ async function refreshDagRuns() {
 function renderDagRuns() {
   const el = $("d-runs"); if (!el) return;
   if (!D.runs.length) { el.innerHTML = `<div class="empty">${t("no_runs")}</div>`; return; }
-  el.innerHTML = `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th></tr></thead>
-    <tbody>${D.runs.map((r) => `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td></tr>`).join("")}</tbody></table>`;
-  el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = () => showRun(tr.dataset.run));
+  const canAct = document.body.dataset.role !== "viewer";
+  el.innerHTML = `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th><th style="width:56px"></th></tr></thead>
+    <tbody>${D.runs.map((r) => {
+    const act = !canAct ? "" : runLive(r.state)
+      ? `<button class="icon rr-act no-nav" data-rr-cancel="${esc(r.run_id)}" title="${t("run_cancel")}" aria-label="${t("run_cancel")}">✕</button>`
+      : (r.state === "failed" || r.state === "cancelled")
+        ? `<button class="icon rr-act no-nav" data-rr-retry="${esc(r.run_id)}" title="${t("run_retry")}" aria-label="${t("run_retry")}">↻</button>` : "";
+    return `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td class="run-row-act">${act}</td></tr>`;
+  }).join("")}</tbody></table>`;
+  el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showRun(tr.dataset.run); });
+  el.querySelectorAll("[data-rr-cancel]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineCancelRun(b.dataset.rrCancel); });
+  el.querySelectorAll("[data-rr-retry]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineRetryRun(b.dataset.rrRetry); });
+}
+// inline run ops from the history list — refresh the list in place (stay on the DAG page)
+async function inlineCancelRun(runID) {
+  if (!(await confirmDialog(t("confirm_cancel_title", runID), t("confirm_cancel_body"), { danger: true, okLabel: t("run_cancel") }))) return;
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/cancel`, { method: "POST" }); toast(t("run_cancelled_toast"), "ok"); refreshDagRuns(); }
+  catch (e) { toast(e.message, "fail"); }
+}
+async function inlineRetryRun(runID) {
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/retry`, { method: "POST" }); toast(t("run_retried_toast"), "ok"); refreshDagRuns(); }
+  catch (e) { toast(e.message, "fail"); }
 }
 
 // --- structure section (editable graph + task list) ---
@@ -429,7 +470,7 @@ function dagTaskTableHtml() {
   return `<table class="tbl tasks"><thead><tr><th>${t("th_id")}</th><th>${t("th_type")}</th><th>${t("th_command")}</th><th>${t("h_pool")}</th><th>${t("t_rule")}</th><th>${t("th_deps")}</th><th style="width:44px"></th></tr></thead>
     <tbody>${D.tasks.map((tk) => `<tr class="row" data-task="${esc(tk.id)}">
       <td class="mono">${esc(tk.id || "—")}</td><td>${esc(tk.type)}</td>
-      <td class="muted mono cmd-cell" title="${esc(tk.command || "")}">${esc(tk.command || "—")}</td>
+      <td class="muted mono cmd-cell no-nav">${tk.command ? copySpan(tk.command) : "—"}</td>
       <td class="mono">${esc(tk.pool)}</td><td class="muted">${t("tr_" + (tk.trigger_rule || "all_success"))}</td>
       <td class="muted">${esc((tk.deps || []).join(", ") || "—")}</td>
       <td><button class="icon no-nav" data-dup="${esc(tk.id)}" title="${t("btn_duplicate")}">⧉</button><button class="icon rm no-nav" data-del="${esc(tk.id)}" title="${t("b_remove")}">✕</button></td></tr>`).join("")}</tbody></table>`;
@@ -746,7 +787,7 @@ const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1 }; // state
 const runLive = (s) => s === "queued" || s === "running";
 
 async function showRun(runID) {
-  view = "run"; currentRun = runID; closeLog(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
+  view = "run"; currentRun = runID; closeLog(); stopDagRunsPoll(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
   let data;
   try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
   const r = data.run;
@@ -757,9 +798,9 @@ async function showRun(runID) {
   // the leaf containers below, so a live log stream (in #logwrap) is never torn down.
   main.innerHTML = `
     <div class="crumb-bar"><a id="back">← ${esc(r.dag_id)}</a> / ${t("run_word")}</div>
-    <div class="page-h"><h1 class="mono" style="font-size:16px">${esc(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span><span class="run-actions" id="run-actions"></span></div>
+    <div class="page-h"><h1 class="mono" style="font-size:16px">${copySpan(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span><span class="run-actions" id="run-actions"></span></div>
     <div class="kv" style="margin:14px 0 4px">
-      <div class="card"><div class="k">${t("k_logical")}</div><div class="v mono" style="font-size:13px">${esc(r.logical_date)}</div></div>
+      <div class="card"><div class="k">${t("k_logical")}</div><div class="v mono" style="font-size:13px">${copySpan(r.logical_date)}</div></div>
       <div class="card"><div class="k">${t("k_trig")}</div><div class="v">${typeLabel(r.trigger_type)}</div></div>
       <div class="card"><div class="k">${t("k_dur")}</div><div class="v" id="run-dur">${dur(r.started_at, r.finished_at)}</div></div>
       <div class="card"><div class="k">${t("k_started")}</div><div class="v" style="font-size:13px">${fmt(r.started_at)}</div></div></div>

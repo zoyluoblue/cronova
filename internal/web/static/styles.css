@@ -453,3 +453,25 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .run-parambar .rp-k { font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase; color: var(--faint); }
 .rp-chip { font-size: 12px; padding: 2px 9px; border-radius: 20px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); }
 .rp-chip b { color: var(--text); font-weight: 600; }
+
+/* ---- click-to-copy affordance ---- */
+.copyable { cursor: pointer; border-radius: 4px; padding: 0 2px; margin: 0 -2px; transition: background var(--dur) var(--ease); position: relative; }
+.copyable:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.copyable:hover::after { content: "⧉"; font-size: .82em; margin-left: 5px; opacity: .7; }
+
+/* ---- global quick-jump dropdown ---- */
+.search { position: relative; }
+.jump-menu { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 80; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r); box-shadow: 0 12px 34px rgba(0, 0, 0, .32); padding: 5px; max-height: 340px; overflow: auto; }
+.jump-menu[hidden] { display: none; }
+.jump-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r-sm); cursor: pointer; font-size: 13px; }
+.jump-item .mono { font-family: var(--mono); color: var(--text); }
+.jump-item .mono b { color: var(--accent); }
+.jump-item.sel, .jump-item:hover { background: var(--panel-2); }
+.jump-open { margin-left: auto; font-size: 11px; color: var(--faint); opacity: 0; }
+.jump-item.sel .jump-open { opacity: 1; }
+.jump-empty { padding: 10px 12px; font-size: 12.5px; color: var(--faint); }
+
+/* ---- inline run-history quick actions (hover-revealed) ---- */
+.run-row-act { text-align: right; }
+.rr-act { opacity: 0; transition: opacity var(--dur) var(--ease); }
+.tbl tr.row:hover .rr-act, .rr-act:focus-visible { opacity: 1; }

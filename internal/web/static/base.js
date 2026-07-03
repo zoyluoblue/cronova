@@ -40,6 +40,7 @@ const DICT = {
     run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
     confirm_cancel_title: (id) => `取消运行“${id}”?`, confirm_cancel_body: "正在运行的任务会被终止。", th_act: "操作",
     confirm_retry_title: (id) => `重跑“${id}”?`, confirm_retry_body: "该任务及其所有下游任务会被重置并重新运行。",
+    copied: "已复制", copy_fail: "复制失败", copy_hint: "点击复制", search_ph: "跳转 / 筛选 DAG…", jump_open: "打开", jump_none: "无匹配 DAG",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
@@ -132,6 +133,7 @@ const DICT = {
     run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
     confirm_cancel_title: (id) => `Cancel run “${id}”?`, confirm_cancel_body: "Running tasks will be killed.", th_act: "Actions",
     confirm_retry_title: (id) => `Retry “${id}”?`, confirm_retry_body: "This task and all of its downstream tasks will be reset and re-run.",
+    copied: "Copied", copy_fail: "Copy failed", copy_hint: "Click to copy", search_ph: "Jump / filter DAGs…", jump_open: "Open", jump_none: "No matching DAG",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
@@ -249,6 +251,11 @@ async function api(path, opts) {
   return ct.includes("json") ? r.json() : r.text();
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// copySpan: a click-to-copy value (handled by the delegated [data-copy] listener
+// in boot.js). Keyboard-activatable via the global Enter/Space delegation.
+function copySpan(text, cls) {
+  return `<span class="copyable ${cls || ""}" data-copy="${esc(text)}" role="button" tabindex="0" title="${t("copy_hint")}">${esc(text)}</span>`;
+}
 const fmt = (x) => (x ? new Date(x).toLocaleString() : "—");
 
 // ---- toast + in-app confirm (themed + bilingual; replaces native alert/confirm) ----
@@ -473,6 +480,47 @@ function applyRoute() {
 }
 window.addEventListener("hashchange", () => { if (suppressHash) { suppressHash = false; return; } Promise.resolve(applyRoute()).catch(() => {}); });
 
+// ---- global quick-jump: the topbar search doubles as a "jump to any DAG" box
+// (an autocomplete dropdown), available on every page — not just a dashboard filter.
+let jumpDags = [], jumpSel = -1;
+async function ensureJumpDags() {
+  if (overviewCache && overviewCache.dags) { jumpDags = overviewCache.dags.map((d) => d.dag_id); return; }
+  if (jumpDags.length) return;
+  try { jumpDags = (await api("/api/dags")).map((d) => d.dag_id); } catch (_) {}
+}
+function hlMatch(id, q) {
+  const i = id.toLowerCase().indexOf(q);
+  if (i < 0) return esc(id);
+  return esc(id.slice(0, i)) + `<b>${esc(id.slice(i, i + q.length))}</b>` + esc(id.slice(i + q.length));
+}
+function updateJump(raw) {
+  const menu = $("jump-menu"); if (!menu) return;
+  const q = raw.trim().toLowerCase();
+  if (overviewCache && overviewCache.dags) jumpDags = overviewCache.dags.map((d) => d.dag_id); // freshest
+  const setExpanded = (v) => $("search").setAttribute("aria-expanded", v);
+  if (!q) { menu.hidden = true; menu.innerHTML = ""; jumpSel = -1; setExpanded("false"); return; }
+  const matches = jumpDags.filter((id) => id.toLowerCase().includes(q)).slice(0, 8);
+  menu.hidden = false; setExpanded("true");
+  if (!matches.length) { menu.innerHTML = `<div class="jump-empty">${t("jump_none")}</div>`; jumpSel = -1; return; }
+  jumpSel = 0;
+  menu.innerHTML = matches.map((id, i) => `<div class="jump-item ${i === 0 ? "sel" : ""}" data-jump="${esc(id)}" role="option" aria-selected="${i === 0}"><span class="mono">${hlMatch(id, q)}</span><span class="jump-open">${t("jump_open")} →</span></div>`).join("");
+  menu.querySelectorAll("[data-jump]").forEach((it) => it.onmousedown = (e) => { e.preventDefault(); jumpTo(it.dataset.jump); }); // mousedown beats blur
+}
+function jumpMove(delta) {
+  const menu = $("jump-menu"); if (!menu || menu.hidden) return;
+  const items = [...menu.querySelectorAll(".jump-item")]; if (!items.length) return;
+  jumpSel = (jumpSel + delta + items.length) % items.length;
+  items.forEach((it, i) => { it.classList.toggle("sel", i === jumpSel); it.setAttribute("aria-selected", i === jumpSel); });
+}
+function jumpEnter() {
+  const menu = $("jump-menu"); if (!menu || menu.hidden) return false;
+  const sel = menu.querySelectorAll(".jump-item")[jumpSel];
+  if (sel) { jumpTo(sel.dataset.jump); return true; }
+  return false;
+}
+function jumpTo(dagID) { closeJump(); const s = $("search"); s.value = ""; query = ""; if (view === "dags") renderDags(); showDag(dagID); }
+function closeJump() { const m = $("jump-menu"); if (m) { m.hidden = true; m.innerHTML = ""; jumpSel = -1; } $("search").setAttribute("aria-expanded", "false"); }
+
 let serverTZ = "";
 async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }
 // ---- auth: login gate + user chip ----
@@ -545,7 +593,7 @@ function setNav(navKey, crumb) {
   const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : "DAGs");
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
-  const s = document.querySelector(".search"); if (s) s.classList.toggle("off", navKey !== "dags");
+  // search stays visible everywhere now (global jump-to-DAG), not just the dashboard
   // 120ms crossfade — only when actually navigating, never on a data refresh
   if (label !== lastNavLabel) {
     lastNavLabel = label;
