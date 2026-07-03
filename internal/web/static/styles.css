@@ -163,7 +163,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .s-running { background: color-mix(in srgb, var(--run) 14%, transparent); color: var(--run); } .s-running .d { background: var(--run); }
 .s-queued, .s-scheduled, .s-up_for_retry { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); } .s-queued .d, .s-scheduled .d, .s-up_for_retry .d { background: var(--warn); }
 .s-upstream_failed { background: color-mix(in srgb, var(--upstream) 13%, transparent); color: var(--upstream); } .s-upstream_failed .d { background: var(--upstream); }
-.s-skipped, .s-paused, .s-none { background: color-mix(in srgb, var(--skip) 16%, transparent); color: var(--skip); } .s-skipped .d, .s-paused .d, .s-none .d { background: var(--skip); }
+.s-skipped, .s-paused, .s-none, .s-cancelled { background: color-mix(in srgb, var(--skip) 16%, transparent); color: var(--skip); } .s-skipped .d, .s-paused .d, .s-none .d, .s-cancelled .d { background: var(--skip); }
 
 /* ---- sparkline ---- */
 .spark { display: flex; align-items: flex-end; gap: 2px; height: 24px; }
@@ -185,6 +185,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .act-tick.a-failed { background: var(--fail); }
 .act-tick.a-running { background: var(--run); }
 .act-tick.a-queued, .act-tick.a-scheduled { background: var(--warn); }
+.act-tick.a-cancelled { background: var(--skip); }
 
 /* ---- detail / cards row ---- */
 .crumb-bar { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
@@ -320,6 +321,7 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 
 /* ---- live run view + Gantt timeline (Phase 2) ---- */
 .run-prog { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 2px; }
+.run-actions { margin-left: auto; display: flex; gap: 8px; }
 .run-tabs { display: flex; gap: 8px; margin: 22px 0 12px; }
 .run-tabs .pill { cursor: pointer; }
 /* subtle pulse on a running node (global reduced-motion rule neutralizes it) */
@@ -341,7 +343,7 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .gantt-bar.g-running { background: var(--run); animation: pulse 1.6s var(--ease) infinite; }
 .gantt-bar.g-up_for_retry, .gantt-bar.g-queued, .gantt-bar.g-scheduled { background: var(--warn); }
 .gantt-bar.g-upstream_failed { background: var(--upstream); }
-.gantt-bar.g-skipped { background: var(--skip); }
+.gantt-bar.g-skipped, .gantt-bar.g-cancelled { background: var(--skip); }
 
 /* ---- typed command builder + inline hints (T1.1/T1.2/T1.4) ---- */
 .field-hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.45; }

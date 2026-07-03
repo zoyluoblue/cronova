@@ -5,18 +5,19 @@ package model
 //
 // See docs/ARCHITECTURE.md §7.4 for the diagram this mirrors.
 var taskTransitions = map[TaskState][]TaskState{
-	TaskScheduled: {TaskQueued, TaskUpstreamFailed, TaskSkipped},
+	TaskScheduled: {TaskQueued, TaskUpstreamFailed, TaskSkipped, TaskCancelled},
 	// queued -> upstream_failed: an upstream task can fail while this one is
 	//   still waiting in the pool queue, before the executor picks it up.
 	// queued -> failed: the executor's Launch RPC failed, so the task never ran.
-	TaskQueued:     {TaskRunning, TaskUpstreamFailed, TaskFailed},
-	TaskRunning:    {TaskSuccess, TaskUpForRetry, TaskFailed},
-	TaskUpForRetry: {TaskScheduled},
-	// terminal states have no outgoing transitions
-	TaskSuccess:        {},
-	TaskFailed:         {},
-	TaskUpstreamFailed: {},
-	TaskSkipped:        {},
+	TaskQueued:     {TaskRunning, TaskUpstreamFailed, TaskFailed, TaskCancelled},
+	TaskRunning:    {TaskSuccess, TaskUpForRetry, TaskFailed, TaskCancelled},
+	TaskUpForRetry: {TaskScheduled, TaskCancelled},
+	// terminal by execution, but a manual retry (clear) reactivates them → scheduled
+	TaskSuccess:        {TaskScheduled},
+	TaskFailed:         {TaskScheduled},
+	TaskUpstreamFailed: {TaskScheduled},
+	TaskSkipped:        {TaskScheduled},
+	TaskCancelled:      {TaskScheduled},
 }
 
 // CanTaskTransition reports whether a task may move from -> to.
@@ -35,10 +36,12 @@ func CanTaskTransition(from, to TaskState) bool {
 // a run may resolve before any task runs (e.g. every task skipped, or the run
 // is aborted while still queued). The normal path is queued -> running -> *.
 var runTransitions = map[RunState][]RunState{
-	RunQueued:  {RunRunning, RunSuccess, RunFailed},
-	RunRunning: {RunSuccess, RunFailed},
-	RunSuccess: {},
-	RunFailed:  {},
+	RunQueued:  {RunRunning, RunSuccess, RunFailed, RunCancelled},
+	RunRunning: {RunSuccess, RunFailed, RunCancelled},
+	// terminal by execution, but a manual retry reactivates a finished run → running
+	RunSuccess:   {RunRunning},
+	RunFailed:    {RunRunning},
+	RunCancelled: {RunRunning},
 }
 
 // Trigger rules decide whether a task runs given its upstream (dependency)

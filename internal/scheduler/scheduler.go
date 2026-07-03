@@ -310,6 +310,153 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 	return run.RunID, nil
 }
 
+// CancelRun stops an active run: mark it cancelled first (so in-flight polling
+// goroutines observe it and don't overwrite the outcome), then kill each running
+// task and mark every non-terminal task cancelled.
+func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
+	run, err := s.store.GetDagRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.State != model.RunQueued && run.State != model.RunRunning {
+		return fmt.Errorf("run %q (%s): %w", runID, run.State, model.ErrRunNotActive)
+	}
+	fin := time.Now().UTC()
+	started := run.StartedAt
+	if started == nil {
+		started = &fin
+	}
+	if err := s.store.UpdateDagRunState(ctx, runID, model.RunCancelled, started, &fin); err != nil {
+		return err
+	}
+	tis, err := s.store.ListTaskInstances(ctx, runID)
+	if err != nil {
+		return err
+	}
+	for _, ti := range tis {
+		if ti.State.IsTerminal() {
+			continue
+		}
+		if ti.ExecutorRef != "" {
+			_ = s.exec.Cancel(ctx, ti.ExecutorRef) // best-effort kill of the running process
+		}
+		ti.State = model.TaskCancelled
+		ti.FinishedAt = &fin
+		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			s.log.Error("cancel task", "ti", ti.ID, "err", err)
+		}
+	}
+	s.log.Info("run cancelled", "run", runID)
+	return nil
+}
+
+// RetryTask clears a task and everything downstream of it back to scheduled and
+// reactivates the run, so the scheduler re-runs that subtree.
+func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
+	run, d, tiByTask, err := s.retryContext(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if tiByTask[taskID] == nil {
+		return fmt.Errorf("task %q in run %q: %w", taskID, runID, store.ErrNotFound)
+	}
+	return s.clearAndReactivate(ctx, run, tiByTask, downstreamClosure(d.Tasks, taskID))
+}
+
+// RetryRun clears every failed / upstream_failed / cancelled task (and its
+// downstream) and reactivates the run.
+func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
+	run, d, tiByTask, err := s.retryContext(ctx, runID)
+	if err != nil {
+		return err
+	}
+	ids := map[string]bool{}
+	for _, ti := range tiByTask {
+		switch ti.State {
+		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled:
+			for id := range downstreamClosure(d.Tasks, ti.TaskID) {
+				ids[id] = true
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("run %q: %w", runID, model.ErrNothingToRetry)
+	}
+	return s.clearAndReactivate(ctx, run, tiByTask, ids)
+}
+
+// retryContext loads the run, its (active) DAG, and its task instances by task id.
+func (s *Scheduler) retryContext(ctx context.Context, runID string) (*model.DagRun, *model.DAG, map[string]*model.TaskInstance, error) {
+	run, err := s.store.GetDagRun(ctx, runID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	d, _, ok := s.cachedDAG(run.DagID)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("dag %q not active: %w", run.DagID, store.ErrNotFound)
+	}
+	tis, err := s.store.ListTaskInstances(ctx, runID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	byTask := make(map[string]*model.TaskInstance, len(tis))
+	for _, ti := range tis {
+		byTask[ti.TaskID] = ti
+	}
+	return run, d, byTask, nil
+}
+
+// clearAndReactivate resets the named tasks to scheduled (fresh attempt count)
+// and flips the run back to running so the tick loop re-dispatches them.
+func (s *Scheduler) clearAndReactivate(ctx context.Context, run *model.DagRun, tiByTask map[string]*model.TaskInstance, ids map[string]bool) error {
+	for id := range ids {
+		ti := tiByTask[id]
+		if ti == nil {
+			continue
+		}
+		ti.State = model.TaskScheduled
+		ti.ExecutorRef = ""
+		ti.StartedAt = nil
+		ti.FinishedAt = nil
+		// keep TryNumber accumulating (do NOT reset to 0): the next dispatch derives
+		// the executor ref from it (attemptRef = runID/task/try), and Launch is
+		// idempotent per ref — reusing an old ref would return the stale killed/failed
+		// result instead of running a fresh attempt.
+		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			return err
+		}
+	}
+	started := run.StartedAt
+	if started == nil {
+		now := time.Now().UTC()
+		started = &now
+	}
+	// finished_at cleared → the run is active again and processActiveRuns picks it up.
+	return s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, started, nil)
+}
+
+// downstreamClosure returns taskID plus every task transitively downstream of it.
+func downstreamClosure(tasks []model.Task, taskID string) map[string]bool {
+	dependents := map[string][]string{}
+	for _, t := range tasks {
+		for _, dep := range t.Deps {
+			dependents[dep] = append(dependents[dep], t.ID)
+		}
+	}
+	closure := map[string]bool{}
+	queue := []string{taskID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if closure[id] {
+			continue
+		}
+		closure[id] = true
+		queue = append(queue, dependents[id]...)
+	}
+	return closure
+}
+
 // Run drives the scheduling loop until ctx is cancelled, then waits for any
 // in-flight tasks to finish (graceful shutdown).
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -724,6 +871,9 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 		Timeout:   time.Duration(t.Timeout) * time.Second,
 		LogPath:   ti.LogPath,
 	}
+	if s.taskCancelled(ctx, ti.ID) {
+		return // a CancelRun landed before we launched — don't start the process
+	}
 	if _, err := s.exec.Launch(ctx, spec); err != nil {
 		s.log.Error("launch task", "run", run.RunID, "task", t.ID, "err", err)
 		now := time.Now().UTC()
@@ -776,7 +926,18 @@ func (s *Scheduler) awaitCompletion(ctx context.Context, ti *model.TaskInstance)
 	}
 }
 
+// taskCancelled reports whether a concurrent CancelRun already marked this task
+// cancelled in the store — the polling goroutine's local copy is then stale, and
+// it must not overwrite the cancelled outcome with success/failure.
+func (s *Scheduler) taskCancelled(ctx context.Context, id int64) bool {
+	cur, err := s.store.GetTaskInstance(ctx, id)
+	return err == nil && cur.State == model.TaskCancelled
+}
+
 func (s *Scheduler) finalizeTask(ctx context.Context, ti *model.TaskInstance, exitCode int) {
+	if s.taskCancelled(ctx, ti.ID) {
+		return // CancelRun killed it and recorded it as cancelled
+	}
 	if exitCode == 0 {
 		now := time.Now().UTC()
 		ti.State = model.TaskSuccess
@@ -801,6 +962,9 @@ func (s *Scheduler) finalizeTaskLost(ctx context.Context, ti *model.TaskInstance
 // to failed. TryNumber counts attempts made (incremented at dispatch), so the
 // task gets MaxRetries+1 total attempts.
 func (s *Scheduler) recordFailure(ctx context.Context, ti *model.TaskInstance, reason string) {
+	if s.taskCancelled(ctx, ti.ID) {
+		return // a run cancellation already finalized this task as cancelled
+	}
 	now := time.Now().UTC()
 	ti.FinishedAt = &now
 	if ti.TryNumber <= ti.MaxRetries {

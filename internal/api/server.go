@@ -30,6 +30,9 @@ type Engine interface {
 	CreateDAG(ctx context.Context, yamlText string) (string, error)
 	DeleteDAG(ctx context.Context, dagID string) error
 	NextSchedule(ctx context.Context, d *model.DAG) (time.Time, bool)
+	CancelRun(ctx context.Context, runID string) error
+	RetryRun(ctx context.Context, runID string) error
+	RetryTask(ctx context.Context, runID, taskID string) error
 }
 
 // Info is static runtime metadata shown in the console's status panel.
@@ -82,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/dags/{id}/pause", s.pauseDAG)
 	mux.HandleFunc("GET /api/dags/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{runID}", s.getRun)
+	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
+	mux.HandleFunc("POST /api/runs/{runID}/retry", s.retryRun)
+	mux.HandleFunc("POST /api/runs/{runID}/tasks/{taskID}/retry", s.retryTask)
 	mux.HandleFunc("GET /api/tasks/{tiID}/log", s.getLog)
 	mux.HandleFunc("GET /api/tasks/{tiID}/log/stream", s.streamLog)
 	mux.HandleFunc("GET /api/pools", s.listPools)
@@ -134,7 +140,7 @@ func mapErr(w http.ResponseWriter, err error) {
 		httpErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, model.ErrNoTasks):
 		httpErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, model.ErrActiveRuns):
+	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry):
 		httpErr(w, http.StatusConflict, err.Error())
 	default:
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -343,6 +349,30 @@ func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"run_id": runID})
+}
+
+func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.eng.CancelRun(r.Context(), r.PathValue("runID")); err != nil {
+		mapErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+}
+
+func (s *Server) retryRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.eng.RetryRun(r.Context(), r.PathValue("runID")); err != nil {
+		mapErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"retried": true})
+}
+
+func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
+	if err := s.eng.RetryTask(r.Context(), r.PathValue("runID"), r.PathValue("taskID")); err != nil {
+		mapErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"retried": true})
 }
 
 func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {

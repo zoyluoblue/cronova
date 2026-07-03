@@ -12,6 +12,9 @@ func TestCanTaskTransition(t *testing.T) {
 		{TaskRunning, TaskUpForRetry},
 		{TaskRunning, TaskFailed},
 		{TaskUpForRetry, TaskScheduled},
+		{TaskRunning, TaskCancelled},   // cancel
+		{TaskFailed, TaskScheduled},    // manual retry (clear) reactivates a terminal task
+		{TaskCancelled, TaskScheduled}, // retry a cancelled task
 	}
 	for _, c := range legal {
 		if !CanTaskTransition(c.from, c.to) {
@@ -22,8 +25,7 @@ func TestCanTaskTransition(t *testing.T) {
 	illegal := []struct{ from, to TaskState }{
 		{TaskScheduled, TaskRunning}, // must go through queued
 		{TaskScheduled, TaskSuccess},
-		{TaskSuccess, TaskRunning}, // terminal
-		{TaskFailed, TaskScheduled},
+		{TaskSuccess, TaskRunning}, // a terminal task reactivates to scheduled, not running
 		{TaskRunning, TaskQueued},
 		{TaskQueued, TaskSuccess},
 	}
@@ -89,8 +91,13 @@ func TestCanRunTransition(t *testing.T) {
 	if !CanRunTransition(RunRunning, RunSuccess) {
 		t.Error("running -> success should be legal")
 	}
-	if CanRunTransition(RunSuccess, RunRunning) {
-		t.Error("success -> running should be illegal")
+	// cancel: an active run may be stopped
+	if !CanRunTransition(RunRunning, RunCancelled) {
+		t.Error("running -> cancelled should be legal")
+	}
+	// retry: a finished run reactivates to running (success/failed/cancelled → running)
+	if !CanRunTransition(RunSuccess, RunRunning) || !CanRunTransition(RunFailed, RunRunning) || !CanRunTransition(RunCancelled, RunRunning) {
+		t.Error("a finished run -> running should be legal (manual retry)")
 	}
 	if CanRunTransition(RunFailed, RunSuccess) {
 		t.Error("failed -> success should be illegal")

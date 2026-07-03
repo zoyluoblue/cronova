@@ -741,7 +741,8 @@ async function flushSave() {
 
 // ---- run detail ----
 let runPoll = null, runTab = "instances", runDag = null;
-const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1 };
+const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1, cancelled: 1 };
+const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1 }; // states a per-task retry clears
 const runLive = (s) => s === "queued" || s === "running";
 
 async function showRun(runID) {
@@ -756,7 +757,7 @@ async function showRun(runID) {
   // the leaf containers below, so a live log stream (in #logwrap) is never torn down.
   main.innerHTML = `
     <div class="crumb-bar"><a id="back">← ${esc(r.dag_id)}</a> / ${t("run_word")}</div>
-    <div class="page-h"><h1 class="mono" style="font-size:16px">${esc(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span></div>
+    <div class="page-h"><h1 class="mono" style="font-size:16px">${esc(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span><span class="run-actions" id="run-actions"></span></div>
     <div class="kv" style="margin:14px 0 4px">
       <div class="card"><div class="k">${t("k_logical")}</div><div class="v mono" style="font-size:13px">${esc(r.logical_date)}</div></div>
       <div class="card"><div class="k">${t("k_trig")}</div><div class="v">${typeLabel(r.trigger_type)}</div></div>
@@ -789,7 +790,8 @@ function startRunPoll(runID) {
     renderRunDynamic(data);
     if (!runLive(data.run.state)) {
       clearInterval(runPoll);
-      toast(data.run.state === "success" ? t("run_done_ok") : t("run_done_fail"), data.run.state === "success" ? "ok" : "fail");
+      const st = data.run.state;
+      toast(st === "success" ? t("run_done_ok") : st === "cancelled" ? t("run_cancelled_toast") : t("run_done_fail"), st === "success" ? "ok" : st === "cancelled" ? "info" : "fail");
     }
   }, 2000);
 }
@@ -801,8 +803,36 @@ function renderRunDynamic(data) {
   $("run-dur").textContent = dur(r.started_at, r.finished_at);
   const done = tasks.filter((tk) => TASK_TERMINAL[tk.state]).length, running = tasks.filter((tk) => tk.state === "running").length;
   $("run-progress").textContent = tasks.length ? `${done}/${tasks.length}${running ? ` · ${running} ${stateLabel("running")}` : ""}` : "";
+  renderRunActions(r, tasks);
   patchGraphStates(sbt);
   renderRunBody(data);
+}
+// state-dependent run actions (live-patched): cancel while active, retry-failed
+// once it ends with failures/cancellations.
+function renderRunActions(r, tasks) {
+  const el = $("run-actions"); if (!el) return;
+  if (runLive(r.state)) {
+    el.innerHTML = `<button class="danger" id="run-cancel">${t("run_cancel")}</button>`;
+    $("run-cancel").onclick = () => cancelRunUI(r.run_id, r.dag_id);
+  } else if (tasks.some((tk) => TASK_RETRYABLE[tk.state])) {
+    el.innerHTML = `<button class="primary" id="run-retry">${t("run_retry")}</button>`;
+    $("run-retry").onclick = () => retryRunUI(r.run_id);
+  } else {
+    el.innerHTML = "";
+  }
+}
+async function cancelRunUI(runID, dagID) {
+  if (!(await confirmDialog(t("confirm_cancel_title", runID), t("confirm_cancel_body"), { danger: true, okLabel: t("run_cancel") }))) return;
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/cancel`, { method: "POST" }); toast(t("run_cancelled_toast"), "ok"); showRun(runID); }
+  catch (e) { toast(e.message, "fail"); }
+}
+async function retryRunUI(runID) {
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/retry`, { method: "POST" }); toast(t("run_retried_toast"), "ok"); showRun(runID); } // re-fetch + restart the poll
+  catch (e) { toast(e.message, "fail"); }
+}
+async function retryTaskUI(runID, taskID) {
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/tasks/${encodeURIComponent(taskID)}/retry`, { method: "POST" }); toast(t("run_retried_toast"), "ok"); showRun(runID); }
+  catch (e) { toast(e.message, "fail"); }
 }
 // patch existing graph node fills/strokes (never rebuild) so nodes light up with
 // the CSS fill transition as tasks execute
@@ -817,13 +847,15 @@ function renderRunBody(data) {
   const el = $("run-body"); if (!el) return;
   el.innerHTML = runTab === "timeline" ? ganttHtml(data) : instancesTableHtml(data);
   el.querySelectorAll(".logbtn").forEach((b) => b.onclick = () => showLog(b.dataset.ti, b.dataset.task));
+  el.querySelectorAll(".retrybtn").forEach((b) => b.onclick = () => retryTaskUI(data.run.run_id, b.dataset.rtask));
   el.querySelectorAll(".gantt-row[data-ti]").forEach((row) => row.onclick = () => showLog(row.dataset.ti, row.dataset.task));
 }
 function instancesTableHtml(data) {
   const tasks = data.tasks || [];
   if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
-  return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th></th></tr></thead>
-    <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td><td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th style="width:110px">${t("th_act")}</th></tr></thead>
+    <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td>
+      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 // honest Gantt: bars positioned by real started_at/finished_at; tasks that never
 // ran show a muted marker (no fabricated "queued" segment); one bar per task

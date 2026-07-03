@@ -16,14 +16,23 @@ var ErrNoTasks = errors.New("dag has no tasks")
 // the DAG still has queued/running runs. The API maps it to a 409 conflict.
 var ErrActiveRuns = errors.New("dag has active runs")
 
+// ErrRunNotActive is returned when a cancel is requested on a run that is already
+// terminal (nothing to stop). The API maps it to a 409 conflict.
+var ErrRunNotActive = errors.New("run is not active")
+
+// ErrNothingToRetry is returned when a run-level retry finds no failed tasks. The
+// API maps it to a 409 conflict.
+var ErrNothingToRetry = errors.New("run has no failed tasks to retry")
+
 // RunState is the lifecycle state of a DagRun.
 type RunState string
 
 const (
-	RunQueued  RunState = "queued"
-	RunRunning RunState = "running"
-	RunSuccess RunState = "success"
-	RunFailed  RunState = "failed"
+	RunQueued    RunState = "queued"
+	RunRunning   RunState = "running"
+	RunSuccess   RunState = "success"
+	RunFailed    RunState = "failed"
+	RunCancelled RunState = "cancelled" // user-initiated stop (distinct from a failure)
 )
 
 // TaskState is the lifecycle state of a TaskInstance.
@@ -38,12 +47,13 @@ const (
 	TaskUpForRetry     TaskState = "up_for_retry"
 	TaskUpstreamFailed TaskState = "upstream_failed"
 	TaskSkipped        TaskState = "skipped"
+	TaskCancelled      TaskState = "cancelled" // killed by a run cancellation
 )
 
 // IsTerminal reports whether the task state is final (no further transitions).
 func (s TaskState) IsTerminal() bool {
 	switch s {
-	case TaskSuccess, TaskFailed, TaskUpstreamFailed, TaskSkipped:
+	case TaskSuccess, TaskFailed, TaskUpstreamFailed, TaskSkipped, TaskCancelled:
 		return true
 	default:
 		return false

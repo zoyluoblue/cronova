@@ -142,6 +142,17 @@ Principles:
   rebuilt on every dependency edit, so its view is persisted in a per-DAG-id store
   (`graphViews`, kept out of the serialized model) and reseeded — otherwise
   click-to-connect would reset the pan on every click.
+- **Run actions (cancel / retry):** the run page is no longer read-only. While a
+  run is queued/running a **Cancel** button appears (kills running tasks via the
+  executor and marks the run + its non-terminal tasks `cancelled` — a distinct,
+  honest state, not a fake "failed"); once a run ends with failures/cancellations
+  a **Retry failed** button (run-level) and a per-task **↻** (in the instances
+  table) clear that task + its downstream closure back to `scheduled` and
+  reactivate the run. Cancellation is race-safe: the run is marked cancelled
+  first so in-flight polling goroutines skip overwriting the outcome (guarded by
+  a re-read of the task state). Retry does **not** reset `try_number` — the
+  executor ref derives from it and `Launch` is idempotent per ref, so reusing an
+  old ref would replay a stale result instead of a fresh attempt.
 - **Gantt honesty:** the Timeline tab positions one bar per task from its real
   `started_at`/`finished_at`; the empty track between bars is genuine waiting
   (queued time isn't stored — we do **not** draw a fabricated queued segment).

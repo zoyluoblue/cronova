@@ -37,6 +37,8 @@ const DICT = {
     back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
+    run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
+    confirm_cancel_title: (id) => `取消运行“${id}”?`, confirm_cancel_body: "正在运行的任务会被终止。", th_act: "操作",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
@@ -126,6 +128,8 @@ const DICT = {
     back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
+    run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
+    confirm_cancel_title: (id) => `Cancel run “${id}”?`, confirm_cancel_body: "Running tasks will be killed.", th_act: "Actions",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
@@ -206,8 +210,8 @@ const DICT = {
   },
 };
 const STATE = {
-  zh: { success: "成功", failed: "失败", running: "运行中", queued: "排队", scheduled: "待运行", up_for_retry: "重试中", upstream_failed: "上游失败", skipped: "跳过", "": "未运行", none: "未运行" },
-  en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", "": "no runs", none: "no runs" },
+  zh: { success: "成功", failed: "失败", running: "运行中", queued: "排队", scheduled: "待运行", up_for_retry: "重试中", upstream_failed: "上游失败", skipped: "跳过", cancelled: "已取消", "": "未运行", none: "未运行" },
+  en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", cancelled: "cancelled", "": "no runs", none: "no runs" },
 };
 const TYPEL = {
   zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件" },
@@ -313,7 +317,7 @@ function colorForState(s) {
   const m = {
     success: tint("--ok", 15), failed: tint("--fail", 16), running: tint("--run", 16),
     up_for_retry: tint("--warn", 16), queued: tint("--warn", 12), scheduled: tint("--warn", 10),
-    upstream_failed: tint("--upstream", 12), skipped: tint("--skip", 18),
+    upstream_failed: tint("--upstream", 12), skipped: tint("--skip", 18), cancelled: tint("--skip", 22),
   };
   return m[s] || ["var(--panel-2)", "var(--line-2)"]; // neutral: follows theme
 }
