@@ -115,3 +115,121 @@ func TestRetryTask(t *testing.T) {
 		t.Fatal("retry of a missing task should error")
 	}
 }
+
+// TestRetryRefusesActiveRun: retry is only allowed on a finished run.
+func TestRetryRefusesActiveRun(t *testing.T) {
+	s := newTestScheduler(t)
+	ctx := context.Background()
+	dag := &model.DAG{
+		DagID: "act", MaxActiveRuns: 1, StartDate: time.Now().UTC(),
+		Tasks: []model.Task{{ID: "t", Command: "sleep 5", Pool: model.DefaultPoolName}},
+	}
+	if err := s.registerDAG(ctx, dag); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := s.TriggerManual(ctx, "act", nil)
+	s.tickOnce(ctx)
+	waitTI(t, s, ctx, runID, "t", model.TaskRunning, 2*time.Second)
+	if err := s.RetryTask(ctx, runID, "t"); !errors.Is(err, model.ErrRunStillActive) {
+		t.Fatalf("RetryTask on active run = %v, want ErrRunStillActive", err)
+	}
+	if err := s.RetryRun(ctx, runID); !errors.Is(err, model.ErrRunStillActive) {
+		t.Fatalf("RetryRun on active run = %v, want ErrRunStillActive", err)
+	}
+	_ = s.CancelRun(ctx, runID) // clean up the sleep
+	s.WaitInflight()
+}
+
+// TestPartialRetryLeftoverCancelled: cancel a 2-independent-task run, retry only
+// one; the run must finalize as cancelled (not a clean success) and not trigger.
+func TestPartialRetryLeftoverCancelled(t *testing.T) {
+	s := newTestScheduler(t)
+	ctx := context.Background()
+	dag := &model.DAG{
+		DagID: "part", MaxActiveRuns: 1, StartDate: time.Now().UTC(),
+		Tasks: []model.Task{
+			{ID: "x", Command: "sleep 3", Pool: model.DefaultPoolName},
+			{ID: "y", Command: "sleep 3", Pool: model.DefaultPoolName},
+		},
+	}
+	if err := s.registerDAG(ctx, dag); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := s.TriggerManual(ctx, "part", nil)
+	s.tickOnce(ctx)
+	waitTI(t, s, ctx, runID, "x", model.TaskRunning, 2*time.Second)
+	if err := s.CancelRun(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitInflight()
+	if st := s.tiStates(t, ctx, runID); st["x"] != model.TaskCancelled || st["y"] != model.TaskCancelled {
+		t.Fatalf("after cancel: %v, want both cancelled", s.tiStates(t, ctx, runID))
+	}
+	// retry only x
+	if err := s.RetryTask(ctx, runID, "x"); err != nil {
+		t.Fatalf("RetryTask(x): %v", err)
+	}
+	// drive: x succeeds; y stays cancelled → run must finalize cancelled, not success
+	var run *model.DagRun
+	for i := 0; i < 40; i++ {
+		s.tickOnce(ctx)
+		s.WaitInflight()
+		run, _ = s.store.GetDagRun(ctx, runID)
+		if run.State != model.RunRunning {
+			break
+		}
+	}
+	if run.State != model.RunCancelled {
+		t.Fatalf("run finalized as %s, want cancelled (leftover cancelled task must not read as success)", run.State)
+	}
+	if st := s.tiStates(t, ctx, runID); st["x"] != model.TaskSuccess || st["y"] != model.TaskCancelled {
+		t.Fatalf("final task states = %v, want x=success y=cancelled", s.tiStates(t, ctx, runID))
+	}
+}
+
+// TestRetryRemovedTaskNoWedge: retrying/finalizing after a task is removed from
+// the DAG must not wedge the run in `running` forever.
+func TestRetryRemovedTaskNoWedge(t *testing.T) {
+	s := newTestScheduler(t)
+	ctx := context.Background()
+	dag := &model.DAG{
+		DagID: "rm", MaxActiveRuns: 1, StartDate: time.Now().UTC(),
+		Tasks: []model.Task{
+			{ID: "a", Command: "exit 1", Pool: model.DefaultPoolName}, // retryable
+			{ID: "b", Command: "exit 1", Pool: model.DefaultPoolName}, // will be removed (orphan)
+		},
+	}
+	if err := s.registerDAG(ctx, dag); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := s.TriggerManual(ctx, "rm", nil)
+	if run := s.driveToTerminal(t, ctx, runID, 40); run.State != model.RunFailed {
+		t.Fatalf("run = %s, want failed", run.State)
+	}
+	// remove task b from the DAG (its instance becomes an orphan)
+	dag.Tasks = dag.Tasks[:1] // only "a"
+	if err := s.registerDAG(ctx, dag); err != nil {
+		t.Fatal(err)
+	}
+	// RetryRun retries a (valid); b (orphan) is NOT reactivated — so the run must
+	// still finalize rather than wedge in `running` on a task with no dispatch path.
+	if err := s.RetryRun(ctx, runID); err != nil {
+		t.Fatalf("RetryRun: %v", err)
+	}
+	var run *model.DagRun
+	for i := 0; i < 40; i++ {
+		s.tickOnce(ctx)
+		s.WaitInflight()
+		run, _ = s.store.GetDagRun(ctx, runID)
+		if run.State != model.RunRunning {
+			break
+		}
+	}
+	if run.State == model.RunRunning {
+		t.Fatal("run wedged in running after retrying with a removed task")
+	}
+	// b's orphan instance stays in its terminal state; the run finalizes (failed).
+	if run.State != model.RunFailed {
+		t.Fatalf("run = %s, want failed", run.State)
+	}
+}

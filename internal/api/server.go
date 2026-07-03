@@ -140,7 +140,7 @@ func mapErr(w http.ResponseWriter, err error) {
 		httpErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, model.ErrNoTasks):
 		httpErr(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry):
+	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry), errors.Is(err, model.ErrRunStillActive):
 		httpErr(w, http.StatusConflict, err.Error())
 	default:
 		httpErr(w, http.StatusInternalServerError, err.Error())

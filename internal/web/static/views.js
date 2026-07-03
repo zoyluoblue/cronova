@@ -740,13 +740,13 @@ async function flushSave() {
 }
 
 // ---- run detail ----
-let runPoll = null, runTab = "instances", runDag = null;
+let runPoll = null, runPollGen = 0, runTab = "instances", runDag = null;
 const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1, cancelled: 1 };
 const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1 }; // states a per-task retry clears
 const runLive = (s) => s === "queued" || s === "running";
 
 async function showRun(runID) {
-  view = "run"; currentRun = runID; closeLog(); clearInterval(runPoll); setHash("#/run/" + encodeURIComponent(runID));
+  view = "run"; currentRun = runID; closeLog(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
   let data;
   try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
   const r = data.run;
@@ -779,21 +779,24 @@ async function showRun(runID) {
     renderRunBody(runDataCache);
   });
   renderRunDynamic(data);
-  if (runLive(r.state)) startRunPoll(runID);
+  if (runLive(r.state)) startRunPoll(runID, gen);
 }
 let runDataCache = null;
-function startRunPoll(runID) {
-  runPoll = setInterval(async () => {
-    if (view !== "run" || currentRun !== runID) { clearInterval(runPoll); return; } // navigated away
+function startRunPoll(runID, gen) {
+  const p = setInterval(async () => {
+    // gen guards against a stale callback (a later showRun — e.g. after retry —
+    // started a fresh poll); clearInterval can't abort an already-parked await.
+    if (gen !== runPollGen) { clearInterval(p); return; }
     let data; try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (_) { return; }
-    if (view !== "run" || currentRun !== runID) return;
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) return;
     renderRunDynamic(data);
     if (!runLive(data.run.state)) {
-      clearInterval(runPoll);
+      clearInterval(p);
       const st = data.run.state;
       toast(st === "success" ? t("run_done_ok") : st === "cancelled" ? t("run_cancelled_toast") : t("run_done_fail"), st === "success" ? "ok" : st === "cancelled" ? "info" : "fail");
     }
   }, 2000);
+  runPoll = p;
 }
 function renderRunDynamic(data) {
   runDataCache = data;
@@ -808,20 +811,26 @@ function renderRunDynamic(data) {
   renderRunBody(data);
 }
 // state-dependent run actions (live-patched): cancel while active, retry-failed
-// once it ends with failures/cancellations.
+// once it ends with failures/cancellations. Only rewrites the DOM when the action
+// mode actually changes, so a keyboard user's focus on the button survives the 2s
+// poll. Hidden for viewers (writes are admin-only server-side anyway).
 function renderRunActions(r, tasks) {
   const el = $("run-actions"); if (!el) return;
-  if (runLive(r.state)) {
+  const isViewer = document.body.dataset.role === "viewer";
+  const mode = isViewer ? "none" : runLive(r.state) ? "cancel" : tasks.some((tk) => TASK_RETRYABLE[tk.state]) ? "retry" : "none";
+  if (el.dataset.mode === mode) return; // unchanged → preserve the existing node + focus
+  el.dataset.mode = mode;
+  if (mode === "cancel") {
     el.innerHTML = `<button class="danger" id="run-cancel">${t("run_cancel")}</button>`;
-    $("run-cancel").onclick = () => cancelRunUI(r.run_id, r.dag_id);
-  } else if (tasks.some((tk) => TASK_RETRYABLE[tk.state])) {
+    $("run-cancel").onclick = () => cancelRunUI(r.run_id);
+  } else if (mode === "retry") {
     el.innerHTML = `<button class="primary" id="run-retry">${t("run_retry")}</button>`;
     $("run-retry").onclick = () => retryRunUI(r.run_id);
   } else {
     el.innerHTML = "";
   }
 }
-async function cancelRunUI(runID, dagID) {
+async function cancelRunUI(runID) {
   if (!(await confirmDialog(t("confirm_cancel_title", runID), t("confirm_cancel_body"), { danger: true, okLabel: t("run_cancel") }))) return;
   try { await api(`/api/runs/${encodeURIComponent(runID)}/cancel`, { method: "POST" }); toast(t("run_cancelled_toast"), "ok"); showRun(runID); }
   catch (e) { toast(e.message, "fail"); }
@@ -831,6 +840,8 @@ async function retryRunUI(runID) {
   catch (e) { toast(e.message, "fail"); }
 }
 async function retryTaskUI(runID, taskID) {
+  // per-task retry re-runs this task AND its downstream — confirm first (larger blast radius than the bare ↻ implies)
+  if (!(await confirmDialog(t("confirm_retry_title", taskID), t("confirm_retry_body"), { okLabel: t("task_retry") }))) return;
   try { await api(`/api/runs/${encodeURIComponent(runID)}/tasks/${encodeURIComponent(taskID)}/retry`, { method: "POST" }); toast(t("run_retried_toast"), "ok"); showRun(runID); }
   catch (e) { toast(e.message, "fail"); }
 }
@@ -853,9 +864,12 @@ function renderRunBody(data) {
 function instancesTableHtml(data) {
   const tasks = data.tasks || [];
   if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
+  // per-task retry only on a finished run (the backend refuses retry on an active
+  // run) and not for viewers (writes are admin-only)
+  const canRetry = !runLive(data.run.state) && document.body.dataset.role !== "viewer";
   return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th style="width:110px">${t("th_act")}</th></tr></thead>
     <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td>
-      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] && canRetry ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 // honest Gantt: bars positioned by real started_at/finished_at; tasks that never
 // ran show a muted marker (no fabricated "queued" segment); one bar per task

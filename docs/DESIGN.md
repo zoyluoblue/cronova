@@ -150,9 +150,18 @@ Principles:
   table) clear that task + its downstream closure back to `scheduled` and
   reactivate the run. Cancellation is race-safe: the run is marked cancelled
   first so in-flight polling goroutines skip overwriting the outcome (guarded by
-  a re-read of the task state). Retry does **not** reset `try_number` — the
-  executor ref derives from it and `Launch` is idempotent per ref, so reusing an
-  old ref would replay a stale result instead of a fresh attempt.
+  an optimistic CAS). Retry does **not** reset `try_number` — the executor ref
+  derives from it and `Launch` is idempotent per ref, so reusing an old ref would
+  replay a stale result instead of a fresh attempt.
+  - **Concurrency safety** is enforced by a store-level CAS: task finalize/running
+    writes go through `UpdateTaskInstanceGuarded` (`WHERE id=? AND executor_ref=?
+    AND state NOT IN (terminal)`), so a polling goroutine can never clobber a
+    concurrent cancel (row → terminal) or retry (ref cleared). **Retry is refused
+    on a still-active run** (cancel first) — a terminal run has no in-flight task
+    goroutines to race — and only reactivates tasks still present in the DAG (a
+    removed task has no dispatch path and would wedge the run). A run with a
+    leftover `cancelled` task finalizes as **cancelled**, never a clean success,
+    and does not trigger downstreams.
 - **Gantt honesty:** the Timeline tab positions one bar per task from its real
   `started_at`/`finished_at`; the empty track between bars is genuine waiting
   (queued time isn't stored — we do **not** draw a fabricated queued segment).

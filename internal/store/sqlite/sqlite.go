@@ -522,6 +522,26 @@ WHERE id=?`,
 	return nil
 }
 
+const terminalTaskStates = `'success','failed','upstream_failed','skipped','cancelled'`
+
+// UpdateTaskInstanceGuarded applies the update only if the row still carries
+// expectRef AND is not already terminal — an optimistic CAS. It lets a polling
+// goroutine finalize a task WITHOUT clobbering a concurrent CancelRun (which makes
+// the row terminal) or a retry (which clears/rewrites executor_ref). Returns
+// whether the write applied.
+func (s *Store) UpdateTaskInstanceGuarded(ctx context.Context, ti *model.TaskInstance, expectRef string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE task_instances SET state=?, try_number=?, max_retries=?, pool=?, priority=?, executor_ref=?, log_path=?, started_at=?, finished_at=?
+WHERE id=? AND executor_ref=? AND state NOT IN (`+terminalTaskStates+`)`,
+		string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority, ti.ExecutorRef, ti.LogPath,
+		fmtNullTime(ti.StartedAt), fmtNullTime(ti.FinishedAt), ti.ID, expectRef)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // --- cross-DAG dependencies ---
 
 func (s *Store) ReplaceDagDependencies(ctx context.Context, downstream string, upstreams []string) error {

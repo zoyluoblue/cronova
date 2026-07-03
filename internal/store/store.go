@@ -54,6 +54,9 @@ type Store interface {
 	ListTaskInstances(ctx context.Context, runID string) ([]*model.TaskInstance, error)
 	ListTaskInstancesByState(ctx context.Context, state model.TaskState) ([]*model.TaskInstance, error)
 	UpdateTaskInstance(ctx context.Context, ti *model.TaskInstance) error
+	// UpdateTaskInstanceGuarded is an optimistic CAS: it applies only if the row
+	// still has expectRef and is non-terminal. Returns whether it applied.
+	UpdateTaskInstanceGuarded(ctx context.Context, ti *model.TaskInstance, expectRef string) (bool, error)
 
 	// --- cross-DAG dependencies (dependency trigger) ---
 	// ReplaceDagDependencies sets downstream's upstream list to exactly upstreams.

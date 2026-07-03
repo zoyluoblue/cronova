@@ -24,6 +24,10 @@ var ErrRunNotActive = errors.New("run is not active")
 // API maps it to a 409 conflict.
 var ErrNothingToRetry = errors.New("run has no failed tasks to retry")
 
+// ErrRunStillActive is returned when a retry is requested on a run that is still
+// queued/running (retry only a finished run). The API maps it to a 409 conflict.
+var ErrRunStillActive = errors.New("run is still active — cancel it before retrying")
+
 // RunState is the lifecycle state of a DagRun.
 type RunState string
 

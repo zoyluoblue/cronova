@@ -322,11 +322,9 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("run %q (%s): %w", runID, run.State, model.ErrRunNotActive)
 	}
 	fin := time.Now().UTC()
-	started := run.StartedAt
-	if started == nil {
-		started = &fin
-	}
-	if err := s.store.UpdateDagRunState(ctx, runID, model.RunCancelled, started, &fin); err != nil {
+	// leave started_at NULL if the run never left queued — an honest "cancelled
+	// before start" (no spurious 0s duration).
+	if err := s.store.UpdateDagRunState(ctx, runID, model.RunCancelled, run.StartedAt, &fin); err != nil {
 		return err
 	}
 	tis, err := s.store.ListTaskInstances(ctx, runID)
@@ -357,10 +355,14 @@ func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if tiByTask[taskID] == nil {
+	valid := taskIDSet(d.Tasks)
+	if tiByTask[taskID] == nil || !valid[taskID] {
 		return fmt.Errorf("task %q in run %q: %w", taskID, runID, store.ErrNotFound)
 	}
-	return s.clearAndReactivate(ctx, run, tiByTask, downstreamClosure(d.Tasks, taskID))
+	// intersect with the current DAG's tasks: a task no longer in the DAG has no
+	// dispatch path, so reactivating it would wedge the run in `running` forever.
+	ids := intersect(downstreamClosure(d.Tasks, taskID), valid)
+	return s.clearAndReactivate(ctx, run, tiByTask, ids)
 }
 
 // RetryRun clears every failed / upstream_failed / cancelled task (and its
@@ -370,12 +372,18 @@ func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
+	valid := taskIDSet(d.Tasks)
 	ids := map[string]bool{}
 	for _, ti := range tiByTask {
+		if !valid[ti.TaskID] {
+			continue // orphan instance (task removed from the DAG since the run)
+		}
 		switch ti.State {
 		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled:
 			for id := range downstreamClosure(d.Tasks, ti.TaskID) {
-				ids[id] = true
+				if valid[id] {
+					ids[id] = true
+				}
 			}
 		}
 	}
@@ -386,10 +394,16 @@ func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 }
 
 // retryContext loads the run, its (active) DAG, and its task instances by task id.
+// Retry is refused on a still-active run: a running run has in-flight task
+// goroutines, and clearing a running task would orphan its process and race its
+// finalize. Cancel first, then retry.
 func (s *Scheduler) retryContext(ctx context.Context, runID string) (*model.DagRun, *model.DAG, map[string]*model.TaskInstance, error) {
 	run, err := s.store.GetDagRun(ctx, runID)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if run.State == model.RunQueued || run.State == model.RunRunning {
+		return nil, nil, nil, fmt.Errorf("run %q (%s): %w", runID, run.State, model.ErrRunStillActive)
 	}
 	d, _, ok := s.cachedDAG(run.DagID)
 	if !ok {
@@ -404,6 +418,24 @@ func (s *Scheduler) retryContext(ctx context.Context, runID string) (*model.DagR
 		byTask[ti.TaskID] = ti
 	}
 	return run, d, byTask, nil
+}
+
+func taskIDSet(tasks []model.Task) map[string]bool {
+	m := make(map[string]bool, len(tasks))
+	for _, t := range tasks {
+		m[t.ID] = true
+	}
+	return m
+}
+
+func intersect(a, b map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for k := range a {
+		if b[k] {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // clearAndReactivate resets the named tasks to scheduled (fresh attempt count)
@@ -720,19 +752,26 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 	if err != nil {
 		return err
 	}
-	allTerminal, anyFailed := true, false
+	allTerminal, anyFailed, anyCancelled := true, false, false
 	for _, ti := range tis {
 		if !ti.State.IsTerminal() {
 			allTerminal = false
 		}
-		if ti.State == model.TaskFailed || ti.State == model.TaskUpstreamFailed {
+		switch ti.State {
+		case model.TaskFailed, model.TaskUpstreamFailed:
 			anyFailed = true
+		case model.TaskCancelled:
+			anyCancelled = true
 		}
 	}
 	if allTerminal {
+		// a leftover cancelled task (e.g. a partial per-task retry) must NOT finalize
+		// as a clean success or trigger downstreams.
 		final := model.RunSuccess
 		if anyFailed {
 			final = model.RunFailed
+		} else if anyCancelled {
+			final = model.RunCancelled
 		}
 		fin := time.Now().UTC()
 		if err := s.store.UpdateDagRunState(ctx, run.RunID, final, run.StartedAt, &fin); err != nil {
@@ -885,8 +924,15 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	now := time.Now().UTC()
 	ti.State = model.TaskRunning
 	ti.StartedAt = &now
-	if err := s.store.UpdateTaskInstance(ctx, &ti); err != nil {
+	// guarded write: if a CancelRun (row → cancelled) or retry (ref cleared) landed
+	// between the pre-Launch check and here, the CAS fails — kill the process we
+	// just launched and bail, rather than resurrecting a cancelled task.
+	if applied, err := s.store.UpdateTaskInstanceGuarded(ctx, &ti, ti.ExecutorRef); err != nil {
 		s.log.Error("mark running", "ti", ti.ID, "err", err)
+		return
+	} else if !applied {
+		_ = s.exec.Cancel(ctx, ti.ExecutorRef) // the process exists now; kill it
+		s.log.Info("task cancelled during launch", "ref", ti.ExecutorRef)
 		return
 	}
 	s.awaitCompletion(ctx, &ti)
@@ -926,26 +972,35 @@ func (s *Scheduler) awaitCompletion(ctx context.Context, ti *model.TaskInstance)
 	}
 }
 
-// taskCancelled reports whether a concurrent CancelRun already marked this task
-// cancelled in the store — the polling goroutine's local copy is then stale, and
-// it must not overwrite the cancelled outcome with success/failure.
+// taskCancelled reports whether a CancelRun already marked this task cancelled —
+// a cheap pre-Launch early-out (the guarded write is the authoritative defense).
 func (s *Scheduler) taskCancelled(ctx context.Context, id int64) bool {
 	cur, err := s.store.GetTaskInstance(ctx, id)
 	return err == nil && cur.State == model.TaskCancelled
 }
 
-func (s *Scheduler) finalizeTask(ctx context.Context, ti *model.TaskInstance, exitCode int) {
-	if s.taskCancelled(ctx, ti.ID) {
-		return // CancelRun killed it and recorded it as cancelled
+// finalizeWrite persists a finalized task outcome through the guarded CAS: it
+// applies only if the row still has this attempt's ref and is non-terminal, so a
+// concurrent CancelRun (row → cancelled) or retry (ref cleared) is never
+// clobbered. ref is the goroutine's own attempt ref, captured before the update
+// mutates ti.ExecutorRef... but finalize keeps the same ref, so ti.ExecutorRef is it.
+func (s *Scheduler) finalizeWrite(ctx context.Context, ti *model.TaskInstance, what string) {
+	applied, err := s.store.UpdateTaskInstanceGuarded(ctx, ti, ti.ExecutorRef)
+	if err != nil {
+		s.log.Error(what, "ti", ti.ID, "err", err)
+		return
 	}
+	if !applied {
+		s.log.Info("finalize skipped (cancelled or retried concurrently)", "ti", ti.ID, "state", ti.State)
+	}
+}
+
+func (s *Scheduler) finalizeTask(ctx context.Context, ti *model.TaskInstance, exitCode int) {
 	if exitCode == 0 {
 		now := time.Now().UTC()
 		ti.State = model.TaskSuccess
 		ti.FinishedAt = &now
-		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
-			s.log.Error("finalize task", "ti", ti.ID, "err", err)
-			return
-		}
+		s.finalizeWrite(ctx, ti, "finalize task")
 		s.log.Info("task finished", "ref", ti.ExecutorRef, "state", model.TaskSuccess, "exit", 0)
 		return
 	}
@@ -962,9 +1017,6 @@ func (s *Scheduler) finalizeTaskLost(ctx context.Context, ti *model.TaskInstance
 // to failed. TryNumber counts attempts made (incremented at dispatch), so the
 // task gets MaxRetries+1 total attempts.
 func (s *Scheduler) recordFailure(ctx context.Context, ti *model.TaskInstance, reason string) {
-	if s.taskCancelled(ctx, ti.ID) {
-		return // a run cancellation already finalized this task as cancelled
-	}
 	now := time.Now().UTC()
 	ti.FinishedAt = &now
 	if ti.TryNumber <= ti.MaxRetries {
@@ -974,9 +1026,7 @@ func (s *Scheduler) recordFailure(ctx context.Context, ti *model.TaskInstance, r
 		ti.State = model.TaskFailed
 		s.log.Info("task failed", "ref", ti.ExecutorRef, "try", ti.TryNumber, "reason", reason)
 	}
-	if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
-		s.log.Error("record failure", "ti", ti.ID, "err", err)
-	}
+	s.finalizeWrite(ctx, ti, "record failure")
 }
 
 // reattach spawns a poll goroutine for a task already running on the executor.
