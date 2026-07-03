@@ -76,7 +76,7 @@ func TestLinearDAGRunsToSuccess(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatalf("registerDAG: %v", err)
 	}
-	runID, err := s.TriggerManual(ctx, "linear")
+	runID, err := s.TriggerManual(ctx, "linear", nil)
 	if err != nil {
 		t.Fatalf("TriggerManual: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestFailurePropagationBlocksDownstream(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatalf("registerDAG: %v", err)
 	}
-	runID, err := s.TriggerManual(ctx, "diamond")
+	runID, err := s.TriggerManual(ctx, "diamond", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestFailurePropagationBlocksDownstream(t *testing.T) {
 
 func TestTriggerUnknownDAG(t *testing.T) {
 	s := newTestScheduler(t)
-	if _, err := s.TriggerManual(context.Background(), "ghost"); err == nil {
+	if _, err := s.TriggerManual(context.Background(), "ghost", nil); err == nil {
 		t.Fatal("expected error triggering unknown dag")
 	}
 }

@@ -46,6 +46,15 @@ const DICT = {
     set_deps_hint: "上游 DAG 成功后自动触发本 DAG", set_no_deps_avail: "暂无其他 DAG 可选",
     danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
     nd_more: "调度与更多选项", nd_less: "收起",
+    nav_resources: "变量 & 连接",
+    res_vars: "变量", res_conns: "连接",
+    res_sub: "跨任务共享的配置。命令里用 {{ var.KEY }} / {{ conn.ID.字段 }} 引用，触发时用 {{ params.KEY }}。",
+    v_key: "变量名", v_value: "值", v_add: "添加变量", v_none: "还没有变量", v_save: "保存",
+    c_id: "连接 ID", c_type: "类型", c_host: "主机", c_port: "端口", c_login: "用户名", c_password: "密码", c_extra: "额外(JSON)",
+    c_add: "新建连接", c_edit: "编辑连接", c_none: "还没有连接", c_pw_set: "已设置", c_pw_none: "未设置", c_pw_keep: "留空则不修改",
+    c_del_title: (id) => `删除连接“${id}”?`, v_del_title: (k) => `删除变量“${k}”?`, del_body: "此操作不可撤销。",
+    trig_params: "带参数触发", p_params: "参数", p_add: "加一行", p_key: "键", p_val: "值", p_trigger: "触发", p_hint: "参数注入为 CRONOVA_PARAM_* 环境变量，命令里用 {{ params.键 }} 引用。",
+    run_params: "参数", res_saved: "已保存", res_deleted: "已删除", err_key: "无效名称（仅限字母、数字、_ . -）",
     btn_trigger: "▶ 触发运行", btn_pause: "暂停", btn_resume: "恢复", btn_delete: "删除",
     confirm_del_dag_title: (id) => `删除 DAG “${id}”？`,
     confirm_del_dag_body: "它将被归档(从列表隐藏),运行历史保留,之后可恢复。",
@@ -126,6 +135,15 @@ const DICT = {
     set_deps_hint: "Triggered automatically after these DAGs succeed", set_no_deps_avail: "No other DAGs available",
     danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
     nd_more: "Schedule & more options", nd_less: "Hide",
+    nav_resources: "Variables & Connections",
+    res_vars: "Variables", res_conns: "Connections",
+    res_sub: "Config shared across tasks. Reference in commands as {{ var.KEY }} / {{ conn.ID.field }}, or {{ params.KEY }} at trigger time.",
+    v_key: "Key", v_value: "Value", v_add: "Add variable", v_none: "No variables yet", v_save: "Save",
+    c_id: "Connection ID", c_type: "Type", c_host: "Host", c_port: "Port", c_login: "Login", c_password: "Password", c_extra: "Extra (JSON)",
+    c_add: "New connection", c_edit: "Edit connection", c_none: "No connections yet", c_pw_set: "set", c_pw_none: "not set", c_pw_keep: "leave blank to keep",
+    c_del_title: (id) => `Delete connection “${id}”?`, v_del_title: (k) => `Delete variable “${k}”?`, del_body: "This cannot be undone.",
+    trig_params: "Trigger with params", p_params: "Params", p_add: "Add row", p_key: "Key", p_val: "Value", p_trigger: "Trigger", p_hint: "Params are injected as CRONOVA_PARAM_* env vars; reference as {{ params.key }} in commands.",
+    run_params: "Params", res_saved: "Saved", res_deleted: "Deleted", err_key: "Invalid name (letters, digits, _ . - only)",
     btn_trigger: "▶ Trigger run", btn_pause: "Pause", btn_resume: "Resume", btn_delete: "Delete",
     confirm_del_dag_title: (id) => `Delete DAG “${id}”?`,
     confirm_del_dag_body: "It will be archived (hidden from lists); run history is kept and it can be restored.",
@@ -438,6 +456,7 @@ function applyRoute() {
   const seg = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent).filter(Boolean);
   if (!seg.length || seg[0] === "dags") return loadDags();
   if (seg[0] === "pools") return showPools();
+  if (seg[0] === "resources") return showResources();
   if (seg[0] === "graph") return showGraph();
   if (seg[0] === "run" && seg[1]) return showRun(seg[1]);
   if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {

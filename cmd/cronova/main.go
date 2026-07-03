@@ -263,7 +263,7 @@ func cmdTrigger(args []string) error {
 	if err := sch.LoadDAGs(ctx); err != nil {
 		return err
 	}
-	runID, err := sch.TriggerManual(ctx, dagID)
+	runID, err := sch.TriggerManual(ctx, dagID, nil)
 	if err != nil {
 		return err
 	}

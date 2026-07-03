@@ -13,7 +13,7 @@ import (
 
 func TestRenderCommand(t *testing.T) {
 	vars := map[string]string{"logical_date": "2026-06-09", "run_id": "r1"}
-	got := renderCommand("etl {{ logical_date }} id={{run_id}} keep={{ unknown }}", vars)
+	got := renderCommand("etl {{ logical_date }} id={{run_id}} keep={{ unknown }}", func(k string) (string, bool) { v, ok := vars[k]; return v, ok })
 	want := "etl 2026-06-09 id=r1 keep={{ unknown }}"
 	if got != want {
 		t.Errorf("renderCommand = %q, want %q", got, want)
@@ -31,7 +31,7 @@ func TestCommandTemplating(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "tmpl")
+	runID, _ := s.TriggerManual(ctx, "tmpl", nil)
 	if run := s.driveToTerminal(t, ctx, runID, 20); run.State != model.RunSuccess {
 		t.Fatalf("run = %s, want success", run.State)
 	}

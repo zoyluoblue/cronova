@@ -32,7 +32,7 @@ func TestDeleteDAGArchivesAndEvicts(t *testing.T) {
 	if _, _, ok := s.cachedDAG("gone"); ok {
 		t.Error("deleted DAG still in cache")
 	}
-	if _, err := s.TriggerManual(ctx, "gone"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.TriggerManual(ctx, "gone", nil); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("trigger after delete = %v, want ErrNotFound", err)
 	}
 	// file removed, but the row (definition) is preserved for recovery
@@ -62,7 +62,7 @@ func TestDeleteDAGRefusedWithActiveRuns(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.TriggerManual(ctx, "busy"); err != nil { // creates a queued run
+	if _, err := s.TriggerManual(ctx, "busy", nil); err != nil { // creates a queued run
 		t.Fatal(err)
 	}
 	if err := s.DeleteDAG(ctx, "busy"); !errors.Is(err, model.ErrActiveRuns) {

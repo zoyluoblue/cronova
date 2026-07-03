@@ -26,7 +26,7 @@ import (
 
 // Engine is the slice of the scheduler the API needs.
 type Engine interface {
-	TriggerManual(ctx context.Context, dagID string) (string, error)
+	TriggerManual(ctx context.Context, dagID string, params map[string]string) (string, error)
 	CreateDAG(ctx context.Context, yamlText string) (string, error)
 	DeleteDAG(ctx context.Context, dagID string) error
 	NextSchedule(ctx context.Context, d *model.DAG) (time.Time, bool)
@@ -86,6 +86,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{tiID}/log/stream", s.streamLog)
 	mux.HandleFunc("GET /api/pools", s.listPools)
 	mux.HandleFunc("POST /api/pools/{name}", s.setPool)
+	// UI-managed config: variables + connections
+	mux.HandleFunc("GET /api/variables", s.listVariables)
+	mux.HandleFunc("POST /api/variables/{key}", s.setVariable)
+	mux.HandleFunc("DELETE /api/variables/{key}", s.deleteVariable)
+	mux.HandleFunc("GET /api/connections", s.listConnections)
+	mux.HandleFunc("POST /api/connections/{id}", s.setConnection)
+	mux.HandleFunc("DELETE /api/connections/{id}", s.deleteConnection)
 	// auth + ops endpoints
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
@@ -323,7 +330,14 @@ func (s *Server) deleteDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
-	runID, err := s.eng.TriggerManual(r.Context(), r.PathValue("id"))
+	// optional trigger-time params (JSON {"params":{...}}); empty body = no params
+	var req struct {
+		Params map[string]string `json:"params"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		_ = decodeJSON(r, &req) // tolerate an absent/blank body — params are optional
+	}
+	runID, err := s.eng.TriggerManual(r.Context(), r.PathValue("id"), req.Params)
 	if err != nil {
 		mapErr(w, err)
 		return

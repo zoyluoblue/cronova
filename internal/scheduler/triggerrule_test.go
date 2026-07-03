@@ -23,7 +23,7 @@ func TestTriggerRuleAllDone(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "rule_alldone")
+	runID, _ := s.TriggerManual(ctx, "rule_alldone", nil)
 	run := s.driveToTerminal(t, ctx, runID, 40)
 	states := s.tiStates(t, ctx, runID)
 	// b failed, but cleanup (all_done) still ran to success; run overall failed.
@@ -53,7 +53,7 @@ func TestTriggerRuleOneFailed(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "rule_onefailed")
+	runID, _ := s.TriggerManual(ctx, "rule_onefailed", nil)
 	s.driveToTerminal(t, ctx, runID, 40)
 	states := s.tiStates(t, ctx, runID)
 	if states["alert"] != model.TaskSuccess {
@@ -75,7 +75,7 @@ func TestTriggerRuleOneFailedBlocked(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "rule_block")
+	runID, _ := s.TriggerManual(ctx, "rule_block", nil)
 	run := s.driveToTerminal(t, ctx, runID, 40)
 	states := s.tiStates(t, ctx, runID)
 	if states["alert"] != model.TaskUpstreamFailed {

@@ -98,6 +98,18 @@ Principles:
   collapses back to the summary (full page re-render so the hero facts stay in
   sync). Only one row edits at a time. Destructive actions live in a separate
   danger zone at the bottom of Settings — never in the hero.
+- **Variables / connections / params (secret honesty):** the "变量 & 连接" page
+  manages shared config that tasks reference in commands via the template engine
+  — `{{ var.KEY }}`, `{{ conn.ID.field }}` (host/port/login/password/type/extra.X),
+  and `{{ params.KEY }}` (free-form key-values supplied at manual trigger,
+  injected as `CRONOVA_PARAM_*`). Resolution happens **server-side at execution**,
+  and only *referenced* values enter a task — variables/connections are never
+  blanket-injected as env, so a secret reaches only the tasks that ask for it.
+  Connection **passwords are write-only**: the API never returns them (the model
+  field is `json:"-"`), the UI shows `••••••` with a `has_password` flag, and a
+  blank-password edit preserves the stored secret. A run records the exact params
+  it was triggered with (honest replay); the run page shows them as chips.
+  (Passwords are stored plaintext — protect the SQLite file with fs perms.)
 - **Auth gate (`initAuth`):** boot resolves identity via `GET /api/me` before
   rendering anything data-bearing. 200 → start the app; 401 → a full-screen
   login overlay (`#login-root`), and `startApp()` runs only after a successful

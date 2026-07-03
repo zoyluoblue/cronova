@@ -123,7 +123,7 @@ func TestPoolLimitsConcurrency(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, err := s.TriggerManual(ctx, "fan")
+	runID, err := s.TriggerManual(ctx, "fan", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestRetryExhausted(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "retry")
+	runID, _ := s.TriggerManual(ctx, "retry", nil)
 	run := s.driveToTerminal(t, ctx, runID, 40)
 	if run.State != model.RunFailed {
 		t.Fatalf("run = %s, want failed", run.State)
@@ -194,7 +194,7 @@ func TestRetryThenSuccess(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "flaky")
+	runID, _ := s.TriggerManual(ctx, "flaky", nil)
 	run := s.driveToTerminal(t, ctx, runID, 40)
 	if run.State != model.RunSuccess {
 		t.Fatalf("run = %s, want success", run.State)
@@ -215,7 +215,7 @@ func TestTimeoutFailsTask(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, _ := s.TriggerManual(ctx, "to")
+	runID, _ := s.TriggerManual(ctx, "to", nil)
 	run := s.driveToTerminal(t, ctx, runID, 80)
 	if run.State != model.RunFailed {
 		t.Fatalf("run = %s, want failed (timeout)", run.State)
@@ -237,7 +237,7 @@ func TestDependencyTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runUp, _ := s.TriggerManual(ctx, "up")
+	runUp, _ := s.TriggerManual(ctx, "up", nil)
 	s.driveToTerminal(t, ctx, runUp, 20) // up succeeds and triggers down
 
 	// Drive the scheduler until the dependency-triggered down run finishes.

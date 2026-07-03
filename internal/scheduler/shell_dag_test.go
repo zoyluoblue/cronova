@@ -42,7 +42,7 @@ func TestTriggerManualRejectsShellDAG(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.TriggerManual(ctx, "shell")
+	_, err := s.TriggerManual(ctx, "shell", nil)
 	if !errors.Is(err, model.ErrNoTasks) {
 		t.Fatalf("expected ErrNoTasks, got %v", err)
 	}
@@ -93,7 +93,7 @@ func TestCreateDAGAllowsShell(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "shell.yaml")); err != nil {
 		t.Errorf("shell.yaml not persisted: %v", err)
 	}
-	if _, err := s.TriggerManual(ctx, "shell"); !errors.Is(err, model.ErrNoTasks) {
+	if _, err := s.TriggerManual(ctx, "shell", nil); !errors.Is(err, model.ErrNoTasks) {
 		t.Errorf("shell trigger = %v, want ErrNoTasks", err)
 	}
 }
@@ -110,7 +110,7 @@ func TestLoadDAGsAllowsShellFile(t *testing.T) {
 		t.Fatalf("LoadDAGs: %v", err)
 	}
 	// Registered (not "not found"), but non-triggerable.
-	if _, err := s.TriggerManual(ctx, "shell"); !errors.Is(err, model.ErrNoTasks) {
+	if _, err := s.TriggerManual(ctx, "shell", nil); !errors.Is(err, model.ErrNoTasks) {
 		t.Errorf("after load, trigger = %v, want ErrNoTasks", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestEmptiedRunFailsNotPhantomSuccess(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, err := s.TriggerManual(ctx, "shrink") // run queued while a task exists
+	runID, err := s.TriggerManual(ctx, "shrink", nil) // run queued while a task exists
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestTriggerDownstreamsSkipsShellDownstream(t *testing.T) {
 	if err := s.registerDAG(ctx, down); err != nil {
 		t.Fatal(err)
 	}
-	runID, err := s.TriggerManual(ctx, "up")
+	runID, err := s.TriggerManual(ctx, "up", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestShellDAGBecomesRunnableAfterAddingTask(t *testing.T) {
 	if err := s.registerDAG(ctx, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, err := s.TriggerManual(ctx, "grown")
+	runID, err := s.TriggerManual(ctx, "grown", nil)
 	if err != nil {
 		t.Fatalf("trigger after adding a task should succeed, got %v", err)
 	}

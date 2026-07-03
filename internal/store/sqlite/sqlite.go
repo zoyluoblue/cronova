@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,6 +78,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// with "duplicate column name" if already present, which we ignore.
 	for _, alter := range []string{
 		`ALTER TABLE dags ADD COLUMN deleted_at DATETIME`,
+		`ALTER TABLE dag_runs ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
@@ -252,13 +254,33 @@ func (s *Store) SetDAGPaused(ctx context.Context, dagID string, paused bool) err
 
 // --- DAG runs ---
 
-const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at`
+const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params`
+
+func marshalParams(p map[string]string) string {
+	if len(p) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(p)
+	return string(b)
+}
+
+func unmarshalParams(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	var m map[string]string
+	if json.Unmarshal([]byte(s), &m) != nil {
+		return nil
+	}
+	return m
+}
 
 func scanRun(sc scanner) (*model.DagRun, error) {
 	var r model.DagRun
 	var logStr, state, trig string
 	var startNS, finNS sql.NullString
-	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS)
+	var params string
+	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS, &params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -270,6 +292,7 @@ func scanRun(sc scanner) (*model.DagRun, error) {
 	r.TriggerType = model.TriggerType(trig)
 	r.StartedAt = nsToTime(startNS)
 	r.FinishedAt = nsToTime(finNS)
+	r.Params = unmarshalParams(params)
 	return &r, nil
 }
 
@@ -281,9 +304,9 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	// SELECT inserts zero rows when deleted_at IS NOT NULL.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
+		 SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
-		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), r.DagID)
+		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params), r.DagID)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -360,7 +383,7 @@ func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, err
 	// sub-second one ("…05.3Z") don't compare lexicographically — strftime('%s')
 	// normalizes both to a numeric instant so same-second runs sort correctly.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at
+		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at, r.params
 		 FROM dag_runs r JOIN dags d ON r.dag_id=d.dag_id
 		 WHERE d.deleted_at IS NULL
 		 ORDER BY COALESCE(CAST(strftime('%s', r.started_at) AS INTEGER), CAST(strftime('%s', r.logical_date) AS INTEGER)) DESC,
@@ -720,4 +743,118 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 func (s *Store) DeleteExpiredSessions(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, fmtTime(time.Now()))
 	return err
+}
+
+// ---- variables + connections (UI-managed config) ----
+
+func scanVariable(sc scanner) (*model.Variable, error) {
+	var v model.Variable
+	var upd string
+	if err := sc.Scan(&v.Key, &v.Value, &upd); err != nil {
+		return nil, err
+	}
+	v.UpdatedAt = parseLoose(upd)
+	return &v, nil
+}
+
+func (s *Store) ListVariables(ctx context.Context) ([]*model.Variable, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM variables ORDER BY key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Variable
+	for rows.Next() {
+		v, err := scanVariable(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetVariable(ctx context.Context, key string) (*model.Variable, error) {
+	v, err := scanVariable(s.db.QueryRowContext(ctx, `SELECT key, value, updated_at FROM variables WHERE key=?`, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return v, err
+}
+
+func (s *Store) UpsertVariable(ctx context.Context, v *model.Variable) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO variables (key, value, updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
+		v.Key, v.Value)
+	return err
+}
+
+func (s *Store) DeleteVariable(ctx context.Context, key string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM variables WHERE key=?`, key)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+const connCols = `id, type, host, port, login, password, extra, updated_at`
+
+func scanConnection(sc scanner) (*model.Connection, error) {
+	var c model.Connection
+	var upd string
+	if err := sc.Scan(&c.ID, &c.Type, &c.Host, &c.Port, &c.Login, &c.Password, &c.Extra, &upd); err != nil {
+		return nil, err
+	}
+	c.UpdatedAt = parseLoose(upd)
+	return &c, nil
+}
+
+func (s *Store) ListConnections(ctx context.Context) ([]*model.Connection, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+connCols+` FROM connections ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Connection
+	for rows.Next() {
+		c, err := scanConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetConnection(ctx context.Context, id string) (*model.Connection, error) {
+	c, err := scanConnection(s.db.QueryRowContext(ctx, `SELECT `+connCols+` FROM connections WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return c, err
+}
+
+func (s *Store) UpsertConnection(ctx context.Context, c *model.Connection) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO connections (id, type, host, port, login, password, extra, updated_at)
+		 VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+		 ON CONFLICT(id) DO UPDATE SET type=excluded.type, host=excluded.host, port=excluded.port,
+		   login=excluded.login, password=excluded.password, extra=excluded.extra, updated_at=CURRENT_TIMESTAMP`,
+		c.ID, c.Type, c.Host, c.Port, c.Login, c.Password, c.Extra)
+	return err
+}
+
+func (s *Store) DeleteConnection(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM connections WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }

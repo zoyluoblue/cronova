@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     trigger_type  TEXT NOT NULL,
     started_at    DATETIME,
     finished_at   DATETIME,
+    params        TEXT NOT NULL DEFAULT '', -- JSON map of trigger-time params (recorded per run)
     UNIQUE (dag_id, logical_date)
 );
 
@@ -82,6 +83,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id     INTEGER NOT NULL REFERENCES users(id),
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at  DATETIME NOT NULL
+);
+
+-- UI-managed shared configuration. Variables are plain key-value (referenced in
+-- task commands as {{ var.KEY }}); connections hold structured credentials
+-- ({{ conn.ID.host }} etc.). Passwords are stored as-is and NEVER returned by the
+-- API (write-only, masked in the UI) — protect the DB file with filesystem perms.
+CREATE TABLE IF NOT EXISTS variables (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS connections (
+    id         TEXT PRIMARY KEY,
+    type       TEXT NOT NULL DEFAULT '',
+    host       TEXT NOT NULL DEFAULT '',
+    port       INTEGER NOT NULL DEFAULT 0,
+    login      TEXT NOT NULL DEFAULT '',
+    password   TEXT NOT NULL DEFAULT '',
+    extra      TEXT NOT NULL DEFAULT '', -- JSON map of extra fields ({{ conn.ID.extra.KEY }})
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

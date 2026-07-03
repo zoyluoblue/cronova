@@ -96,7 +96,7 @@ func TestCrashRecoveryReattaches(t *testing.T) {
 	if err := a.registerDAG(ctxA, dag); err != nil {
 		t.Fatal(err)
 	}
-	runID, err := a.TriggerManual(ctxA, "rec")
+	runID, err := a.TriggerManual(ctxA, "rec", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

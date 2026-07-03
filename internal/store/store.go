@@ -87,5 +87,15 @@ type Store interface {
 	// DeleteExpiredSessions prunes sessions past their expiry.
 	DeleteExpiredSessions(ctx context.Context) error
 
+	// --- UI-managed config: variables + connections ---
+	ListVariables(ctx context.Context) ([]*model.Variable, error)
+	GetVariable(ctx context.Context, key string) (*model.Variable, error)
+	UpsertVariable(ctx context.Context, v *model.Variable) error
+	DeleteVariable(ctx context.Context, key string) error
+	ListConnections(ctx context.Context) ([]*model.Connection, error)
+	GetConnection(ctx context.Context, id string) (*model.Connection, error)
+	UpsertConnection(ctx context.Context, c *model.Connection) error
+	DeleteConnection(ctx context.Context, id string) error
+
 	Close() error
 }

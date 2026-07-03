@@ -11,6 +11,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -281,7 +282,7 @@ func (s *Scheduler) allDAGs() []*model.DAG {
 
 // TriggerManual creates a manual run for dagID; the running loop picks it up on
 // the next tick. Returns the new run id.
-func (s *Scheduler) TriggerManual(ctx context.Context, dagID string) (string, error) {
+func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[string]string) (string, error) {
 	// Only an actively-registered DAG can be triggered: a soft-deleted DAG is
 	// evicted from the cache, and an unknown one was never registered. Using the
 	// cache also gives the parsed task set, so we can gate on the real task count
@@ -300,6 +301,7 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string) (string, er
 		LogicalDate: now,
 		State:       model.RunQueued,
 		TriggerType: model.TriggerManual,
+		Params:      params,
 	}
 	if err := s.store.CreateDagRun(ctx, run); err != nil {
 		return "", err
@@ -713,12 +715,12 @@ func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Tas
 // scheduler shutdown (ctx cancel) just stops the poll; the task keeps running
 // and recovery re-attaches to it on restart.
 func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance) {
-	vars := templateVars(run, t, ti.TryNumber)
+	base := templateVars(run, t, ti.TryNumber)
 	spec := executor.Spec{
 		TaskRunID: ti.ExecutorRef,
 		Type:      t.Type,
-		Command:   renderCommand(t.Command, vars),
-		Env:       envFromVars(vars),
+		Command:   renderCommand(t.Command, s.templateResolver(ctx, base, run.Params)),
+		Env:       taskEnv(base, run.Params),
 		Timeout:   time.Duration(t.Timeout) * time.Second,
 		LogPath:   ti.LogPath,
 	}
@@ -926,26 +928,92 @@ func templateVars(run *model.DagRun, t model.Task, try int) map[string]string {
 	}
 }
 
-func envFromVars(vars map[string]string) map[string]string {
-	env := make(map[string]string, len(vars))
-	for k, v := range vars {
+// taskEnv builds the process environment: the base vars as CRONOVA_<NAME> and
+// each trigger param as CRONOVA_PARAM_<KEY>. Variables/connections are NOT
+// blanket-injected — they enter only through explicit {{ var.X }}/{{ conn.Y.Z }}
+// references in the command, so secrets don't leak into every task's env.
+func taskEnv(base, params map[string]string) map[string]string {
+	env := make(map[string]string, len(base)+len(params))
+	for k, v := range base {
 		env["CRONOVA_"+strings.ToUpper(k)] = v
+	}
+	for k, v := range params {
+		env["CRONOVA_PARAM_"+strings.ToUpper(k)] = v
 	}
 	return env
 }
 
-var templateRe = regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+// dotted names too (var.X, conn.ID.field, params.KEY), but never partial words.
+var templateRe = regexp.MustCompile(`\{\{\s*([\w.]+)\s*\}\}`)
 
-// renderCommand substitutes {{ name }} placeholders from vars. Unknown names
+// renderCommand substitutes {{ name }} placeholders via resolve. Unknown names
 // are left as-is so unrelated shell braces are not mangled.
-func renderCommand(cmd string, vars map[string]string) string {
+func renderCommand(cmd string, resolve func(string) (string, bool)) string {
 	return templateRe.ReplaceAllStringFunc(cmd, func(m string) string {
 		key := templateRe.FindStringSubmatch(m)[1]
-		if v, ok := vars[key]; ok {
+		if v, ok := resolve(key); ok {
 			return v
 		}
 		return m
 	})
+}
+
+// templateResolver resolves a placeholder name to its value: base vars first,
+// then params.KEY, then var.KEY and conn.ID.field which hit the store lazily
+// (only referenced values are fetched, and only referenced secrets are exposed).
+func (s *Scheduler) templateResolver(ctx context.Context, base, params map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		if v, ok := base[key]; ok {
+			return v, true
+		}
+		if name, ok := strings.CutPrefix(key, "params."); ok {
+			v, ok := params[name]
+			return v, ok
+		}
+		if name, ok := strings.CutPrefix(key, "var."); ok {
+			if vr, err := s.store.GetVariable(ctx, name); err == nil {
+				return vr.Value, true
+			}
+			return "", false
+		}
+		if rest, ok := strings.CutPrefix(key, "conn."); ok {
+			id, field, ok := strings.Cut(rest, ".")
+			if !ok {
+				return "", false
+			}
+			if c, err := s.store.GetConnection(ctx, id); err == nil {
+				return connField(c, field)
+			}
+			return "", false
+		}
+		return "", false
+	}
+}
+
+// connField returns a named field of a connection ({{ conn.ID.field }}). Extra
+// JSON fields are reachable as extra.KEY. Unknown fields resolve to not-found
+// (the placeholder is left intact) rather than an empty string, so a typo is visible.
+func connField(c *model.Connection, field string) (string, bool) {
+	switch field {
+	case "host":
+		return c.Host, true
+	case "port":
+		return strconv.Itoa(c.Port), true
+	case "login", "user":
+		return c.Login, true
+	case "password":
+		return c.Password, true
+	case "type":
+		return c.Type, true
+	}
+	if name, ok := strings.CutPrefix(field, "extra."); ok && c.Extra != "" {
+		var m map[string]string
+		if json.Unmarshal([]byte(c.Extra), &m) == nil {
+			v, ok := m[name]
+			return v, ok
+		}
+	}
+	return "", false
 }
 
 func (s *Scheduler) logPath(dagID, runID, taskID string) string {

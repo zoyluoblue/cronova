@@ -96,13 +96,14 @@ type Task struct {
 
 // DagRun is one concrete execution of a DAG, keyed by its logical period.
 type DagRun struct {
-	RunID       string      `json:"run_id"`
-	DagID       string      `json:"dag_id"`
-	LogicalDate time.Time   `json:"logical_date"`
-	State       RunState    `json:"state"`
-	TriggerType TriggerType `json:"trigger_type"`
-	StartedAt   *time.Time  `json:"started_at,omitempty"`
-	FinishedAt  *time.Time  `json:"finished_at,omitempty"`
+	RunID       string            `json:"run_id"`
+	DagID       string            `json:"dag_id"`
+	LogicalDate time.Time         `json:"logical_date"`
+	State       RunState          `json:"state"`
+	TriggerType TriggerType       `json:"trigger_type"`
+	StartedAt   *time.Time        `json:"started_at,omitempty"`
+	FinishedAt  *time.Time        `json:"finished_at,omitempty"`
+	Params      map[string]string `json:"params,omitempty"` // trigger-time params, injected as CRONOVA_PARAM_* + {{ params.KEY }}
 }
 
 // TaskInstance is the execution of one Task within one DagRun. It is the
@@ -146,6 +147,26 @@ type User struct {
 	PasswordHash string    `json:"-"`
 	Role         Role      `json:"role"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// Variable is a UI-managed shared key-value, referenced as {{ var.Key }}.
+type Variable struct {
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Connection is UI-managed structured credentials, referenced as {{ conn.ID.host }}
+// etc. Password is stored but NEVER serialized out (write-only, masked in the UI).
+type Connection struct {
+	ID        string    `json:"id"`
+	Type      string    `json:"type"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	Login     string    `json:"login"`
+	Password  string    `json:"-"`
+	Extra     string    `json:"extra"` // JSON map of extra fields
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Session is an opaque server-side session bound to a user.

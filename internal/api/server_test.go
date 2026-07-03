@@ -19,14 +19,16 @@ import (
 
 type stubTrigger struct {
 	got        string
+	gotParams  map[string]string
 	createdYML string
 	triggerErr error  // if set, TriggerManual returns it (e.g. model.ErrNoTasks)
 	deleted    string // last dagID passed to DeleteDAG
 	deleteErr  error  // if set, DeleteDAG returns it (e.g. model.ErrActiveRuns)
 }
 
-func (s *stubTrigger) TriggerManual(_ context.Context, dagID string) (string, error) {
+func (s *stubTrigger) TriggerManual(_ context.Context, dagID string, params map[string]string) (string, error) {
 	s.got = dagID
+	s.gotParams = params
 	if s.triggerErr != nil {
 		return "", s.triggerErr
 	}

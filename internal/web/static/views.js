@@ -180,6 +180,7 @@ function renderDagPage() {
         <span class="savestate ss-saved" id="d-save"></span>
         <div class="dh-actions">
           <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
+          <button class="icon" id="trig-params" title="${t("trig_params")}" ${noTasks ? "disabled" : ""} aria-label="${t("trig_params")}">⋯</button>
           <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
           <button class="icon" id="dup" title="${t("btn_duplicate")}">⧉ ${t("btn_duplicate")}</button>
           <button class="icon" id="yaml-btn">YAML</button>
@@ -201,7 +202,8 @@ function renderDagPage() {
     <div id="dag-tab-body"></div>`;
 
   $("back").onclick = loadDags;
-  $("trig").onclick = triggerActiveDag;
+  $("trig").onclick = () => triggerActiveDag();
+  const tp = $("trig-params"); if (tp) tp.onclick = () => triggerParamsDialog();
   $("pause").onclick = async () => { await api(`/api/dags/${d.dag_id}/pause?paused=${!d.paused}`, { method: "POST" }); d.paused = !d.paused; renderDagPage(); };
   $("dup").onclick = duplicateActiveDag;
   $("yaml-btn").onclick = openYamlDrawer;
@@ -355,12 +357,41 @@ async function openYamlDrawer() {
   $("y-dl").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([yml], { type: "text/yaml" })); a.download = D.dag.dag_id + ".yaml"; a.click(); URL.revokeObjectURL(a.href); };
 }
 
-async function triggerActiveDag() {
-  const b = $("trig"); b.disabled = true;
+async function triggerActiveDag(params) {
+  const b = $("trig"); if (b) b.disabled = true;
   await flushPendingSaves(); // run the latest saved definition, not a stale one
-  try { await api(`/api/dags/${D.dag.dag_id}/trigger`, { method: "POST" }); toast(t("toast_run_queued"), "ok"); setTimeout(refreshDagRuns, 500); }
+  const opts = params ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params }) } : { method: "POST" };
+  try { await api(`/api/dags/${D.dag.dag_id}/trigger`, opts); toast(t("toast_run_queued"), "ok"); setTimeout(refreshDagRuns, 500); }
   catch (e) { toast(e.message, "fail"); }
-  finally { if ($("trig")) b.disabled = D.tasks.length === 0; }
+  finally { if ($("trig")) $("trig").disabled = D.tasks.length === 0; }
+}
+// key-value form → trigger with params (empty rows ignored)
+function triggerParamsDialog() {
+  const root = $("modal-root");
+  let rows = [{ k: "", v: "" }];
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  const render = () => {
+    root.innerHTML = `<div class="overlay" id="tpovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${t("trig_params")}">
+      <h2>${t("trig_params")}</h2>
+      <div class="body">
+        <div class="field-hint" style="margin-bottom:12px">${esc(t("p_hint"))}</div>
+        <div id="tp-rows">${rows.map((r, i) => `<div class="tp-row"><input class="tp-k mono" data-i="${i}" placeholder="${t("p_key")}" value="${esc(r.k)}"><input class="tp-v mono" data-i="${i}" placeholder="${t("p_val")}" value="${esc(r.v)}"><button class="icon tp-rm" data-i="${i}" aria-label="✕">✕</button></div>`).join("")}</div>
+        <button class="icon" id="tp-add" style="margin-top:8px">+ ${t("p_add")}</button>
+      </div>
+      <div class="foot"><button id="tp-cancel">${t("nd_cancel")}</button><button class="primary" id="tp-go">${t("p_trigger")}</button></div>
+    </div></div>`;
+    root.querySelectorAll(".tp-k").forEach((el) => el.oninput = () => rows[+el.dataset.i].k = el.value);
+    root.querySelectorAll(".tp-v").forEach((el) => el.oninput = () => rows[+el.dataset.i].v = el.value);
+    root.querySelectorAll(".tp-rm").forEach((el) => el.onclick = () => { rows.splice(+el.dataset.i, 1); if (!rows.length) rows = [{ k: "", v: "" }]; render(); });
+    $("tp-add").onclick = () => { rows.push({ k: "", v: "" }); render(); const ks = root.querySelectorAll(".tp-k"); if (ks.length) ks[ks.length - 1].focus(); };
+    $("tp-cancel").onclick = close;
+    $("tpovl").onclick = (e) => { if (e.target.id === "tpovl") close(); };
+    $("tp-go").onclick = () => { const params = {}; rows.forEach((r) => { const k = r.k.trim(); if (k) params[k] = r.v; }); close(); triggerActiveDag(params); };
+    const f = root.querySelector(".tp-k"); if (f) f.focus();
+  };
+  render();
 }
 async function refreshDagRuns() {
   if (view !== "dag" || !D) return;
@@ -731,6 +762,7 @@ async function showRun(runID) {
       <div class="card"><div class="k">${t("k_trig")}</div><div class="v">${typeLabel(r.trigger_type)}</div></div>
       <div class="card"><div class="k">${t("k_dur")}</div><div class="v" id="run-dur">${dur(r.started_at, r.finished_at)}</div></div>
       <div class="card"><div class="k">${t("k_started")}</div><div class="v" style="font-size:13px">${fmt(r.started_at)}</div></div></div>
+    ${r.params && Object.keys(r.params).length ? `<div class="run-parambar"><span class="rp-k">${t("run_params")}</span>${Object.entries(r.params).map(([k, v]) => `<span class="rp-chip mono">${esc(k)}=<b>${esc(v)}</b></span>`).join("")}</div>` : ""}
     <div class="section-h">${t("sec_graph")}</div><div id="run-graph">${renderGraph(runDag.tasks, initSbt, { tag: true })}</div>
     <div class="run-tabs" id="run-tabs">
       <button class="pill ${runTab === "instances" ? "active" : ""}" data-rt="instances">${t("sec_instances")}</button>
@@ -866,6 +898,107 @@ async function showPools() {
   const save = async (name, slots) => { if (!name || !(slots > 0)) { toast(t("p_need"), "warn"); return; } try { await api(`/api/pools/${encodeURIComponent(name)}?slots=${slots}`, { method: "POST" }); toast(t("toast_pool_saved"), "ok"); showPools(); } catch (e) { toast(e.message, "fail"); } };
   main.querySelectorAll("button[data-save]").forEach((b) => b.onclick = () => save(b.dataset.save, +main.querySelector(`input[data-pool="${CSS.escape(b.dataset.save)}"]`).value));
   $("addp").onclick = () => save($("np").value.trim(), +$("ns").value);
+}
+
+// ---- variables & connections (UI-managed shared config) ----
+const CFG_KEY_RE = /^[A-Za-z0-9_.-]+$/; // mirrors the backend cfgKeyRe
+let RES = null, resTab = "vars";
+async function showResources() {
+  view = "resources"; activeDag = null; closeLog(); setNav("resources"); setHash("#/resources");
+  try { const [vars, conns] = await Promise.all([api("/api/variables"), api("/api/connections")]); RES = { vars, conns }; }
+  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  renderResources();
+}
+function renderResources() {
+  if (view !== "resources" || !RES) return;
+  const { vars, conns } = RES;
+  main.innerHTML = `
+    <div class="page-h"><h1>${t("nav_resources")}</h1></div>
+    <div class="page-sub">${esc(t("res_sub"))}</div>
+    <div class="run-tabs" id="res-tabs">
+      <button class="pill ${resTab === "vars" ? "active" : ""}"${resTab === "vars" ? ' aria-current="true"' : ""} data-rt="vars">${t("res_vars")} <span class="tab-n">${vars.length}</span></button>
+      <button class="pill ${resTab === "conns" ? "active" : ""}"${resTab === "conns" ? ' aria-current="true"' : ""} data-rt="conns">${t("res_conns")} <span class="tab-n">${conns.length}</span></button>
+    </div>
+    <div id="res-body"></div>`;
+  $("res-tabs").querySelectorAll("[data-rt]").forEach((b) => b.onclick = () => { if (resTab === b.dataset.rt) return; resTab = b.dataset.rt; renderResources(); const a = $("res-tabs").querySelector(".pill.active"); if (a) a.focus(); });
+  $("res-body").innerHTML = resTab === "vars" ? varsTabHtml() : connsTabHtml();
+  resTab === "vars" ? wireVarsTab() : wireConnsTab();
+}
+function varsTabHtml() {
+  const vars = RES.vars;
+  return `<table class="tbl"><thead><tr><th style="width:240px">${t("v_key")}</th><th>${t("v_value")}</th><th style="width:130px"></th></tr></thead>
+    <tbody>${vars.length ? vars.map((v) => `<tr><td class="mono">${esc(v.key)}</td><td><input class="v-val mono" data-key="${esc(v.key)}" value="${esc(v.value)}" style="width:100%"></td>
+      <td><button data-vsave="${esc(v.key)}">${t("v_save")}</button> <button class="icon danger" data-vdel="${esc(v.key)}" aria-label="${t("btn_delete")}">✕</button></td></tr>`).join("") : `<tr><td colspan="3"><div class="empty">${t("v_none")}</div></td></tr>`}</tbody></table>
+    <div class="toolbar" style="margin-top:16px"><input id="nv-key" class="mono" placeholder="${t("v_key")}" style="width:240px"><input id="nv-val" class="mono" placeholder="${t("v_value")}"><button class="primary" id="nv-add">${t("v_add")}</button></div>`;
+}
+function wireVarsTab() {
+  main.querySelectorAll("[data-vsave]").forEach((b) => b.onclick = () => saveVar(b.dataset.vsave, main.querySelector(`.v-val[data-key="${CSS.escape(b.dataset.vsave)}"]`).value));
+  main.querySelectorAll("[data-vdel]").forEach((b) => b.onclick = () => delVar(b.dataset.vdel));
+  $("nv-add").onclick = () => { const k = $("nv-key").value.trim(); if (!k) { toast(t("v_key"), "warn"); return; } if (!CFG_KEY_RE.test(k)) { toast(t("err_key"), "warn"); return; } saveVar(k, $("nv-val").value); };
+}
+async function saveVar(key, value) {
+  try { await api(`/api/variables/${encodeURIComponent(key)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) }); toast(t("res_saved"), "ok"); showResources(); }
+  catch (e) { toast(e.message, "fail"); }
+}
+async function delVar(key) {
+  if (!(await confirmDialog(t("v_del_title", key), t("del_body"), { danger: true, okLabel: t("btn_delete") }))) return;
+  try { await api(`/api/variables/${encodeURIComponent(key)}`, { method: "DELETE" }); toast(t("res_deleted"), "ok"); showResources(); }
+  catch (e) { toast(e.message, "fail"); }
+}
+function connsTabHtml() {
+  const conns = RES.conns;
+  return `<table class="tbl"><thead><tr><th>${t("c_id")}</th><th>${t("c_type")}</th><th>${t("c_host")}</th><th>${t("c_login")}</th><th>${t("c_password")}</th><th style="width:130px"></th></tr></thead>
+    <tbody>${conns.length ? conns.map((c) => `<tr><td class="mono">${esc(c.id)}</td><td>${esc(c.type || "—")}</td>
+      <td class="mono muted">${esc(c.host || "—")}${c.port ? ":" + c.port : ""}</td><td class="mono muted">${esc(c.login || "—")}</td>
+      <td>${c.has_password ? `<span class="mono">••••••</span>` : `<span class="muted">${t("c_pw_none")}</span>`}</td>
+      <td><button data-cedit="${esc(c.id)}">${t("set_edit")}</button> <button class="icon danger" data-cdel="${esc(c.id)}" aria-label="${t("btn_delete")}">✕</button></td></tr>`).join("") : `<tr><td colspan="6"><div class="empty">${t("c_none")}</div></td></tr>`}</tbody></table>
+    <div class="toolbar" style="margin-top:16px"><button class="primary" id="nc-add">${t("c_add")}</button></div>`;
+}
+function wireConnsTab() {
+  main.querySelectorAll("[data-cedit]").forEach((b) => b.onclick = () => connDialog(RES.conns.find((c) => c.id === b.dataset.cedit)));
+  main.querySelectorAll("[data-cdel]").forEach((b) => b.onclick = () => delConn(b.dataset.cdel));
+  $("nc-add").onclick = () => connDialog(null);
+}
+async function delConn(id) {
+  if (!(await confirmDialog(t("c_del_title", id), t("del_body"), { danger: true, okLabel: t("btn_delete") }))) return;
+  try { await api(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }); toast(t("res_deleted"), "ok"); showResources(); }
+  catch (e) { toast(e.message, "fail"); }
+}
+// connection editor modal. Password is write-only: on edit it starts blank and a
+// blank submit preserves the stored secret (the UI never receives it).
+function connDialog(conn) {
+  const isEdit = !!conn, c = conn || { id: "", type: "", host: "", port: "", login: "", extra: "" };
+  const root = $("modal-root");
+  root.innerHTML = `<div class="overlay" id="covl"><div class="modal" role="dialog" aria-modal="true" aria-label="${isEdit ? t("c_edit") : t("c_add")}">
+    <h2>${isEdit ? t("c_edit") : t("c_add")}</h2>
+    <div class="body">
+      <div class="b-field"><label>${t("c_id")}</label><input id="c-id" class="mono" value="${esc(c.id)}" ${isEdit ? "disabled" : ""} placeholder="mysql_prod"></div>
+      <div class="b-grid">
+        <div class="b-field"><label>${t("c_type")}</label><input id="c-type" value="${esc(c.type || "")}" placeholder="mysql"></div>
+        <div class="b-field"><label>${t("c_host")}</label><input id="c-host" class="mono" value="${esc(c.host || "")}"></div>
+        <div class="b-field"><label>${t("c_port")}</label><input id="c-port" type="number" value="${c.port || ""}"></div>
+        <div class="b-field"><label>${t("c_login")}</label><input id="c-login" class="mono" value="${esc(c.login || "")}"></div>
+      </div>
+      <div class="b-field"><label>${t("c_password")}</label><input id="c-pw" type="password" placeholder="${isEdit && conn.has_password ? t("c_pw_keep") : ""}"></div>
+      <div class="b-field"><label>${t("c_extra")}</label><textarea id="c-extra" class="mono" rows="3" spellcheck="false" placeholder='{"schema":"prod"}'>${esc(c.extra || "")}</textarea></div>
+      <div class="nd-err" id="c-err"></div>
+    </div>
+    <div class="foot"><button id="c-cancel">${t("nd_cancel")}</button><button class="primary" id="c-save">${t("v_save")}</button></div>
+  </div></div>`;
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  $("covl").onclick = (e) => { if (e.target.id === "covl") close(); };
+  $("c-cancel").onclick = close;
+  $("c-save").onclick = async () => {
+    const id = isEdit ? c.id : $("c-id").value.trim();
+    if (!id) { $("c-err").textContent = t("c_id"); return; }
+    if (!CFG_KEY_RE.test(id)) { $("c-err").textContent = t("err_key"); return; }
+    const body = { type: $("c-type").value.trim(), host: $("c-host").value.trim(), port: +$("c-port").value || 0, login: $("c-login").value.trim(), password: $("c-pw").value, extra: $("c-extra").value.trim() };
+    try { await api(`/api/connections/${encodeURIComponent(id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); close(); toast(t("res_saved"), "ok"); showResources(); }
+    catch (e) { $("c-err").textContent = e.message; }
+  };
+  $(isEdit ? "c-type" : "c-id").focus();
 }
 
 // ---- global DAG relationship graph (cross-DAG trigger_after) ----
