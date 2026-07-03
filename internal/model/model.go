@@ -28,6 +28,11 @@ var ErrNothingToRetry = errors.New("run has no failed tasks to retry")
 // queued/running (retry only a finished run). The API maps it to a 409 conflict.
 var ErrRunStillActive = errors.New("run is still active — cancel it before retrying")
 
+// ErrBadMarkState is returned when a manual mark requests a state that is not a
+// legal target (task: success/failed/skipped; run: success/failed). The API maps
+// it to a 400 client error.
+var ErrBadMarkState = errors.New("invalid mark state")
+
 // RunState is the lifecycle state of a DagRun.
 type RunState string
 
@@ -38,6 +43,11 @@ const (
 	RunFailed    RunState = "failed"
 	RunCancelled RunState = "cancelled" // user-initiated stop (distinct from a failure)
 )
+
+// IsTerminal reports whether the run state is final (no further scheduling).
+func (s RunState) IsTerminal() bool {
+	return s == RunSuccess || s == RunFailed || s == RunCancelled
+}
 
 // TaskState is the lifecycle state of a TaskInstance.
 type TaskState string

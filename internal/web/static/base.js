@@ -38,6 +38,9 @@ const DICT = {
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
     run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
+    task_mark: "标记状态", run_mark: "标记运行", mark_skip: "跳过", mark_done_toast: "已标记",
+    mark_task_title: (id) => `标记任务“${id}”为?`, mark_task_body: "手动覆盖任务状态。运行中的任务会先被终止;标记成功/跳过会放行被它阻塞的下游。",
+    mark_run_title: (id) => `标记运行“${id}”为?`, mark_run_body: "覆盖已结束运行的最终状态(不改动任务)。标记成功会触发下游 DAG。",
     confirm_cancel_title: (id) => `取消运行“${id}”?`, confirm_cancel_body: "正在运行的任务会被终止。", th_act: "操作",
     confirm_retry_title: (id) => `重跑“${id}”?`, confirm_retry_body: "该任务及其所有下游任务会被重置并重新运行。",
     copied: "已复制", copy_fail: "复制失败，请手动选择文本", copy_hint: "点击复制", search_ph: "跳转 / 筛选 DAG…", jump_open: "打开", jump_none: "无匹配 DAG",
@@ -132,6 +135,9 @@ const DICT = {
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
     run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
+    task_mark: "Mark state", run_mark: "Mark run", mark_skip: "Skip", mark_done_toast: "Marked",
+    mark_task_title: (id) => `Mark task “${id}” as?`, mark_task_body: "Manually override the task state. A running task is stopped first; marking success/skip releases downstream tasks it was blocking.",
+    mark_run_title: (id) => `Mark run “${id}” as?`, mark_run_body: "Override a finished run's recorded outcome (tasks untouched). Marking success fires downstream-DAG triggers.",
     confirm_cancel_title: (id) => `Cancel run “${id}”?`, confirm_cancel_body: "Running tasks will be killed.", th_act: "Actions",
     confirm_retry_title: (id) => `Retry “${id}”?`, confirm_retry_body: "This task and all of its downstream tasks will be reset and re-run.",
     copied: "Copied", copy_fail: "Copy failed — select the text manually", copy_hint: "Click to copy", search_ph: "Jump / filter DAGs…", jump_open: "Open", jump_none: "No matching DAG",
@@ -315,6 +321,26 @@ function confirmDialog(title, body, opts = {}) {
     $("cfm-ok").onclick = () => close(true);
     $("cfm-ovl").onclick = (e) => { if (e.target.id === "cfm-ovl") close(false); };
     $("cfm-ok").focus();
+  });
+}
+// Promise<value|null> single-choice picker reusing the .overlay/.modal markup.
+// options: [{value, label, danger}]. Escape / click-outside / Cancel resolve null.
+function pickDialog(title, body, options) {
+  return new Promise((resolve) => {
+    const root = $("modal-root");
+    const btns = options.map((o, i) => `<button class="${o.danger ? "danger" : (i === 0 ? "primary" : "")}" data-pick="${esc(String(o.value))}">${esc(o.label)}</button>`).join("");
+    root.innerHTML = `<div class="overlay" id="pick-ovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <h2>${esc(title)}</h2>
+      <div class="body">${body ? `<p class="cfm-body">${esc(body)}</p>` : ""}</div>
+      <div class="foot pick-foot"><button id="pick-cancel">${esc(t("cancel_word"))}</button>${btns}</div>
+    </div></div>`;
+    const close = (v) => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") close(null); };
+    document.addEventListener("keydown", onKey);
+    $("pick-cancel").onclick = () => close(null);
+    root.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => close(b.dataset.pick));
+    $("pick-ovl").onclick = (e) => { if (e.target.id === "pick-ovl") close(null); };
+    const first = root.querySelector("[data-pick]"); if (first) first.focus();
   });
 }
 function dur(a, b) { if (!a) return "—"; const ms = (b ? new Date(b) : new Date()) - new Date(a); if (ms < 0) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }

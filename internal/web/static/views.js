@@ -905,15 +905,20 @@ function renderRunDynamic(data) {
 function renderRunActions(r, tasks) {
   const el = $("run-actions"); if (!el) return;
   const isViewer = document.body.dataset.role === "viewer";
-  const mode = isViewer ? "none" : runLive(r.state) ? "cancel" : tasks.some((tk) => TASK_RETRYABLE[tk.state]) ? "retry" : "none";
-  if (el.dataset.mode === mode) return; // unchanged → preserve the existing node + focus
+  const canRetry = tasks.some((tk) => TASK_RETRYABLE[tk.state]);
+  // mode encodes retryability so a terminal run whose retryable set changes (e.g.
+  // after a mark) re-renders; unchanged mode preserves the node + keyboard focus.
+  const mode = isViewer ? "none" : runLive(r.state) ? "cancel" : "term" + (canRetry ? "R" : "");
+  if (el.dataset.mode === mode) return;
   el.dataset.mode = mode;
   if (mode === "cancel") {
     el.innerHTML = `<button class="danger" id="run-cancel">${t("run_cancel")}</button>`;
     $("run-cancel").onclick = () => cancelRunUI(r.run_id);
-  } else if (mode === "retry") {
-    el.innerHTML = `<button class="primary" id="run-retry">${t("run_retry")}</button>`;
-    $("run-retry").onclick = () => retryRunUI(r.run_id);
+  } else if (mode === "termR" || mode === "term") {
+    // terminal run (admin): retry failed subtree (if any) + override the outcome
+    el.innerHTML = `${canRetry ? `<button class="primary" id="run-retry">${t("run_retry")}</button>` : ""}<button id="run-mark">${t("run_mark")}</button>`;
+    if (canRetry) $("run-retry").onclick = () => retryRunUI(r.run_id);
+    $("run-mark").onclick = () => markRunUI(r.run_id);
   } else {
     el.innerHTML = "";
   }
@@ -933,6 +938,25 @@ async function retryTaskUI(runID, taskID) {
   try { await api(`/api/runs/${encodeURIComponent(runID)}/tasks/${encodeURIComponent(taskID)}/retry`, { method: "POST" }); toast(t("run_retried_toast"), "ok"); showRun(runID); }
   catch (e) { toast(e.message, "fail"); }
 }
+async function markTaskUI(runID, taskID) {
+  const state = await pickDialog(t("mark_task_title", taskID), t("mark_task_body"), [
+    { value: "success", label: t("notify_success") },
+    { value: "skipped", label: t("mark_skip") },
+    { value: "failed", label: t("notify_failure"), danger: true },
+  ]);
+  if (!state) return;
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/tasks/${encodeURIComponent(taskID)}/mark`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state }) }); toast(t("mark_done_toast"), "ok"); showRun(runID); }
+  catch (e) { toast(e.message, "fail"); }
+}
+async function markRunUI(runID) {
+  const state = await pickDialog(t("mark_run_title", runID), t("mark_run_body"), [
+    { value: "success", label: t("notify_success") },
+    { value: "failed", label: t("notify_failure"), danger: true },
+  ]);
+  if (!state) return;
+  try { await api(`/api/runs/${encodeURIComponent(runID)}/mark`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state }) }); toast(t("mark_done_toast"), "ok"); showRun(runID); }
+  catch (e) { toast(e.message, "fail"); }
+}
 // patch existing graph node fills/strokes (never rebuild) so nodes light up with
 // the CSS fill transition as tasks execute
 function patchGraphStates(sbt) {
@@ -947,6 +971,7 @@ function renderRunBody(data) {
   el.innerHTML = runTab === "timeline" ? ganttHtml(data) : instancesTableHtml(data);
   el.querySelectorAll(".logbtn").forEach((b) => b.onclick = () => showLog(b.dataset.ti, b.dataset.task));
   el.querySelectorAll(".retrybtn").forEach((b) => b.onclick = () => retryTaskUI(data.run.run_id, b.dataset.rtask));
+  el.querySelectorAll(".markbtn").forEach((b) => b.onclick = () => markTaskUI(data.run.run_id, b.dataset.mtask));
   el.querySelectorAll(".gantt-row[data-ti]").forEach((row) => row.onclick = () => showLog(row.dataset.ti, row.dataset.task));
 }
 function instancesTableHtml(data) {
@@ -954,10 +979,11 @@ function instancesTableHtml(data) {
   if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
   // per-task retry only on a finished run (the backend refuses retry on an active
   // run) and not for viewers (writes are admin-only)
-  const canRetry = !runLive(data.run.state) && document.body.dataset.role !== "viewer";
-  return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th style="width:110px">${t("th_act")}</th></tr></thead>
+  const isAdmin = document.body.dataset.role !== "viewer";
+  const canRetry = !runLive(data.run.state) && isAdmin;
+  return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th style="width:140px">${t("th_act")}</th></tr></thead>
     <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td>
-      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] && canRetry ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] && canRetry ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}${isAdmin ? ` <button class="icon markbtn" data-mtask="${esc(tk.task_id)}" title="${t("task_mark")}" aria-label="${t("task_mark")}">⚑</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 // honest Gantt: bars positioned by real started_at/finished_at; tasks that never
 // ran show a muted marker (no fabricated "queued" segment); one bar per task

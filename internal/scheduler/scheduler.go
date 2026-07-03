@@ -58,6 +58,14 @@ type Scheduler struct {
 
 	notifyClient *http.Client // hardened outbound client for notify webhooks
 
+	// finalizeMu serializes a tick's processRun against the manual mark ops
+	// (MarkTask/MarkRun), which run on API goroutines. Without it the tick can
+	// finalize a run from a task snapshot taken before a concurrent mark, then
+	// write that stale outcome over the mark (there is no CAS on the run row) —
+	// wedging the run terminal while a just-released task sits scheduled.
+	finalizeMu     sync.Mutex
+	notifySuppress map[string]bool // run ids whose next (mark-driven) re-finalize must not re-notify
+
 	bootTime time.Time
 	inflight sync.WaitGroup
 }
@@ -77,14 +85,15 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 	return &Scheduler{
-		store:        st,
-		exec:         ex,
-		opts:         opts,
-		log:          opts.Logger,
-		dags:         map[string]*model.DAG{},
-		schedules:    map[string]cron.Schedule{},
-		notifyClient: newNotifyClient(opts.AllowPrivateNotifyTargets),
-		bootTime:     time.Now().UTC(),
+		store:          st,
+		exec:           ex,
+		opts:           opts,
+		log:            opts.Logger,
+		dags:           map[string]*model.DAG{},
+		schedules:      map[string]cron.Schedule{},
+		notifyClient:   newNotifyClient(opts.AllowPrivateNotifyTargets),
+		notifySuppress: map[string]bool{},
+		bootTime:       time.Now().UTC(),
 	}
 }
 
@@ -322,6 +331,11 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 // goroutines observe it and don't overwrite the outcome), then kill each running
 // task and mark every non-terminal task cancelled.
 func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
+	// Serialize with the tick's finalize (see finalizeMu): every run-state-mutating
+	// op reads state and writes under this lock so a stale-snapshot finalize can
+	// never clobber it (UpdateDagRunState has no CAS on the run row).
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
 	run, err := s.store.GetDagRun(ctx, runID)
 	if err != nil {
 		return err
@@ -359,6 +373,8 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 // RetryTask clears a task and everything downstream of it back to scheduled and
 // reactivates the run, so the scheduler re-runs that subtree.
 func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
+	s.finalizeMu.Lock() // serialize the terminal-gate + reactivation with the tick's finalize
+	defer s.finalizeMu.Unlock()
 	run, d, tiByTask, err := s.retryContext(ctx, runID)
 	if err != nil {
 		return err
@@ -376,6 +392,8 @@ func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
 // RetryRun clears every failed / upstream_failed / cancelled task (and its
 // downstream) and reactivates the run.
 func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
+	s.finalizeMu.Lock() // serialize the terminal-gate + reactivation with the tick's finalize
+	defer s.finalizeMu.Unlock()
 	run, d, tiByTask, err := s.retryContext(ctx, runID)
 	if err != nil {
 		return err
@@ -399,6 +417,149 @@ func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("run %q: %w", runID, model.ErrNothingToRetry)
 	}
 	return s.clearAndReactivate(ctx, run, tiByTask, ids)
+}
+
+var markableTaskStates = map[model.TaskState]bool{
+	model.TaskSuccess: true, model.TaskFailed: true, model.TaskSkipped: true,
+}
+
+var markableRunStates = map[model.RunState]bool{
+	model.RunSuccess: true, model.RunFailed: true,
+}
+
+// MarkTask forces a single task instance to a chosen terminal state (success,
+// failed, or skipped) and re-drives the run. It works on an active run too: a
+// still-running task's process is killed first, and the state is written
+// unguarded so the override wins over a concurrent natural finalize (which then
+// no-ops via its guarded write). Marking to a non-blocking state (success or
+// skipped) releases downstream tasks that were upstream_failed because of it.
+func (s *Scheduler) MarkTask(ctx context.Context, runID, taskID string, target model.TaskState) error {
+	if !markableTaskStates[target] {
+		return fmt.Errorf("task state %q: %w", target, model.ErrBadMarkState)
+	}
+	// Under finalizeMu the run/task snapshot loaded here is atomic w.r.t. the tick's
+	// finalize: whether the tick finalizes just before or just after us, we observe
+	// the true current run.State and react correctly (reactivate a just-finalized
+	// run; leave an active one for the tick to re-drive).
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
+	run, d, tiByTask, err := s.markContext(ctx, runID)
+	if err != nil {
+		return err
+	}
+	valid := taskIDSet(d.Tasks)
+	ti := tiByTask[taskID]
+	if ti == nil || !valid[taskID] {
+		return fmt.Errorf("task %q in run %q: %w", taskID, runID, store.ErrNotFound)
+	}
+	now := time.Now().UTC()
+	// 1. kill a still-running/queued process so it can't keep executing or writing.
+	if !ti.State.IsTerminal() && ti.ExecutorRef != "" {
+		_ = s.exec.Cancel(ctx, ti.ExecutorRef)
+	}
+	// 2. release downstream BEFORE flipping the marked task — the reset tasks keep
+	// the run non-terminal during the swap, so a concurrent tick can't finalize (and
+	// re-notify) a half-marked run. Only a non-blocking target unblocks downstream.
+	if target == model.TaskSuccess || target == model.TaskSkipped {
+		closure := intersect(downstreamClosure(d.Tasks, taskID), valid)
+		for id := range closure {
+			dt := tiByTask[id]
+			if id == taskID || dt == nil || dt.State != model.TaskUpstreamFailed {
+				continue
+			}
+			dt.State = model.TaskScheduled
+			dt.ExecutorRef = ""
+			dt.StartedAt = nil
+			dt.FinishedAt = nil
+			if err := s.store.UpdateTaskInstance(ctx, dt); err != nil {
+				return err
+			}
+		}
+	}
+	// 3. set the marked task (unguarded: the override must win; once terminal, the
+	// poll goroutine's guarded finalize no-ops). started_at stays as-is — a task that
+	// never ran keeps a NULL start (honest, no fabricated duration).
+	ti.State = target
+	ti.FinishedAt = &now
+	if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+		return err
+	}
+	// 4. a terminal run must be reactivated so the tick re-drives (dispatch released
+	// downstream) and re-finalizes; an active run is already being driven. Suppress
+	// the re-finalize's notify — the operator already saw this run finish once.
+	if run.State.IsTerminal() {
+		s.notifySuppress[runID] = true
+		started := run.StartedAt
+		if started == nil {
+			started = &now
+		}
+		if err := s.store.UpdateDagRunState(ctx, runID, model.RunRunning, started, nil); err != nil {
+			return err
+		}
+	}
+	s.log.Info("task marked", "run", runID, "task", taskID, "state", target)
+	return nil
+}
+
+// MarkRun overrides a FINISHED run's recorded outcome (success or failed). It is
+// refused on an active run: the tick derives an active run's state from its task
+// states and would immediately overwrite the override — cancel the run or mark
+// its tasks instead. Marking success also fires any downstream-DAG triggers, as a
+// natural success would (task states are left untouched: this is a recorded
+// outcome override, not a re-run).
+func (s *Scheduler) MarkRun(ctx context.Context, runID string, target model.RunState) error {
+	if !markableRunStates[target] {
+		return fmt.Errorf("run state %q: %w", target, model.ErrBadMarkState)
+	}
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
+	run, err := s.store.GetDagRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !run.State.IsTerminal() {
+		return fmt.Errorf("run %q (%s): %w", runID, run.State, model.ErrRunStillActive)
+	}
+	if run.State == target {
+		return nil // idempotent
+	}
+	fin := run.FinishedAt
+	if fin == nil {
+		now := time.Now().UTC() // never nil for a terminal run, but be defensive
+		fin = &now
+	}
+	if err := s.store.UpdateDagRunState(ctx, runID, target, run.StartedAt, fin); err != nil {
+		return err
+	}
+	if target == model.RunSuccess {
+		s.triggerDownstreams(ctx, run)
+	}
+	s.log.Info("run marked", "run", runID, "state", target)
+	return nil
+}
+
+// markContext loads the run, its (active) DAG, and task instances by task id.
+// Unlike retryContext it does NOT refuse an active run: marking a single task is
+// safe on a running run (kill + guarded-write protection), and killing a running
+// task is exactly the point of the "mark a running task" capability.
+func (s *Scheduler) markContext(ctx context.Context, runID string) (*model.DagRun, *model.DAG, map[string]*model.TaskInstance, error) {
+	run, err := s.store.GetDagRun(ctx, runID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	d, _, ok := s.cachedDAG(run.DagID)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("dag %q not active: %w", run.DagID, store.ErrNotFound)
+	}
+	tis, err := s.store.ListTaskInstances(ctx, runID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	byTask := make(map[string]*model.TaskInstance, len(tis))
+	for _, ti := range tis {
+		byTask[ti.TaskID] = ti
+	}
+	return run, d, byTask, nil
 }
 
 // retryContext loads the run, its (active) DAG, and its task instances by task id.
@@ -620,6 +781,11 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 // running, propagates failures to downstream tasks, dispatches ready tasks, and
 // finalizes the run when every task is terminal.
 func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
+	// Serialize against MarkTask/MarkRun so the finalize decision below reads a task
+	// snapshot no manual mark can invalidate mid-flight (dispatched tasks run in
+	// their own goroutines, so this only holds for the cheap synchronous body).
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
 	d, err := s.dagFor(ctx, run.DagID)
 	if err != nil {
 		return err
@@ -786,7 +952,14 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			return err
 		}
 		s.log.Info("run finished", "run", run.RunID, "state", final)
-		s.notifyRun(d, run, final, fin, tis)
+		// A mark-driven re-finalize is a silent recorded-outcome override (like
+		// MarkRun): don't re-alert a run the operator already saw finish. Downstream
+		// DAG triggers still fire (workflow dependency, not an alert).
+		if s.notifySuppress[run.RunID] {
+			delete(s.notifySuppress, run.RunID)
+		} else {
+			s.notifyRun(d, run, final, fin, tis)
+		}
 		if final == model.RunSuccess {
 			s.triggerDownstreams(ctx, run)
 		}

@@ -132,13 +132,21 @@ func (r *Runner) Probe(ref string) Status {
 
 // Cancel kills the task's process group if it is still running.
 func (r *Runner) Cancel(ref string) error {
+	// Read t.cmd UNDER the lock — Launch writes it under the lock, and a concurrent
+	// cancel (e.g. MarkTask killing a task the tick is still launching) would
+	// otherwise race that write. A nil cmd means the process hasn't started yet;
+	// runTask's post-launch guarded write then kills it once it does.
 	r.mu.Lock()
 	t, ok := r.tasks[ref]
+	var cmd *exec.Cmd
+	if ok {
+		cmd = t.cmd
+	}
 	r.mu.Unlock()
-	if !ok || t.cmd == nil {
+	if cmd == nil {
 		return nil
 	}
-	killGroup(t.cmd)
+	killGroup(cmd)
 	return nil
 }
 

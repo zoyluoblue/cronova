@@ -33,6 +33,8 @@ type Engine interface {
 	CancelRun(ctx context.Context, runID string) error
 	RetryRun(ctx context.Context, runID string) error
 	RetryTask(ctx context.Context, runID, taskID string) error
+	MarkTask(ctx context.Context, runID, taskID string, target model.TaskState) error
+	MarkRun(ctx context.Context, runID string, target model.RunState) error
 }
 
 // Info is static runtime metadata shown in the console's status panel.
@@ -88,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{runID}/retry", s.retryRun)
 	mux.HandleFunc("POST /api/runs/{runID}/tasks/{taskID}/retry", s.retryTask)
+	mux.HandleFunc("POST /api/runs/{runID}/tasks/{taskID}/mark", s.markTask)
+	mux.HandleFunc("POST /api/runs/{runID}/mark", s.markRun)
 	mux.HandleFunc("GET /api/tasks/{tiID}/log", s.getLog)
 	mux.HandleFunc("GET /api/tasks/{tiID}/log/stream", s.streamLog)
 	mux.HandleFunc("GET /api/pools", s.listPools)
@@ -138,7 +142,7 @@ func mapErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpErr(w, http.StatusNotFound, "not found")
-	case errors.Is(err, model.ErrNoTasks):
+	case errors.Is(err, model.ErrNoTasks), errors.Is(err, model.ErrBadMarkState):
 		httpErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry), errors.Is(err, model.ErrRunStillActive):
 		httpErr(w, http.StatusConflict, err.Error())
@@ -375,6 +379,45 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"retried": true})
+}
+
+// markState is the request body for the two mark endpoints: {"state": "..."}.
+type markState struct {
+	State string `json:"state"`
+}
+
+func decodeMarkState(r *http.Request) (string, error) {
+	var m markState
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&m); err != nil {
+		return "", err
+	}
+	return m.State, nil
+}
+
+func (s *Server) markTask(w http.ResponseWriter, r *http.Request) {
+	state, err := decodeMarkState(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if err := s.eng.MarkTask(r.Context(), r.PathValue("runID"), r.PathValue("taskID"), model.TaskState(state)); err != nil {
+		mapErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"marked": true})
+}
+
+func (s *Server) markRun(w http.ResponseWriter, r *http.Request) {
+	state, err := decodeMarkState(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if err := s.eng.MarkRun(r.Context(), r.PathValue("runID"), model.RunState(state)); err != nil {
+		mapErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"marked": true})
 }
 
 func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {

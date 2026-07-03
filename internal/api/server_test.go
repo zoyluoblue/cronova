@@ -27,7 +27,9 @@ type stubTrigger struct {
 	cancelled   string // last runID passed to CancelRun
 	retriedRun  string // last runID passed to RetryRun
 	retriedTask string // last "runID/taskID" passed to RetryTask
-	opErr       error  // if set, cancel/retry return it
+	markedTask  string // last "runID/taskID=state" passed to MarkTask
+	markedRun   string // last "runID=state" passed to MarkRun
+	opErr       error  // if set, cancel/retry/mark return it
 }
 
 func (s *stubTrigger) TriggerManual(_ context.Context, dagID string, params map[string]string) (string, error) {
@@ -63,6 +65,14 @@ func (s *stubTrigger) RetryRun(_ context.Context, runID string) error {
 }
 func (s *stubTrigger) RetryTask(_ context.Context, runID, taskID string) error {
 	s.retriedTask = runID + "/" + taskID
+	return s.opErr
+}
+func (s *stubTrigger) MarkTask(_ context.Context, runID, taskID string, target model.TaskState) error {
+	s.markedTask = runID + "/" + taskID + "=" + string(target)
+	return s.opErr
+}
+func (s *stubTrigger) MarkRun(_ context.Context, runID string, target model.RunState) error {
+	s.markedRun = runID + "=" + string(target)
 	return s.opErr
 }
 
