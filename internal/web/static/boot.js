@@ -35,8 +35,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("click", (e) => {
   const el = e.target.closest && e.target.closest("[data-copy]"); if (!el) return;
   e.stopPropagation();
-  const ok = () => toast(t("copied"), "ok"), no = () => toast(t("copy_fail"), "warn");
-  try { navigator.clipboard.writeText(el.dataset.copy).then(ok, no); } catch (_) { no(); }
+  copyText(el.dataset.copy).then((ok) => toast(ok ? t("copied") : t("copy_fail"), ok ? "ok" : "warn"));
 }, true); // capture phase: run before a row's bubble-phase onclick
 applyStaticI18n();
 // auth gate: resolve identity first. If a login is required, initAuth shows the

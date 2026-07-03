@@ -40,7 +40,7 @@ const DICT = {
     run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
     confirm_cancel_title: (id) => `取消运行“${id}”?`, confirm_cancel_body: "正在运行的任务会被终止。", th_act: "操作",
     confirm_retry_title: (id) => `重跑“${id}”?`, confirm_retry_body: "该任务及其所有下游任务会被重置并重新运行。",
-    copied: "已复制", copy_fail: "复制失败", copy_hint: "点击复制", search_ph: "跳转 / 筛选 DAG…", jump_open: "打开", jump_none: "无匹配 DAG",
+    copied: "已复制", copy_fail: "复制失败，请手动选择文本", copy_hint: "点击复制", search_ph: "跳转 / 筛选 DAG…", jump_open: "打开", jump_none: "无匹配 DAG",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
     act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
@@ -133,7 +133,7 @@ const DICT = {
     run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
     confirm_cancel_title: (id) => `Cancel run “${id}”?`, confirm_cancel_body: "Running tasks will be killed.", th_act: "Actions",
     confirm_retry_title: (id) => `Retry “${id}”?`, confirm_retry_body: "This task and all of its downstream tasks will be reset and re-run.",
-    copied: "Copied", copy_fail: "Copy failed", copy_hint: "Click to copy", search_ph: "Jump / filter DAGs…", jump_open: "Open", jump_none: "No matching DAG",
+    copied: "Copied", copy_fail: "Copy failed — select the text manually", copy_hint: "Click to copy", search_ph: "Jump / filter DAGs…", jump_open: "Open", jump_none: "No matching DAG",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
     act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
@@ -252,9 +252,33 @@ async function api(path, opts) {
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 // copySpan: a click-to-copy value (handled by the delegated [data-copy] listener
-// in boot.js). Keyboard-activatable via the global Enter/Space delegation.
-function copySpan(text, cls) {
-  return `<span class="copyable ${cls || ""}" data-copy="${esc(text)}" role="button" tabindex="0" title="${t("copy_hint")}">${esc(text)}</span>`;
+// in boot.js). Keyboard-activatable via the global Enter/Space delegation. An
+// aria-label conveys the copy action to screen readers (role=button otherwise
+// announces only the value); title (defaults to the copy hint) can carry the full
+// value for a truncated cell.
+function copySpan(text, cls, titleText) {
+  const title = titleText || t("copy_hint");
+  return `<span class="copyable ${cls || ""}" data-copy="${esc(text)}" role="button" tabindex="0" title="${esc(title)}" aria-label="${t("copy_hint")}: ${esc(text)}">${esc(text)}</span>`;
+}
+// copyText: clipboard write that works in INSECURE contexts too. navigator.clipboard
+// is undefined on any non-localhost http:// origin (the console's real topology),
+// so fall back to a hidden textarea + execCommand. Resolves to whether it copied.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+function legacyCopy(text) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;left:-9999px;opacity:0";
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) { return false; }
 }
 const fmt = (x) => (x ? new Date(x).toLocaleString() : "—");
 
@@ -498,19 +522,23 @@ function updateJump(raw) {
   const q = raw.trim().toLowerCase();
   if (overviewCache && overviewCache.dags) jumpDags = overviewCache.dags.map((d) => d.dag_id); // freshest
   const setExpanded = (v) => $("search").setAttribute("aria-expanded", v);
-  if (!q) { menu.hidden = true; menu.innerHTML = ""; jumpSel = -1; setExpanded("false"); return; }
+  const clearAD = () => $("search").removeAttribute("aria-activedescendant");
+  if (!q) { menu.hidden = true; menu.innerHTML = ""; jumpSel = -1; setExpanded("false"); clearAD(); return; }
   const matches = jumpDags.filter((id) => id.toLowerCase().includes(q)).slice(0, 8);
   menu.hidden = false; setExpanded("true");
-  if (!matches.length) { menu.innerHTML = `<div class="jump-empty">${t("jump_none")}</div>`; jumpSel = -1; return; }
+  if (!matches.length) { menu.innerHTML = `<div class="jump-empty">${t("jump_none")}</div>`; jumpSel = -1; clearAD(); return; }
   jumpSel = 0;
-  menu.innerHTML = matches.map((id, i) => `<div class="jump-item ${i === 0 ? "sel" : ""}" data-jump="${esc(id)}" role="option" aria-selected="${i === 0}"><span class="mono">${hlMatch(id, q)}</span><span class="jump-open">${t("jump_open")} →</span></div>`).join("");
+  menu.innerHTML = matches.map((id, i) => `<div class="jump-item ${i === 0 ? "sel" : ""}" id="jump-opt-${i}" data-jump="${esc(id)}" role="option" aria-selected="${i === 0}"><span class="mono">${hlMatch(id, q)}</span><span class="jump-open">${t("jump_open")} →</span></div>`).join("");
   menu.querySelectorAll("[data-jump]").forEach((it) => it.onmousedown = (e) => { e.preventDefault(); jumpTo(it.dataset.jump); }); // mousedown beats blur
+  $("search").setAttribute("aria-activedescendant", "jump-opt-0"); // SR announces the active option
 }
 function jumpMove(delta) {
   const menu = $("jump-menu"); if (!menu || menu.hidden) return;
   const items = [...menu.querySelectorAll(".jump-item")]; if (!items.length) return;
   jumpSel = (jumpSel + delta + items.length) % items.length;
   items.forEach((it, i) => { it.classList.toggle("sel", i === jumpSel); it.setAttribute("aria-selected", i === jumpSel); });
+  $("search").setAttribute("aria-activedescendant", "jump-opt-" + jumpSel);
+  items[jumpSel].scrollIntoView({ block: "nearest" });
 }
 function jumpEnter() {
   const menu = $("jump-menu"); if (!menu || menu.hidden) return false;
@@ -519,7 +547,7 @@ function jumpEnter() {
   return false;
 }
 function jumpTo(dagID) { closeJump(); const s = $("search"); s.value = ""; query = ""; if (view === "dags") renderDags(); showDag(dagID); }
-function closeJump() { const m = $("jump-menu"); if (m) { m.hidden = true; m.innerHTML = ""; jumpSel = -1; } $("search").setAttribute("aria-expanded", "false"); }
+function closeJump() { const m = $("jump-menu"); if (m) { m.hidden = true; m.innerHTML = ""; jumpSel = -1; } $("search").setAttribute("aria-expanded", "false"); $("search").removeAttribute("aria-activedescendant"); }
 
 let serverTZ = "";
 async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }

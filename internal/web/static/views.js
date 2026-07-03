@@ -103,7 +103,7 @@ function rowHtml(d, scaleMs) {
 // graph + task list) + schedule + run history. Edits persist immediately.
 // ============================================================================
 async function showDag(id, tab) {
-  closeLog();
+  closeLog(); stopDagRunsPoll(); // tear down the outgoing DAG's live poll before the async refetch
   setHash("#/dag/" + encodeURIComponent(id) + (tab && tab !== "runs" ? "/" + tab : ""));
   await flushPendingSaves(); // land any debounced edit before we refetch + replace D
   let dag, runs, allDags = [];
@@ -161,15 +161,23 @@ function schedSummary(d) {
   const s = schedSentence(d);
   return s ? `${s} · ${d.schedule}` : d.schedule;
 }
+// hero facts, honestly derived from the runs we already have — extracted so the
+// live poll can patch #dh-stats in place without tearing down the whole page.
+function dagHeroStatsHtml() {
+  const d = D.dag, last = D.runs[0];
+  const terminal = D.runs.filter((r) => r.state === "success" || r.state === "failed");
+  const okN = terminal.filter((r) => r.state === "success").length;
+  return `<div class="dh-stat"><span class="k">${t("dh_last")}</span>
+      ${last ? `<span class="v">${badge(last.state)} <span class="muted">${fmt(last.started_at)} · ${dur(last.started_at, last.finished_at)}</span></span>` : `<span class="v muted">${t("dh_never")}</span>`}</div>
+    <div class="dh-stat"><span class="k">${t("dh_next")}</span><span class="v">${esc(schedSummary(d))}</span></div>
+    <div class="dh-stat"><span class="k">${t("dh_rate")}</span><span class="v">${terminal.length ? `${okN}/${terminal.length} ${stateLabel("success")}` : t("dh_norate")}</span></div>`;
+}
+function patchDagHero() { const el = $("dh-stats"); if (el) el.innerHTML = dagHeroStatsHtml(); }
 function renderDagPage() {
   if (!D) return;
   const d = D.dag;
   const typ = d.schedule ? "schedule" : (d.trigger_after.length ? "dependency" : "manual");
   const noTasks = D.tasks.length === 0;
-  // hero facts, honestly derived from the runs we already fetched
-  const last = D.runs[0];
-  const terminal = D.runs.filter((r) => r.state === "success" || r.state === "failed");
-  const okN = terminal.filter((r) => r.state === "success").length;
   main.innerHTML = `
     <div class="crumb-bar"><a id="back">${t("back_dags")}</a> / ${esc(d.dag_id)}</div>
     <div class="dag-hero">
@@ -186,11 +194,7 @@ function renderDagPage() {
           <button class="icon" id="yaml-btn">YAML</button>
         </div>
       </div>
-      <div class="dh-stats">
-        <div class="dh-stat"><span class="k">${t("dh_last")}</span>
-          ${last ? `<span class="v">${badge(last.state)} <span class="muted">${fmt(last.started_at)} · ${dur(last.started_at, last.finished_at)}</span></span>` : `<span class="v muted">${t("dh_never")}</span>`}</div>
-        <div class="dh-stat"><span class="k">${t("dh_next")}</span><span class="v">${esc(schedSummary(d))}</span></div>
-        <div class="dh-stat"><span class="k">${t("dh_rate")}</span><span class="v">${terminal.length ? `${okN}/${terminal.length} ${stateLabel("success")}` : t("dh_norate")}</span></div>
+      <div class="dh-stats" id="dh-stats">${dagHeroStatsHtml()}
       </div>
       ${noTasks ? `<div class="page-sub" style="margin:8px 0 0">${t("dag_disabled_hint")}</div>` : ""}
     </div>
@@ -243,7 +247,13 @@ function maybePollDagRuns() {
       return;
     }
     D.runs = runs || [];
-    renderDagPage(); // refresh hero facts + runs table; renderDagTab re-arms the poll
+    // patch in place (never main.innerHTML): keep the hero/tabs and — crucially —
+    // don't tear down a run-row action button the user is focused on / pressing.
+    patchDagHero();
+    const runsBox = $("d-runs");
+    // skip the table rebuild while the user is focused inside it (don't yank a
+    // focused/pressed action button); the interval keeps ticking and catches up.
+    if (!(runsBox && document.activeElement && runsBox.contains(document.activeElement))) renderDagRuns();
   }, 3000);
 }
 
@@ -375,7 +385,7 @@ async function openYamlDrawer() {
   document.addEventListener("keydown", onKey);
   $("yovl").onclick = (e) => { if (e.target.id === "yovl") close(); };
   $("y-close").onclick = close;
-  $("y-copy").onclick = async () => { try { await navigator.clipboard.writeText(yml); toast(t("y_copied"), "ok"); } catch (_) { toast(t("y_copy_fail"), "warn"); } };
+  $("y-copy").onclick = () => copyText(yml).then((ok) => toast(ok ? t("y_copied") : t("y_copy_fail"), ok ? "ok" : "warn"));
   $("y-dl").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([yml], { type: "text/yaml" })); a.download = D.dag.dag_id + ".yaml"; a.click(); URL.revokeObjectURL(a.href); };
 }
 
@@ -435,7 +445,7 @@ function renderDagRuns() {
   }).join("")}</tbody></table>`;
   el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showRun(tr.dataset.run); });
   el.querySelectorAll("[data-rr-cancel]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineCancelRun(b.dataset.rrCancel); });
-  el.querySelectorAll("[data-rr-retry]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineRetryRun(b.dataset.rrRetry); });
+  el.querySelectorAll("[data-rr-retry]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); b.disabled = true; inlineRetryRun(b.dataset.rrRetry); }); // disable to swallow a double-click (2nd → 409)
 }
 // inline run ops from the history list — refresh the list in place (stay on the DAG page)
 async function inlineCancelRun(runID) {
@@ -470,7 +480,7 @@ function dagTaskTableHtml() {
   return `<table class="tbl tasks"><thead><tr><th>${t("th_id")}</th><th>${t("th_type")}</th><th>${t("th_command")}</th><th>${t("h_pool")}</th><th>${t("t_rule")}</th><th>${t("th_deps")}</th><th style="width:44px"></th></tr></thead>
     <tbody>${D.tasks.map((tk) => `<tr class="row" data-task="${esc(tk.id)}">
       <td class="mono">${esc(tk.id || "—")}</td><td>${esc(tk.type)}</td>
-      <td class="muted mono cmd-cell no-nav">${tk.command ? copySpan(tk.command) : "—"}</td>
+      <td class="muted mono cmd-cell no-nav">${tk.command ? copySpan(tk.command, "", tk.command) : "—"}</td>
       <td class="mono">${esc(tk.pool)}</td><td class="muted">${t("tr_" + (tk.trigger_rule || "all_success"))}</td>
       <td class="muted">${esc((tk.deps || []).join(", ") || "—")}</td>
       <td><button class="icon no-nav" data-dup="${esc(tk.id)}" title="${t("btn_duplicate")}">⧉</button><button class="icon rm no-nav" data-del="${esc(tk.id)}" title="${t("b_remove")}">✕</button></td></tr>`).join("")}</tbody></table>`;
