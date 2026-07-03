@@ -80,7 +80,7 @@ type Store interface {
 	GetUserByID(ctx context.Context, id int64) (*model.User, error)
 	ListUsers(ctx context.Context) ([]*model.User, error)
 	CountUsers(ctx context.Context) (int, error)
-	// UpdateUserPassword sets a new bcrypt hash and revokes the user's sessions.
+	// UpdateUserPassword sets a new PBKDF2-HMAC-SHA256 hash and revokes the user's sessions.
 	UpdateUserPassword(ctx context.Context, id int64, passwordHash string) error
 	DeleteUser(ctx context.Context, id int64) error
 	CreateSession(ctx context.Context, s *model.Session) error

@@ -421,6 +421,10 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .dh-stat .k { font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase; color: var(--faint); }
 .dh-stat .v { font-size: 13px; display: flex; align-items: center; gap: 7px; }
 .tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.tag.bad { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, var(--line)); background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.set-url { color: var(--faint); }
+.chip.dis { opacity: .4; pointer-events: none; }
 .dag-tabs { margin: 4px 0 14px; }
 .tab-n { font-family: var(--mono); font-size: 10.5px; } /* muted color already de-emphasizes; opacity would drop below AA */
 /* settings rows: quiet one-line summaries; the form exists only while editing */

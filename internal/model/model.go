@@ -89,6 +89,8 @@ type DAG struct {
 	Project        string     `json:"project,omitempty"` // reserved for future RBAC
 	Tasks          []Task     `json:"tasks,omitempty"`
 	TriggerAfter   []string   `json:"trigger_after,omitempty"` // upstream dag_ids
+	NotifyURL      string     `json:"notify_url,omitempty"`    // webhook POSTed on a notify_on state
+	NotifyOn       []string   `json:"notify_on,omitempty"`     // run states to notify on: "failure", "success"
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 	DeletedAt      *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
@@ -154,7 +156,7 @@ const (
 	RoleViewer Role = "viewer" // read-only
 )
 
-// User is a console/API account. PasswordHash is bcrypt and is never serialized.
+// User is a console/API account. PasswordHash is a PBKDF2-HMAC-SHA256 hash and is never serialized.
 type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`

@@ -123,6 +123,7 @@ async function showDag(id, tab) {
       catchup: !!dag.catchup, paused: !!dag.paused,
       max_active_runs: dag.max_active_runs || 1, default_retries: dag.default_retries || 0,
       trigger_after: (dag.trigger_after || []).slice(),
+      notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
     }),
     tasks: (dag.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success" })),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
@@ -279,11 +280,25 @@ function settingsTabHtml() {
   const depsEditor = others.length
     ? `<div class="b-deps">${others.map((x) => `<span class="chip ta ${d.trigger_after.includes(x) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${d.trigger_after.includes(x)}" data-ta="${esc(x)}">${esc(x)}</span>`).join("")}</div>`
     : `<div class="muted">${t("set_no_deps_avail")}</div>`;
+  // notify: outbound webhook fired when a run finishes in a selected state.
+  const nOn = d.notify_on || [];
+  const nEvents = ["failure", "success"];
+  const notifText = d.notify_url ? `${d.notify_url} · ${nOn.length ? nOn.join(", ") : t("notify_off")}` : t("set_none");
+  const notifSummary = d.notify_url
+    ? `${nEvents.filter((e) => nOn.includes(e)).map((e) => `<span class="tag ${e === "failure" ? "bad" : "ok"}">${t("notify_" + e)}</span>`).join(" ") || `<span class="muted">${t("notify_off")}</span>`} <span class="mono set-url" title="${esc(d.notify_url)}">${esc(d.notify_url)}</span>`
+    : `<span class="muted">${t("set_none")}</span>`;
+  const hasUrl = !!(d.notify_url || "").trim();
+  // events require a URL; without one the chips are disabled (and never selectable),
+  // so the editor, the collapsed summary, and the persisted state can't diverge.
+  const notifEditor = `<input id="d-nurl" type="url" placeholder="https://hooks.slack.com/services/…" value="${esc(d.notify_url)}" style="width:100%;margin-bottom:8px" aria-label="${esc(t("set_notify"))} URL">
+    <div class="b-deps">${nEvents.map((e) => `<span class="chip non ${hasUrl && nOn.includes(e) ? "on" : ""} ${hasUrl ? "" : "dis"}" role="checkbox" tabindex="${hasUrl ? "0" : "-1"}" aria-checked="${hasUrl && nOn.includes(e)}" aria-disabled="${!hasUrl}" data-non="${e}">${t("notify_" + e)}</span>`).join("")}</div>
+    <div class="field-hint" id="d-nhint" style="margin-top:6px"${hasUrl ? " hidden" : ""}>${esc(t("notify_need_url"))}</div>`;
   return `<div class="set-list">
     ${row("sched", t("set_sched"), esc(schedSummary(d)), schedSummary(d), `<div id="d-sched"></div>`)}
     ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, String(d.max_active_runs), `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
     ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, String(d.default_retries), `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
     ${row("deps", t("set_deps"), depsSummary, depsText, depsEditor, t("set_deps_hint"))}
+    ${row("notify", t("set_notify"), notifSummary, notifText, notifEditor, t("set_notify_hint"))}
   </div>
   <div class="danger-zone">
     <div class="dz-t">${t("danger_title")}</div>
@@ -314,6 +329,24 @@ function wireSettingsTab() {
   const max = $("d-max"); if (max) max.oninput = () => { d.max_active_runs = +max.value || 1; saveDag(); };
   const defr = $("d-defr"); if (defr) defr.oninput = () => { d.default_retries = +defr.value || 0; saveDag(); };
   body.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
+  const nurl = $("d-nurl"); if (nurl) nurl.oninput = () => {
+    d.notify_url = nurl.value.trim();
+    const has = !!d.notify_url;
+    if (!has) d.notify_on = []; // events are meaningless without a URL
+    body.querySelectorAll(".chip.non").forEach((c) => {
+      c.classList.toggle("dis", !has); c.setAttribute("aria-disabled", String(!has)); c.setAttribute("tabindex", has ? "0" : "-1");
+      if (!has) { c.classList.remove("on"); c.setAttribute("aria-checked", "false"); }
+    });
+    const hint = $("d-nhint"); if (hint) hint.hidden = has;
+    saveDag();
+  };
+  body.querySelectorAll(".chip.non").forEach((c) => c.onclick = () => {
+    if (!(d.notify_url || "").trim()) return; // events require a URL (chip is disabled)
+    d.notify_on = d.notify_on || [];
+    const x = c.dataset.non, i = d.notify_on.indexOf(x);
+    i < 0 ? d.notify_on.push(x) : d.notify_on.splice(i, 1);
+    c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag();
+  });
   const del = $("del"); if (del) del.onclick = deleteActiveDag;
 }
 
@@ -722,6 +755,8 @@ function validateDag() {
   if (new Set(nonEmpty).size !== nonEmpty.length) e.push(t("err_dup"));
   if (D.tasks.some((x) => x.id && !String(x.command).trim())) e.push(t("err_emptycmd"));
   if (hasCycle(D.tasks.filter((x) => x.id))) e.push(t("err_cycle"));
+  const nurl = (D.dag && D.dag.notify_url || "").trim();
+  if (nurl && !/^https?:\/\//i.test(nurl)) e.push(t("err_notify_url"));
   return e;
 }
 function dagSpecFrom(st) {
@@ -730,6 +765,8 @@ function dagSpecFrom(st) {
     dag_id: d.dag_id, schedule: d.schedule, start_date: d.start_date,
     catchup: !!d.catchup, max_active_runs: +d.max_active_runs || 1, default_retries: +d.default_retries || 0,
     trigger_after: (d.trigger_after || []).slice(),
+    // events are meaningless without a URL — keep the persisted state consistent
+    notify_url: (d.notify_url || "").trim(), notify_on: (d.notify_url || "").trim() ? (d.notify_on || []).slice() : [],
     tasks: st.tasks.filter((tk) => tk.id).map((tk) => ({
       id: tk.id, type: tk.type, command: tk.command, pool: tk.pool || "default",
       priority: +tk.priority || 0, deps: (tk.deps || []).filter((dep) => st.tasks.some((x) => x.id === dep)),

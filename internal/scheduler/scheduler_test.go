@@ -22,9 +22,10 @@ func newTestScheduler(t *testing.T) *Scheduler {
 		t.Fatalf("migrate: %v", err)
 	}
 	return New(st, executor.NewLocal(), Options{
-		LogDir:       filepath.Join(t.TempDir(), "logs"),
-		Tick:         10 * time.Millisecond,
-		PollInterval: 5 * time.Millisecond,
+		LogDir:                    filepath.Join(t.TempDir(), "logs"),
+		Tick:                      10 * time.Millisecond,
+		PollInterval:              5 * time.Millisecond,
+		AllowPrivateNotifyTargets: true, // httptest servers listen on 127.0.0.1
 	})
 }
 

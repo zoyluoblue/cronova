@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Console/API accounts. Passwords are bcrypt hashes (never plaintext). role is
+-- Console/API accounts. Passwords are PBKDF2-HMAC-SHA256 hashes (never plaintext). role is
 -- 'admin' (full access) or 'viewer' (read-only). Auth is opt-in (auth.enabled).
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

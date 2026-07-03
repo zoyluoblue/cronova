@@ -9,6 +9,7 @@ package parser
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -46,6 +47,10 @@ type dagYAML struct {
 	TriggerAfter      []struct {
 		DagID string `yaml:"dag_id"`
 	} `yaml:"trigger_after"`
+	Notify struct {
+		URL string   `yaml:"url"`
+		On  []string `yaml:"on"` // "failure", "success"
+	} `yaml:"notify"`
 }
 
 // CronParser parses standard 5-field cron plus @descriptors and @every.
@@ -104,6 +109,23 @@ func Parse(raw []byte) (*model.DAG, error) {
 	for _, ta := range y.TriggerAfter {
 		if ta.DagID != "" {
 			d.TriggerAfter = append(d.TriggerAfter, ta.DagID)
+		}
+	}
+	// notify: an outbound webhook fired when a run finishes in a listed state.
+	d.NotifyURL = strings.TrimSpace(y.Notify.URL)
+	for _, ev := range y.Notify.On {
+		ev = strings.TrimSpace(ev)
+		if ev == "failure" || ev == "success" {
+			d.NotifyOn = append(d.NotifyOn, ev)
+		} else if ev != "" {
+			return nil, fmt.Errorf("dag %q: invalid notify.on %q (want failure or success)", y.DagID, ev)
+		}
+	}
+	if d.NotifyURL != "" {
+		// scheme is case-insensitive (RFC 3986) — match the console's client check.
+		lower := strings.ToLower(d.NotifyURL)
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			return nil, fmt.Errorf("dag %q: notify.url must be http(s)", y.DagID)
 		}
 	}
 

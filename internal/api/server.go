@@ -301,6 +301,8 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 	if parsed, perr := parser.Parse([]byte(d.DefinitionYAML)); perr == nil {
 		d.TriggerAfter = parsed.TriggerAfter
 		d.DefaultRetries = parsed.DefaultRetries
+		d.NotifyURL = parsed.NotifyURL
+		d.NotifyOn = parsed.NotifyOn
 		// Pull the RAW per-task retry pointers so "unset" stays null for the editor.
 		var raw struct {
 			Tasks []struct {
@@ -413,6 +415,8 @@ type dagSpec struct {
 	DefaultRetries int        `json:"default_retries"`
 	Tasks          []taskSpec `json:"tasks"`
 	TriggerAfter   []string   `json:"trigger_after"`
+	NotifyURL      string     `json:"notify_url"`
+	NotifyOn       []string   `json:"notify_on"` // "failure", "success"
 }
 
 // buildDAG accepts a structured DAG spec from the UI form, renders it to the
@@ -454,6 +458,10 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 	type triggerOut struct {
 		DagID string `yaml:"dag_id"`
 	}
+	type notifyOut struct {
+		URL string   `yaml:"url"`
+		On  []string `yaml:"on"`
+	}
 	type dagOut struct {
 		DagID          string       `yaml:"dag_id"`
 		Schedule       string       `yaml:"schedule,omitempty"`
@@ -463,10 +471,22 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		DefaultRetries int          `yaml:"default_retries,omitempty"`
 		Tasks          []taskOut    `yaml:"tasks"`
 		TriggerAfter   []triggerOut `yaml:"trigger_after,omitempty"`
+		Notify         *notifyOut   `yaml:"notify,omitempty"`
 	}
 	out := dagOut{
 		DagID: spec.DagID, Schedule: spec.Schedule, StartDate: spec.StartDate,
 		Catchup: spec.Catchup, MaxActiveRuns: spec.MaxActiveRuns, DefaultRetries: spec.DefaultRetries,
+	}
+	if url := strings.TrimSpace(spec.NotifyURL); url != "" {
+		on := []string{}
+		for _, ev := range spec.NotifyOn {
+			if ev == "failure" || ev == "success" {
+				on = append(on, ev)
+			}
+		}
+		// Persist the URL even with no events yet (a "configured but idle" state
+		// that round-trips), rather than silently dropping what the user typed.
+		out.Notify = &notifyOut{URL: url, On: on}
 	}
 	for _, t := range spec.Tasks {
 		out.Tasks = append(out.Tasks, taskOut{

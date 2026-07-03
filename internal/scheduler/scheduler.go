@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,6 +39,10 @@ type Options struct {
 	Tick         time.Duration // scheduling loop interval
 	PollInterval time.Duration // how often a running task is Probed for completion
 	Logger       *slog.Logger
+	// AllowPrivateNotifyTargets disables the SSRF guard on outbound notify
+	// webhooks (loopback/private/link-local IPs). Off in production; tests set it
+	// so an httptest server on 127.0.0.1 can receive deliveries.
+	AllowPrivateNotifyTargets bool
 }
 
 // Scheduler is the cronova scheduling engine.
@@ -50,6 +55,8 @@ type Scheduler struct {
 	mu        sync.Mutex
 	dags      map[string]*model.DAG
 	schedules map[string]cron.Schedule
+
+	notifyClient *http.Client // hardened outbound client for notify webhooks
 
 	bootTime time.Time
 	inflight sync.WaitGroup
@@ -70,13 +77,14 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 	return &Scheduler{
-		store:     st,
-		exec:      ex,
-		opts:      opts,
-		log:       opts.Logger,
-		dags:      map[string]*model.DAG{},
-		schedules: map[string]cron.Schedule{},
-		bootTime:  time.Now().UTC(),
+		store:        st,
+		exec:         ex,
+		opts:         opts,
+		log:          opts.Logger,
+		dags:         map[string]*model.DAG{},
+		schedules:    map[string]cron.Schedule{},
+		notifyClient: newNotifyClient(opts.AllowPrivateNotifyTargets),
+		bootTime:     time.Now().UTC(),
 	}
 }
 
@@ -778,6 +786,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			return err
 		}
 		s.log.Info("run finished", "run", run.RunID, "state", final)
+		s.notifyRun(d, run, final, fin, tis)
 		if final == model.RunSuccess {
 			s.triggerDownstreams(ctx, run)
 		}

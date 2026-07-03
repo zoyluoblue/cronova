@@ -161,3 +161,52 @@ tasks:
 		t.Fatalf("@every should be valid: %v", err)
 	}
 }
+
+func TestParseNotify(t *testing.T) {
+	raw := []byte(`
+dag_id: alertme
+tasks:
+  - id: a
+    command: "echo hi"
+notify:
+  url: "https://hooks.slack.com/services/T/B/X"
+  on: [failure, success]
+`)
+	d, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if d.NotifyURL != "https://hooks.slack.com/services/T/B/X" {
+		t.Errorf("notify url = %q", d.NotifyURL)
+	}
+	if len(d.NotifyOn) != 2 || d.NotifyOn[0] != "failure" || d.NotifyOn[1] != "success" {
+		t.Errorf("notify on = %v", d.NotifyOn)
+	}
+}
+
+func TestParseRejectsBadNotify(t *testing.T) {
+	bad := []byte(`
+dag_id: bad
+tasks:
+  - id: a
+    command: "echo hi"
+notify:
+  url: "ftp://nope"
+  on: [failure]
+`)
+	if _, err := Parse(bad); err == nil || !strings.Contains(err.Error(), "http") {
+		t.Errorf("bad notify url should error, got %v", err)
+	}
+	badEvent := []byte(`
+dag_id: bad2
+tasks:
+  - id: a
+    command: "echo hi"
+notify:
+  url: "https://x.test/hook"
+  on: [failure, blowup]
+`)
+	if _, err := Parse(badEvent); err == nil || !strings.Contains(err.Error(), "notify.on") {
+		t.Errorf("bad notify event should error, got %v", err)
+	}
+}
