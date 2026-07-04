@@ -127,6 +127,10 @@ type Task struct {
 	// instead of a shell Command. URL/Headers/Body may contain {{ var. }}/{{ conn. }}
 	// templates, resolved server-side at dispatch.
 	HTTP *HTTPSpec `json:"http,omitempty"`
+	// Conn is the connection id for a Type == "sql" task; the connection's type
+	// selects the driver and its host/port/login/password build the DSN. For
+	// python/sql tasks the Command field holds the code / query respectively.
+	Conn string `json:"conn,omitempty"`
 }
 
 // HTTPSpec configures an http-type task's request. ExpectedStatus lists the

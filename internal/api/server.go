@@ -286,6 +286,7 @@ type editTask struct {
 	SLA         int             `json:"sla"`
 	TriggerRule string          `json:"trigger_rule"`
 	HTTP        *model.HTTPSpec `json:"http,omitempty"`
+	Conn        string          `json:"conn,omitempty"`
 }
 
 // dagDetail is the editor-facing DAG. The outer Tasks shadows model.DAG.Tasks in
@@ -326,7 +327,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -453,6 +454,7 @@ type taskSpec struct {
 	SLA         int             `json:"sla"`
 	TriggerRule string          `json:"trigger_rule"`
 	HTTP        *model.HTTPSpec `json:"http,omitempty"`
+	Conn        string          `json:"conn,omitempty"`
 }
 
 type dagSpec struct {
@@ -513,6 +515,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		Timeout     int      `yaml:"timeout,omitempty"`
 		SLA         int      `yaml:"sla,omitempty"`
 		TriggerRule string   `yaml:"trigger_rule,omitempty"`
+		Conn        string   `yaml:"conn,omitempty"`
 		HTTP        *httpOut `yaml:"http,omitempty"`
 	}
 	type triggerOut struct {
@@ -555,7 +558,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		to := taskOut{
 			ID: t.ID, Type: t.Type, Command: t.Command, Deps: t.Deps, Pool: t.Pool,
 			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay, Timeout: t.Timeout,
-			SLA: t.SLA, TriggerRule: t.TriggerRule,
+			SLA: t.SLA, TriggerRule: t.TriggerRule, Conn: t.Conn,
 		}
 		if t.Type == "http" && t.HTTP != nil {
 			to.HTTP = &httpOut{

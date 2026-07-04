@@ -235,6 +235,38 @@ func TestParseRejectsBadHTTP(t *testing.T) {
 	}
 }
 
+func TestParseSQLAndPython(t *testing.T) {
+	raw := []byte(`
+dag_id: ops
+tasks:
+  - id: q
+    type: sql
+    conn: warehouse
+    command: "SELECT count(*) FROM events WHERE day = '{{ params.day }}'"
+  - id: p
+    type: python
+    command: "print('hello')"
+    deps: [q]
+`)
+	d, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if d.Tasks[0].Conn != "warehouse" || d.Tasks[0].Command == "" {
+		t.Errorf("sql task = %+v", d.Tasks[0])
+	}
+	if d.Tasks[1].Type != "python" || d.Tasks[1].Command != "print('hello')" {
+		t.Errorf("python task = %+v", d.Tasks[1])
+	}
+}
+
+func TestParseRejectsSQLWithoutConn(t *testing.T) {
+	raw := []byte("dag_id: b\ntasks:\n  - id: q\n    type: sql\n    command: \"SELECT 1\"\n")
+	if _, err := Parse(raw); err == nil || !strings.Contains(err.Error(), "conn") {
+		t.Errorf("sql task without conn should error, got %v", err)
+	}
+}
+
 func TestParseDeadlines(t *testing.T) {
 	raw := []byte(`
 dag_id: deadlines

@@ -34,6 +34,7 @@ type taskYAML struct {
 	Timeout     int      `yaml:"timeout"`     // seconds
 	SLA         int      `yaml:"sla"`         // seconds from run start (soft alert)
 	TriggerRule string   `yaml:"trigger_rule"`
+	Conn        string   `yaml:"conn"` // connection id for type: sql
 	HTTP        *struct {
 		Method         string            `yaml:"method"`
 		URL            string            `yaml:"url"`
@@ -168,6 +169,7 @@ func Parse(raw []byte) (*model.DAG, error) {
 			RetryDelay:  y.DefaultRetryDelay,
 			Timeout:     t.Timeout,
 			SLA:         t.SLA,
+			Conn:        strings.TrimSpace(t.Conn),
 			TriggerRule: orDefault(t.TriggerRule, model.RuleAllSuccess),
 		}
 		if !model.ValidTriggerRule(task.TriggerRule) {
@@ -197,7 +199,11 @@ func Parse(raw []byte) (*model.DAG, error) {
 				Headers: t.HTTP.Headers, Body: t.HTTP.Body, ExpectedStatus: t.HTTP.ExpectedStatus,
 			}
 		} else if task.Command == "" {
+			// shell/python/sql/jar all carry code/query/command in Command.
 			return nil, fmt.Errorf("dag %q: task %q has empty command", y.DagID, t.ID)
+		}
+		if task.Type == "sql" && task.Conn == "" {
+			return nil, fmt.Errorf("dag %q: sql task %q requires a conn (connection id)", y.DagID, t.ID)
 		}
 		d.Tasks = append(d.Tasks, task)
 	}

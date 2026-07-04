@@ -90,10 +90,24 @@ func cmdRunOp(args []string) error {
 			return fmt.Errorf("bad op spec: %w", err)
 		}
 		os.Exit(operator.RunHTTP(context.Background(), spec, os.Stdout))
-		return nil
+	case "python":
+		var spec struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal([]byte(blob), &spec); err != nil {
+			return fmt.Errorf("bad op spec: %w", err)
+		}
+		os.Exit(operator.RunPython(context.Background(), spec.Code, os.Stdout))
+	case "sql":
+		var spec operator.SQLSpec
+		if err := json.Unmarshal([]byte(blob), &spec); err != nil {
+			return fmt.Errorf("bad op spec: %w", err)
+		}
+		os.Exit(operator.RunSQL(context.Background(), spec, os.Stdout))
 	default:
 		return fmt.Errorf("unknown operator type %q", args[0])
 	}
+	return nil
 }
 
 func usage() {

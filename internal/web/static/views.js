@@ -126,7 +126,7 @@ async function showDag(id, tab) {
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
       httpMethod: h.method || "GET", httpUrl: h.url || "", httpHeaders: h.headers ? Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "", httpBody: h.body || "", httpStatus: (h.expected_status || []).join(", ") }; }),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
@@ -593,16 +593,6 @@ function showTask(dagID, taskID) {
 const TEMPLATE_VARS = ["logical_date", "logical_datetime", "run_id", "dag_id", "task_id", "try_number"];
 let cmdRaw = false, lastCmdField = null;
 const CMD_BUILDERS = {
-  python: {
-    fields: [
-      { k: "interp", label: "cb_interp", def: "python3", ph: "python3" },
-      { k: "mode", label: "cb_runas", sel: ["module", "script"], def: "module" },
-      { k: "target", label: "cb_target", ph: "pkg.main  ·  path/script.py", full: true },
-      { k: "args", label: "cb_args", ph: "--date {{ logical_date }}", full: true },
-    ],
-    compose: (f) => `${f.interp || "python3"} ${f.mode === "script" ? "" : "-m "}${f.target || ""}${f.args ? " " + f.args : ""}`.replace(/\s+/g, " ").trim(),
-    parse: (c) => { const m = c.match(/^(\S+)\s+(?:-m\s+(\S+)|(\S+))(?:\s+([\s\S]+))?$/); if (!m || !/python/i.test(m[1])) return null; return { interp: m[1], mode: m[2] ? "module" : "script", target: m[2] || m[3] || "", args: (m[4] || "").trim() }; },
-  },
   jar: {
     fields: [
       { k: "jar", label: "cb_jar", ph: "app.jar", full: true },
@@ -611,14 +601,6 @@ const CMD_BUILDERS = {
     ],
     compose: (f) => (f.mainclass ? `java -cp ${f.jar || ""} ${f.mainclass}` : `java -jar ${f.jar || ""}`) + (f.args ? " " + f.args : ""),
     parse: (c) => { let m = c.match(/^java -jar (\S+)(?:\s+([\s\S]+))?$/); if (m) return { jar: m[1], mainclass: "", args: (m[2] || "").trim() }; m = c.match(/^java -cp (\S+) (\S+)(?:\s+([\s\S]+))?$/); if (m) return { jar: m[1], mainclass: m[2], args: (m[3] || "").trim() }; return null; },
-  },
-  sql: {
-    fields: [
-      { k: "client", label: "cb_client", def: "psql -c", ph: "psql -c" },
-      { k: "query", label: "cb_query", area: true, ph: "SELECT count(*) FROM events WHERE day = '{{ logical_date }}'" },
-    ],
-    compose: (f) => `${f.client || "psql -c"} "${(f.query || "").replace(/"/g, '\\"')}"`,
-    parse: (c) => { const m = c.match(/^([\s\S]+?)\s+"([\s\S]*)"$/); if (!m) return null; return { client: m[1], query: m[2].replace(/\\"/g, '"') }; },
   },
 };
 function computeCmdRaw(tk) { const b = CMD_BUILDERS[tk.type]; if (!b) return true; if (!tk.command) return false; return !b.parse(tk.command); }
@@ -643,6 +625,16 @@ function commandFieldHtml(tk) {
       <div class="b-field full"><label>${t("http_headers")}</label><textarea class="hf cmd" data-h="httpHeaders" rows="3" spellcheck="false" placeholder="Authorization: Bearer {{ var.TOKEN }}">${esc(tk.httpHeaders || "")}</textarea><div class="field-hint">${t("http_headers_hint")}</div></div>
       <div class="b-field full"><label>${t("http_body")}</label><textarea class="hf cmd" data-h="httpBody" rows="3" spellcheck="false" placeholder='{"k":"{{ var.X }}"}'>${esc(tk.httpBody || "")}</textarea></div>
       <div class="b-field"><label>${t("http_status")}</label><input class="hf" data-h="httpStatus" value="${esc(tk.httpStatus || "")}" placeholder="200, 201"><div class="field-hint">${t("http_status_hint")}</div></div></div>`;
+  }
+  if (tk.type === "python") {
+    return `<div class="b-field full"><label>${t("t_python")}</label>${chips}
+      <textarea class="tf cmd" data-k="command" rows="8" spellcheck="false" placeholder="import os&#10;print(os.environ['CRONOVA_LOGICAL_DATE'])">${esc(tk.command)}</textarea>
+      <div class="field-hint">${t("python_hint")}</div></div>`;
+  }
+  if (tk.type === "sql") {
+    return `<div class="b-field full"><label>${t("t_sql")}</label>${chips}
+      <div class="b-field"><label>${t("sql_conn")}</label><input class="tf" data-k="conn" value="${esc(tk.conn || "")}" placeholder="warehouse"><div class="field-hint">${t("sql_conn_hint")}</div></div>
+      <textarea class="tf cmd" data-k="command" rows="6" spellcheck="false" placeholder="SELECT count(*) FROM events WHERE day = '{{ params.day }}'">${esc(tk.command)}</textarea></div>`;
   }
   const b = CMD_BUILDERS[tk.type];
   if (cmdRaw || !b) {
@@ -785,6 +777,7 @@ function validateDag() {
   if (new Set(nonEmpty).size !== nonEmpty.length) e.push(t("err_dup"));
   if (D.tasks.some((x) => x.id && x.type !== "http" && !String(x.command).trim())) e.push(t("err_emptycmd"));
   if (D.tasks.some((x) => x.id && x.type === "http" && !String(x.httpUrl || "").trim())) e.push(t("err_httpurl"));
+  if (D.tasks.some((x) => x.id && x.type === "sql" && !String(x.conn || "").trim())) e.push(t("err_sqlconn"));
   if (hasCycle(D.tasks.filter((x) => x.id))) e.push(t("err_cycle"));
   const nurl = (D.dag && D.dag.notify_url || "").trim();
   if (nurl && !/^https?:\/\//i.test(nurl)) e.push(t("err_notify_url"));
@@ -811,6 +804,7 @@ function dagSpecFrom(st) {
         o.http = { method: tk.httpMethod || "GET", url: (tk.httpUrl || "").trim(), headers: parseHeaderLines(tk.httpHeaders), body: tk.httpBody || "", expected_status: parseStatusList(tk.httpStatus) };
       } else {
         o.command = tk.command;
+        if (tk.type === "sql") o.conn = (tk.conn || "").trim();
       }
       return o;
     }),

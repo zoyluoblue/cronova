@@ -28,6 +28,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/zoyluo/cronova/internal/executor"
 	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/operator"
 	"github.com/zoyluo/cronova/internal/scheduler/parser"
 	"github.com/zoyluo/cronova/internal/store"
 )
@@ -1188,13 +1189,26 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	resolve := s.templateResolver(ctx, base, run.Params)
 	env := taskEnv(base, run.Params)
 	command := renderCommand(t.Command, resolve)
-	// Typed operators (http/…) run natively via `<binary> run-op <type>`, reusing the
-	// executor's normal launch/probe/cancel/log path. The spec (templates resolved) is
-	// passed by env, not interpolated into the shell string — no injection.
-	if t.Type == "http" && t.HTTP != nil {
-		blob, _ := json.Marshal(resolveHTTPSpec(*t.HTTP, resolve))
+	// Typed operators (http/python/sql) run natively via `<binary> run-op <type>`,
+	// reusing the executor's normal launch/probe/cancel/log path. The spec (templates
+	// resolved) is passed by env, not interpolated into the shell string — no injection.
+	switch t.Type {
+	case "http":
+		if t.HTTP != nil {
+			blob, _ := json.Marshal(resolveHTTPSpec(*t.HTTP, resolve))
+			env["CRONOVA_OP_SPEC"] = string(blob)
+			command = shellQuote(s.opBinary) + " run-op http"
+		}
+	case "python":
+		// `command` already holds the templated Python code.
+		blob, _ := json.Marshal(map[string]string{"code": command})
 		env["CRONOVA_OP_SPEC"] = string(blob)
-		command = shellQuote(s.opBinary) + " run-op http"
+		command = shellQuote(s.opBinary) + " run-op python"
+	case "sql":
+		// `command` already holds the templated query; build driver+DSN from the conn.
+		blob, _ := json.Marshal(s.sqlOpSpec(ctx, t.Conn, command))
+		env["CRONOVA_OP_SPEC"] = string(blob)
+		command = shellQuote(s.opBinary) + " run-op sql"
 	}
 	spec := executor.Spec{
 		TaskRunID: ti.ExecutorRef,
@@ -1486,6 +1500,21 @@ func resolveHTTPSpec(h model.HTTPSpec, resolve func(string) (string, bool)) mode
 // (the binary path may contain spaces). Embedded single quotes are escaped.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// sqlOpSpec resolves a sql task's connection into a driver+DSN. A resolution
+// failure is carried in the spec's Err (run-op logs it and fails the task) rather
+// than aborting dispatch, so the failure shows up in the task log like any other.
+func (s *Scheduler) sqlOpSpec(ctx context.Context, connID, query string) operator.SQLSpec {
+	c, err := s.store.GetConnection(ctx, connID)
+	if err != nil {
+		return operator.SQLSpec{Query: query, Err: fmt.Sprintf("connection %q not found: %v", connID, err)}
+	}
+	driver, dsn, err := operator.BuildDSN(c)
+	if err != nil {
+		return operator.SQLSpec{Query: query, Err: err.Error()}
+	}
+	return operator.SQLSpec{Driver: driver, DSN: dsn, Query: query}
 }
 
 // templateResolver resolves a placeholder name to its value: base vars first,
