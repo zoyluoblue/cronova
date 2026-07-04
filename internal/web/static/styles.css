@@ -159,7 +159,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 /* status colors are single-sourced from the state vars via color-mix, so both
    themes (and any palette change) fall out of one definition. */
 .s-success { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); } .s-success .d { background: var(--ok); }
-.s-failed { background: color-mix(in srgb, var(--fail) 14%, transparent); color: var(--fail); } .s-failed .d { background: var(--fail); }
+.s-failed, .s-timed_out { background: color-mix(in srgb, var(--fail) 14%, transparent); color: var(--fail); } .s-failed .d, .s-timed_out .d { background: var(--fail); }
 .s-running { background: color-mix(in srgb, var(--run) 14%, transparent); color: var(--run); } .s-running .d { background: var(--run); }
 .s-queued, .s-scheduled, .s-up_for_retry { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); } .s-queued .d, .s-scheduled .d, .s-up_for_retry .d { background: var(--warn); }
 .s-upstream_failed { background: color-mix(in srgb, var(--upstream) 13%, transparent); color: var(--upstream); } .s-upstream_failed .d { background: var(--upstream); }
@@ -168,7 +168,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 /* ---- sparkline ---- */
 .spark { display: flex; align-items: flex-end; gap: 2px; height: 24px; }
 .spark i { width: 6px; border-radius: 2px; display: block; opacity: .9; }
-.spark i.success { background: var(--ok); } .spark i.failed { background: var(--fail); }
+.spark i.success { background: var(--ok); } .spark i.failed, .spark i.timed_out { background: var(--fail); }
 .spark i.running { background: var(--run); } .spark i.queued, .spark i.scheduled, .spark i.up_for_retry { background: var(--warn); }
 .spark i.upstream_failed { background: var(--upstream); } .spark i.skipped, .spark i.noruns { background: color-mix(in srgb, var(--skip) 30%, transparent); }
 
@@ -182,7 +182,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .act-tick:hover { opacity: 1; width: 5px; }
 .act-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 7px; }
 .act-tick.a-success { background: var(--ok); }
-.act-tick.a-failed { background: var(--fail); }
+.act-tick.a-failed, .act-tick.a-timed_out { background: var(--fail); }
 .act-tick.a-running { background: var(--run); }
 .act-tick.a-queued, .act-tick.a-scheduled { background: var(--warn); }
 .act-tick.a-cancelled { background: var(--skip); }
@@ -341,7 +341,7 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .gantt-axis { display: flex; justify-content: space-between; padding: 7px 14px; font-size: 11px; color: var(--faint); background: var(--panel-2); border-top: 1px solid var(--line); }
 /* solid state fills — single-sourced from the same state vars as badges/graph */
 .gantt-bar.g-success { background: var(--ok); }
-.gantt-bar.g-failed { background: var(--fail); }
+.gantt-bar.g-failed, .gantt-bar.g-timed_out { background: var(--fail); }
 .gantt-bar.g-running { background: var(--run); animation: pulse 1.6s var(--ease) infinite; }
 .gantt-bar.g-up_for_retry, .gantt-bar.g-queued, .gantt-bar.g-scheduled { background: var(--warn); }
 .gantt-bar.g-upstream_failed { background: var(--upstream); }

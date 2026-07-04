@@ -42,11 +42,12 @@ const (
 	RunSuccess   RunState = "success"
 	RunFailed    RunState = "failed"
 	RunCancelled RunState = "cancelled" // user-initiated stop (distinct from a failure)
+	RunTimedOut  RunState = "timed_out" // exceeded the DAG's dagrun_timeout (distinct from a failure)
 )
 
 // IsTerminal reports whether the run state is final (no further scheduling).
 func (s RunState) IsTerminal() bool {
-	return s == RunSuccess || s == RunFailed || s == RunCancelled
+	return s == RunSuccess || s == RunFailed || s == RunCancelled || s == RunTimedOut
 }
 
 // TaskState is the lifecycle state of a TaskInstance.
@@ -62,12 +63,13 @@ const (
 	TaskUpstreamFailed TaskState = "upstream_failed"
 	TaskSkipped        TaskState = "skipped"
 	TaskCancelled      TaskState = "cancelled" // killed by a run cancellation
+	TaskTimedOut       TaskState = "timed_out" // killed by the run's dagrun_timeout
 )
 
 // IsTerminal reports whether the task state is final (no further transitions).
 func (s TaskState) IsTerminal() bool {
 	switch s {
-	case TaskSuccess, TaskFailed, TaskUpstreamFailed, TaskSkipped, TaskCancelled:
+	case TaskSuccess, TaskFailed, TaskUpstreamFailed, TaskSkipped, TaskCancelled, TaskTimedOut:
 		return true
 	default:
 		return false
@@ -98,9 +100,11 @@ type DAG struct {
 	Owner          string     `json:"owner,omitempty"`   // reserved for future RBAC
 	Project        string     `json:"project,omitempty"` // reserved for future RBAC
 	Tasks          []Task     `json:"tasks,omitempty"`
-	TriggerAfter   []string   `json:"trigger_after,omitempty"` // upstream dag_ids
-	NotifyURL      string     `json:"notify_url,omitempty"`    // webhook POSTed on a notify_on state
-	NotifyOn       []string   `json:"notify_on,omitempty"`     // run states to notify on: "failure", "success"
+	TriggerAfter   []string   `json:"trigger_after,omitempty"`  // upstream dag_ids
+	NotifyURL      string     `json:"notify_url,omitempty"`     // webhook POSTed on a notify_on state
+	NotifyOn       []string   `json:"notify_on,omitempty"`      // run states to notify on: "failure", "success"
+	SLA            int        `json:"sla,omitempty"`            // soft deadline (seconds from run start); breach alerts, run keeps going
+	DagrunTimeout  int        `json:"dagrun_timeout,omitempty"` // hard deadline (seconds from run start); breach kills the run → timed_out
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 	DeletedAt      *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
@@ -115,9 +119,10 @@ type Task struct {
 	Pool        string   `json:"pool"`
 	Priority    int      `json:"priority"`
 	Retries     int      `json:"retries"`
-	RetryDelay  int      `json:"retry_delay"`  // seconds
-	Timeout     int      `json:"timeout"`      // seconds; 0 = no timeout
-	TriggerRule string   `json:"trigger_rule"` // when to run vs. upstream states (default all_success)
+	RetryDelay  int      `json:"retry_delay"`   // seconds
+	Timeout     int      `json:"timeout"`       // execution timeout seconds; 0 = none (kills the attempt)
+	SLA         int      `json:"sla,omitempty"` // soft deadline (seconds from run start); breach alerts only
+	TriggerRule string   `json:"trigger_rule"`  // when to run vs. upstream states (default all_success)
 }
 
 // DagRun is one concrete execution of a DAG, keyed by its logical period.

@@ -184,6 +184,39 @@ notify:
 	}
 }
 
+func TestParseDeadlines(t *testing.T) {
+	raw := []byte(`
+dag_id: deadlines
+sla: 3600
+dagrun_timeout: 7200
+tasks:
+  - id: a
+    command: "echo hi"
+    sla: 600
+`)
+	d, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if d.SLA != 3600 || d.DagrunTimeout != 7200 {
+		t.Errorf("dag sla/timeout = %d/%d", d.SLA, d.DagrunTimeout)
+	}
+	if d.Tasks[0].SLA != 600 {
+		t.Errorf("task sla = %d, want 600", d.Tasks[0].SLA)
+	}
+}
+
+func TestParseRejectsNegativeDeadlines(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte("dag_id: n1\ndagrun_timeout: -1\ntasks:\n  - id: a\n    command: x\n"),
+		[]byte("dag_id: n2\ntasks:\n  - id: a\n    command: x\n    sla: -5\n"),
+	} {
+		if _, err := Parse(raw); err == nil {
+			t.Errorf("negative deadline should be rejected: %s", raw)
+		}
+	}
+}
+
 func TestParseRejectsBadNotify(t *testing.T) {
 	bad := []byte(`
 dag_id: bad

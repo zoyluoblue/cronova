@@ -283,6 +283,7 @@ type editTask struct {
 	Retries     *int     `json:"retries"`     // null => inherit default_retries
 	RetryDelay  *int     `json:"retry_delay"` // null => inherit default
 	Timeout     int      `json:"timeout"`
+	SLA         int      `json:"sla"`
 	TriggerRule string   `json:"trigger_rule"`
 }
 
@@ -307,6 +308,8 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 		d.DefaultRetries = parsed.DefaultRetries
 		d.NotifyURL = parsed.NotifyURL
 		d.NotifyOn = parsed.NotifyOn
+		d.SLA = parsed.SLA
+		d.DagrunTimeout = parsed.DagrunTimeout
 		// Pull the RAW per-task retry pointers so "unset" stays null for the editor.
 		var raw struct {
 			Tasks []struct {
@@ -322,7 +325,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, TriggerRule: tk.TriggerRule}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -446,6 +449,7 @@ type taskSpec struct {
 	Retries     *int     `json:"retries"`
 	RetryDelay  *int     `json:"retry_delay"`
 	Timeout     int      `json:"timeout"`
+	SLA         int      `json:"sla"`
 	TriggerRule string   `json:"trigger_rule"`
 }
 
@@ -460,6 +464,8 @@ type dagSpec struct {
 	TriggerAfter   []string   `json:"trigger_after"`
 	NotifyURL      string     `json:"notify_url"`
 	NotifyOn       []string   `json:"notify_on"` // "failure", "success"
+	SLA            int        `json:"sla"`
+	DagrunTimeout  int        `json:"dagrun_timeout"`
 }
 
 // buildDAG accepts a structured DAG spec from the UI form, renders it to the
@@ -496,6 +502,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		Retries     *int     `yaml:"retries,omitempty"`
 		RetryDelay  *int     `yaml:"retry_delay,omitempty"`
 		Timeout     int      `yaml:"timeout,omitempty"`
+		SLA         int      `yaml:"sla,omitempty"`
 		TriggerRule string   `yaml:"trigger_rule,omitempty"`
 	}
 	type triggerOut struct {
@@ -512,6 +519,8 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		Catchup        bool         `yaml:"catchup"`
 		MaxActiveRuns  int          `yaml:"max_active_runs,omitempty"`
 		DefaultRetries int          `yaml:"default_retries,omitempty"`
+		SLA            int          `yaml:"sla,omitempty"`
+		DagrunTimeout  int          `yaml:"dagrun_timeout,omitempty"`
 		Tasks          []taskOut    `yaml:"tasks"`
 		TriggerAfter   []triggerOut `yaml:"trigger_after,omitempty"`
 		Notify         *notifyOut   `yaml:"notify,omitempty"`
@@ -519,6 +528,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 	out := dagOut{
 		DagID: spec.DagID, Schedule: spec.Schedule, StartDate: spec.StartDate,
 		Catchup: spec.Catchup, MaxActiveRuns: spec.MaxActiveRuns, DefaultRetries: spec.DefaultRetries,
+		SLA: spec.SLA, DagrunTimeout: spec.DagrunTimeout,
 	}
 	if url := strings.TrimSpace(spec.NotifyURL); url != "" {
 		on := []string{}
@@ -535,7 +545,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		out.Tasks = append(out.Tasks, taskOut{
 			ID: t.ID, Type: t.Type, Command: t.Command, Deps: t.Deps, Pool: t.Pool,
 			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay, Timeout: t.Timeout,
-			TriggerRule: t.TriggerRule,
+			SLA: t.SLA, TriggerRule: t.TriggerRule,
 		})
 	}
 	for _, ta := range spec.TriggerAfter {
@@ -595,14 +605,14 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			case model.RunSuccess:
 				success++
 				terminal++
-			case model.RunFailed:
+			case model.RunFailed, model.RunTimedOut:
 				terminal++
 			}
 		}
 		latest := ""
 		if len(runs) > 0 {
 			latest = string(runs[0].State)
-			if runs[0].State == model.RunFailed {
+			if runs[0].State == model.RunFailed || runs[0].State == model.RunTimedOut {
 				failedDags++
 			}
 		}

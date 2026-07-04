@@ -32,6 +32,7 @@ type taskYAML struct {
 	Retries     *int     `yaml:"retries"`     // pointer: distinguishes "unset" from 0
 	RetryDelay  *int     `yaml:"retry_delay"` // seconds
 	Timeout     int      `yaml:"timeout"`     // seconds
+	SLA         int      `yaml:"sla"`         // seconds from run start (soft alert)
 	TriggerRule string   `yaml:"trigger_rule"`
 }
 
@@ -43,6 +44,8 @@ type dagYAML struct {
 	MaxActiveRuns     int        `yaml:"max_active_runs"`
 	DefaultRetries    int        `yaml:"default_retries"`
 	DefaultRetryDelay int        `yaml:"default_retry_delay"`
+	SLA               int        `yaml:"sla"`            // run soft deadline, seconds from start
+	DagrunTimeout     int        `yaml:"dagrun_timeout"` // run hard deadline, seconds from start
 	Tasks             []taskYAML `yaml:"tasks"`
 	TriggerAfter      []struct {
 		DagID string `yaml:"dag_id"`
@@ -97,6 +100,9 @@ func Parse(raw []byte) (*model.DAG, error) {
 		return nil, fmt.Errorf("dag %q: %w", y.DagID, err)
 	}
 
+	if y.SLA < 0 || y.DagrunTimeout < 0 {
+		return nil, fmt.Errorf("dag %q: sla/dagrun_timeout must be >= 0 seconds", y.DagID)
+	}
 	d := &model.DAG{
 		DagID:          y.DagID,
 		Schedule:       y.Schedule,
@@ -104,6 +110,8 @@ func Parse(raw []byte) (*model.DAG, error) {
 		Catchup:        y.Catchup,
 		MaxActiveRuns:  maxActive,
 		DefaultRetries: y.DefaultRetries,
+		SLA:            y.SLA,
+		DagrunTimeout:  y.DagrunTimeout,
 		DefinitionYAML: string(raw),
 	}
 	for _, ta := range y.TriggerAfter {
@@ -152,10 +160,14 @@ func Parse(raw []byte) (*model.DAG, error) {
 			Retries:     y.DefaultRetries,
 			RetryDelay:  y.DefaultRetryDelay,
 			Timeout:     t.Timeout,
+			SLA:         t.SLA,
 			TriggerRule: orDefault(t.TriggerRule, model.RuleAllSuccess),
 		}
 		if !model.ValidTriggerRule(task.TriggerRule) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid trigger_rule %q", y.DagID, t.ID, t.TriggerRule)
+		}
+		if t.Timeout < 0 || t.SLA < 0 {
+			return nil, fmt.Errorf("dag %q: task %q timeout/sla must be >= 0 seconds", y.DagID, t.ID)
 		}
 		if t.Retries != nil {
 			task.Retries = *t.Retries

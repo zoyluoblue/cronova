@@ -22,7 +22,7 @@ function renderDags() {
   const list = dags.filter((d) => {
     if (query && !d.dag_id.toLowerCase().includes(query)) return false;
     if (filter === "running") return d.latest_state === "running";
-    if (filter === "failed") return d.latest_state === "failed";
+    if (filter === "failed") return d.latest_state === "failed" || d.latest_state === "timed_out";
     if (filter === "paused") return d.paused;
     return true;
   });
@@ -124,8 +124,9 @@ async function showDag(id, tab) {
       max_active_runs: dag.max_active_runs || 1, default_retries: dag.default_retries || 0,
       trigger_after: (dag.trigger_after || []).slice(),
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
+      sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success" })),
+    tasks: (dag.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success" })),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
     // adding tasks); anything else opens on Runs (the monitoring intent).
@@ -166,7 +167,7 @@ function schedSummary(d) {
 // live poll can patch #dh-stats in place without tearing down the whole page.
 function dagHeroStatsHtml() {
   const d = D.dag, last = D.runs[0];
-  const terminal = D.runs.filter((r) => r.state === "success" || r.state === "failed");
+  const terminal = D.runs.filter((r) => r.state === "success" || r.state === "failed" || r.state === "timed_out");
   const okN = terminal.filter((r) => r.state === "success").length;
   return `<div class="dh-stat"><span class="k">${t("dh_last")}</span>
       ${last ? `<span class="v">${badge(last.state)} <span class="muted">${fmt(last.started_at)} · ${dur(last.started_at, last.finished_at)}</span></span>` : `<span class="v muted">${t("dh_never")}</span>`}</div>
@@ -260,6 +261,10 @@ function maybePollDagRuns() {
 
 // --- settings tab: each setting is a one-line summary; click to edit in place
 // (immediate-save preserved — the form appears only while you're changing it) ---
+// collapsed-row summary for a seconds threshold: mono label, or muted "off".
+function secsSummary(sec) {
+  return +sec > 0 ? `<span class="mono">${secsLabel(sec)}</span>` : `<span class="muted">${t("set_off")}</span>`;
+}
 function settingsTabHtml() {
   const d = D.dag;
   const others = [...new Set([...D.allDags.filter((x) => x !== d.dag_id), ...d.trigger_after])];
@@ -297,6 +302,8 @@ function settingsTabHtml() {
     ${row("sched", t("set_sched"), esc(schedSummary(d)), schedSummary(d), `<div id="d-sched"></div>`)}
     ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, String(d.max_active_runs), `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
     ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, String(d.default_retries), `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
+    ${row("sla", t("set_sla"), secsSummary(d.sla), String(d.sla || 0), `<input id="d-sla" type="number" min="0" value="${d.sla || 0}" style="width:110px"> <span class="muted">${t("secs")}</span>`, t("set_sla_hint"))}
+    ${row("timeout", t("set_timeout"), secsSummary(d.dagrun_timeout), String(d.dagrun_timeout || 0), `<input id="d-timeout" type="number" min="0" value="${d.dagrun_timeout || 0}" style="width:110px"> <span class="muted">${t("secs")}</span>`, t("set_timeout_hint"))}
     ${row("deps", t("set_deps"), depsSummary, depsText, depsEditor, t("set_deps_hint"))}
     ${row("notify", t("set_notify"), notifSummary, notifText, notifEditor, t("set_notify_hint"))}
   </div>
@@ -328,6 +335,8 @@ function wireSettingsTab() {
   // "saved" (blur doesn't fire when a <button> is clicked in some browsers).
   const max = $("d-max"); if (max) max.oninput = () => { d.max_active_runs = +max.value || 1; saveDag(); };
   const defr = $("d-defr"); if (defr) defr.oninput = () => { d.default_retries = +defr.value || 0; saveDag(); };
+  const sla = $("d-sla"); if (sla) sla.oninput = () => { d.sla = Math.max(0, +sla.value || 0); saveDag(); };
+  const tmo = $("d-timeout"); if (tmo) tmo.oninput = () => { d.dagrun_timeout = Math.max(0, +tmo.value || 0); saveDag(); };
   body.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
   const nurl = $("d-nurl"); if (nurl) nurl.oninput = () => {
     d.notify_url = nurl.value.trim();
@@ -472,7 +481,7 @@ function renderDagRuns() {
     <tbody>${D.runs.map((r) => {
     const act = !canAct ? "" : runLive(r.state)
       ? `<button class="icon rr-act no-nav" data-rr-cancel="${esc(r.run_id)}" title="${t("run_cancel")}" aria-label="${t("run_cancel")}">✕</button>`
-      : (r.state === "failed" || r.state === "cancelled")
+      : (r.state === "failed" || r.state === "cancelled" || r.state === "timed_out")
         ? `<button class="icon rr-act no-nav" data-rr-retry="${esc(r.run_id)}" title="${t("run_retry")}" aria-label="${t("run_retry")}">↻</button>` : "";
     return `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td class="run-row-act">${act}</td></tr>`;
   }).join("")}</tbody></table>`;
@@ -680,14 +689,15 @@ function renderTaskPage() {
       <div class="tc-grid" style="margin-top:14px">
         <div class="b-field"><label>${t("t_rule")}</label><select class="tf" data-k="trigger_rule">${TRIGGER_RULES.map((r) => `<option value="${r}" ${tk.trigger_rule === r ? "selected" : ""}>${t("tr_" + r)}</option>`).join("")}</select><div class="field-hint" id="rule-desc">${t("trd_" + (tk.trigger_rule || "all_success"))}</div></div>
       </div>
-      <details class="adv-box"${(tk.pool !== "default" || +tk.priority || tk.retries !== "" || tk.retry_delay !== "" || tk.timeout) ? " open" : ""}>
+      <details class="adv-box"${(tk.pool !== "default" || +tk.priority || tk.retries !== "" || tk.retry_delay !== "" || tk.timeout || tk.sla) ? " open" : ""}>
         <summary>${t("adv_options")}</summary>
         <div class="tc-grid" style="margin-top:10px">
           <div class="b-field"><label>${t("t_pool")}</label><input class="tf" data-k="pool" value="${esc(tk.pool)}" placeholder="default"><div class="field-hint">${t("pool_hint")}</div></div>
           <div class="b-field"><label>${t("t_priority")}</label><input class="tf" data-k="priority" type="number" value="${esc(tk.priority)}"></div>
           <div class="b-field"><label>${t("t_retries")}</label><input class="tf" data-k="retries" type="number" min="0" value="${esc(tk.retries)}"></div>
           <div class="b-field"><label>${t("t_retrydelay")}</label><input class="tf" data-k="retry_delay" type="number" min="0" value="${esc(tk.retry_delay)}"></div>
-          <div class="b-field"><label>${t("t_timeout")}</label><input class="tf" data-k="timeout" type="number" min="0" value="${esc(tk.timeout)}"></div>
+          <div class="b-field"><label>${t("t_timeout")}</label><input class="tf" data-k="timeout" type="number" min="0" value="${esc(tk.timeout)}"><div class="field-hint">${t("t_timeout_hint")}</div></div>
+          <div class="b-field"><label>${t("t_sla")}</label><input class="tf" data-k="sla" type="number" min="0" value="${esc(tk.sla)}"><div class="field-hint">${t("t_sla_hint")}</div></div>
         </div>
       </details>
       <div class="b-errors" id="task-errors"></div>
@@ -767,10 +777,11 @@ function dagSpecFrom(st) {
     trigger_after: (d.trigger_after || []).slice(),
     // events are meaningless without a URL — keep the persisted state consistent
     notify_url: (d.notify_url || "").trim(), notify_on: (d.notify_url || "").trim() ? (d.notify_on || []).slice() : [],
+    sla: Math.max(0, +d.sla || 0), dagrun_timeout: Math.max(0, +d.dagrun_timeout || 0),
     tasks: st.tasks.filter((tk) => tk.id).map((tk) => ({
       id: tk.id, type: tk.type, command: tk.command, pool: tk.pool || "default",
       priority: +tk.priority || 0, deps: (tk.deps || []).filter((dep) => st.tasks.some((x) => x.id === dep)),
-      timeout: +tk.timeout || 0, trigger_rule: tk.trigger_rule || "all_success",
+      timeout: Math.max(0, +tk.timeout || 0), sla: Math.max(0, +tk.sla || 0), trigger_rule: tk.trigger_rule || "all_success",
       retries: tk.retries === "" || tk.retries == null ? null : +tk.retries,
       retry_delay: tk.retry_delay === "" || tk.retry_delay == null ? null : +tk.retry_delay,
     })),
@@ -829,8 +840,8 @@ async function flushSave() {
 
 // ---- run detail ----
 let runPoll = null, runPollGen = 0, runTab = "instances", runDag = null;
-const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1, cancelled: 1 };
-const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1 }; // states a per-task retry clears
+const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1, cancelled: 1, timed_out: 1 };
+const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1, timed_out: 1 }; // states a per-task retry clears
 const runLive = (s) => s === "queued" || s === "running";
 
 async function showRun(runID) {
@@ -881,7 +892,7 @@ function startRunPoll(runID, gen) {
     if (!runLive(data.run.state)) {
       clearInterval(p);
       const st = data.run.state;
-      toast(st === "success" ? t("run_done_ok") : st === "cancelled" ? t("run_cancelled_toast") : t("run_done_fail"), st === "success" ? "ok" : st === "cancelled" ? "info" : "fail");
+      toast(st === "success" ? t("run_done_ok") : st === "cancelled" ? t("run_cancelled_toast") : st === "timed_out" ? t("run_done_timeout") : t("run_done_fail"), st === "success" ? "ok" : st === "cancelled" ? "info" : "fail");
     }
   }, 2000);
   runPoll = p;

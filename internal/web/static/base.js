@@ -36,7 +36,7 @@ const DICT = {
     no_match: "没有匹配的 DAG", no_dags_title: "还没有 DAG", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
     back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
-    g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败",
+    g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败", run_done_timeout: "运行超时",
     run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
     task_mark: "标记状态", run_mark: "标记运行", mark_skip: "跳过", mark_done_toast: "已标记",
     mark_task_title: (id) => `标记任务“${id}”为?`, mark_task_body: "手动覆盖任务状态。运行中的任务会先被终止;标记成功/跳过会放行被它阻塞的下游。",
@@ -52,6 +52,8 @@ const DICT = {
     set_done: "完成", set_edit: "编辑", set_none: "无", set_sched: "调度", set_max: "最大并发", set_retries: "默认重试", set_deps: "上游依赖",
     set_deps_hint: "上游 DAG 成功后自动触发本 DAG", set_no_deps_avail: "暂无其他 DAG 可选",
     set_notify: "通知", set_notify_hint: "运行结束后向 Webhook 发送 JSON（兼容 Slack/飞书/Discord）", notify_failure: "失败", notify_success: "成功", notify_off: "未选择事件", notify_need_url: "先填写 Webhook URL，再选择触发事件", err_notify_url: "通知 URL 必须以 http:// 或 https:// 开头",
+    set_sla: "SLA（软）", set_sla_hint: "从 run 开始算，超时未完成即告警（继续运行）。0=关闭。需配置通知 Webhook。", set_timeout: "运行超时（硬）", set_timeout_hint: "从 run 开始算，超时则强制失败并杀掉运行中任务 → timed_out。0=关闭。", secs: "秒", set_off: "关闭",
+    t_sla: "任务 SLA（秒）", t_sla_hint: "从 run 开始算，此任务超时未完成即告警。0=关闭。", t_timeout_hint: "单次执行超时即杀（秒）。0=不限。",
     danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
     nd_more: "调度与更多选项", nd_less: "收起",
     nav_resources: "变量 & 连接",
@@ -133,7 +135,7 @@ const DICT = {
     no_match: "No matching DAGs", no_dags_title: "No DAGs yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
     back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
-    g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed",
+    g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed", run_done_timeout: "Run timed out",
     run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
     task_mark: "Mark state", run_mark: "Mark run", mark_skip: "Skip", mark_done_toast: "Marked",
     mark_task_title: (id) => `Mark task “${id}” as?`, mark_task_body: "Manually override the task state. A running task is stopped first; marking success/skip releases downstream tasks it was blocking.",
@@ -149,6 +151,8 @@ const DICT = {
     set_done: "Done", set_edit: "Edit", set_none: "None", set_sched: "Schedule", set_max: "Max active runs", set_retries: "Default retries", set_deps: "Upstream DAGs",
     set_deps_hint: "Triggered automatically after these DAGs succeed", set_no_deps_avail: "No other DAGs available",
     set_notify: "Notifications", set_notify_hint: "POST a JSON webhook when a run finishes (Slack/Feishu/Discord compatible)", notify_failure: "Failure", notify_success: "Success", notify_off: "No events selected", notify_need_url: "Enter a webhook URL first, then pick events", err_notify_url: "Notify URL must start with http:// or https://",
+    set_sla: "SLA (soft)", set_sla_hint: "From run start; alert if not finished in time (run keeps going). 0 = off. Needs a notify webhook.", set_timeout: "Run timeout (hard)", set_timeout_hint: "From run start; on breach the run is force-failed and running tasks killed → timed_out. 0 = off.", secs: "sec", set_off: "off",
+    t_sla: "Task SLA (sec)", t_sla_hint: "From run start; alert if this task hasn't finished in time. 0 = off.", t_timeout_hint: "Kill a single execution after this many seconds. 0 = none.",
     danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
     nd_more: "Schedule & more options", nd_less: "Hide",
     nav_resources: "Variables & Connections",
@@ -222,8 +226,8 @@ const DICT = {
   },
 };
 const STATE = {
-  zh: { success: "成功", failed: "失败", running: "运行中", queued: "排队", scheduled: "待运行", up_for_retry: "重试中", upstream_failed: "上游失败", skipped: "跳过", cancelled: "已取消", "": "未运行", none: "未运行" },
-  en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", cancelled: "cancelled", "": "no runs", none: "no runs" },
+  zh: { success: "成功", failed: "失败", running: "运行中", queued: "排队", scheduled: "待运行", up_for_retry: "重试中", upstream_failed: "上游失败", skipped: "跳过", cancelled: "已取消", timed_out: "超时", "": "未运行", none: "未运行" },
+  en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", cancelled: "cancelled", timed_out: "timed out", "": "no runs", none: "no runs" },
 };
 const TYPEL = {
   zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件" },
@@ -346,6 +350,15 @@ function pickDialog(title, body, options) {
 function dur(a, b) { if (!a) return "—"; const ms = (b ? new Date(b) : new Date()) - new Date(a); if (ms < 0) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
 function badge(s) { const k = s || "none"; return `<span class="badge s-${k}"><span class="d"></span>${stateLabel(s)}</span>`; }
 function closeLog() { if (logES) { logES.close(); logES = null; } }
+// human label for a seconds threshold (SLA / timeout); 0 => "off".
+function secsLabel(sec) {
+  sec = +sec || 0;
+  if (sec <= 0) return t("set_off");
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m" + (sec % 60 ? (sec % 60) + "s" : "");
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h + "h" + (m ? m + "m" : "");
+}
 // compact duration label from a millisecond count (dashboard sparkline + activity)
 function fmtMs(ms) { if (!ms || ms < 0) return "—"; if (ms < 1000) return `${ms}ms`; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
 function sparkline(points, scaleMs) {
@@ -379,6 +392,7 @@ function colorForState(s) {
     success: tint("--ok", 15), failed: tint("--fail", 16), running: tint("--run", 16),
     up_for_retry: tint("--warn", 16), queued: tint("--warn", 12), scheduled: tint("--warn", 10),
     upstream_failed: tint("--upstream", 12), skipped: tint("--skip", 18), cancelled: tint("--skip", 22),
+    timed_out: tint("--fail", 20),
   };
   return m[s] || ["var(--panel-2)", "var(--line-2)"]; // neutral: follows theme
 }

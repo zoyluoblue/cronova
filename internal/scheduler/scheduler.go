@@ -65,6 +65,7 @@ type Scheduler struct {
 	// wedging the run terminal while a just-released task sits scheduled.
 	finalizeMu     sync.Mutex
 	notifySuppress map[string]bool // run ids whose next (mark-driven) re-finalize must not re-notify
+	slaAlerted     map[string]bool // dedup keys ("run" / "run/task") already SLA-alerted, cleared at finalize
 
 	bootTime time.Time
 	inflight sync.WaitGroup
@@ -93,6 +94,7 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 		schedules:      map[string]cron.Schedule{},
 		notifyClient:   newNotifyClient(opts.AllowPrivateNotifyTargets),
 		notifySuppress: map[string]bool{},
+		slaAlerted:     map[string]bool{},
 		bootTime:       time.Now().UTC(),
 	}
 }
@@ -366,6 +368,7 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 			s.log.Error("cancel task", "ti", ti.ID, "err", err)
 		}
 	}
+	s.clearSLAKeys(runID) // cancelling is a terminal transition — drop any SLA-dedup entries
 	s.log.Info("run cancelled", "run", runID)
 	return nil
 }
@@ -405,7 +408,7 @@ func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 			continue // orphan instance (task removed from the DAG since the run)
 		}
 		switch ti.State {
-		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled:
+		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled, model.TaskTimedOut:
 			for id := range downstreamClosure(d.Tasks, ti.TaskID) {
 				if valid[id] {
 					ids[id] = true
@@ -489,11 +492,9 @@ func (s *Scheduler) MarkTask(ctx context.Context, runID, taskID string, target m
 	// the re-finalize's notify — the operator already saw this run finish once.
 	if run.State.IsTerminal() {
 		s.notifySuppress[runID] = true
-		started := run.StartedAt
-		if started == nil {
-			started = &now
-		}
-		if err := s.store.UpdateDagRunState(ctx, runID, model.RunRunning, started, nil); err != nil {
+		// reset the clock (see clearAndReactivate): a reactivated run is a fresh
+		// deadline window, else a timed_out run marked+reactivated re-times-out at once.
+		if err := s.store.UpdateDagRunState(ctx, runID, model.RunRunning, &now, nil); err != nil {
 			return err
 		}
 	}
@@ -627,13 +628,13 @@ func (s *Scheduler) clearAndReactivate(ctx context.Context, run *model.DagRun, t
 			return err
 		}
 	}
-	started := run.StartedAt
-	if started == nil {
-		now := time.Now().UTC()
-		started = &now
-	}
+	// Restart the clock: a reactivated run is a fresh execution window, so SLA and
+	// dagrun_timeout measure from now — otherwise a run that already breached its
+	// deadline (e.g. a timed_out run being retried) would re-timeout on the very next
+	// tick and never make progress.
+	now := time.Now().UTC()
 	// finished_at cleared → the run is active again and processActiveRuns picks it up.
-	return s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, started, nil)
+	return s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, &now, nil)
 }
 
 // downstreamClosure returns taskID plus every task transitively downstream of it.
@@ -962,6 +963,100 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		}
 		if final == model.RunSuccess {
 			s.triggerDownstreams(ctx, run)
+		}
+		s.clearSLAKeys(run.RunID)
+	} else {
+		// still running: enforce the run's dagrun_timeout (hard) and SLA (soft).
+		s.enforceDeadlines(ctx, d, run, tis)
+	}
+	return nil
+}
+
+// enforceDeadlines checks a still-running run against its dagrun_timeout (hard
+// kill) and SLA thresholds (soft alert), all measured from run start. Alerts fire
+// at most once per run/task (deduped in slaAlerted). Called under finalizeMu.
+func (s *Scheduler) enforceDeadlines(ctx context.Context, d *model.DAG, run *model.DagRun, tis []*model.TaskInstance) {
+	if run.StartedAt == nil {
+		return // never left the queue — nothing to measure from yet
+	}
+	elapsed := time.Now().UTC().Sub(*run.StartedAt)
+	if d.DagrunTimeout > 0 && elapsed >= time.Duration(d.DagrunTimeout)*time.Second {
+		s.timeoutRun(ctx, d, run, tis, elapsed)
+		return // run is now terminal
+	}
+	if d.SLA > 0 && elapsed >= time.Duration(d.SLA)*time.Second && !s.slaAlerted[run.RunID] {
+		s.slaAlerted[run.RunID] = true
+		s.log.Warn("run SLA missed", "run", run.RunID, "sla_sec", d.SLA, "elapsed", elapsed.String())
+		s.notifyDeadline(d, run, "sla_miss", "", d.SLA, elapsed)
+	}
+	// task-level SLA: a still-pending task past its deadline (from run start).
+	for _, t := range d.Tasks {
+		if t.SLA <= 0 || elapsed < time.Duration(t.SLA)*time.Second {
+			continue
+		}
+		key := run.RunID + "\x00" + t.ID
+		if s.slaAlerted[key] {
+			continue
+		}
+		ti := findTI(tis, t.ID)
+		if ti == nil || ti.State.IsTerminal() {
+			continue // not created yet, or already done — no miss
+		}
+		s.slaAlerted[key] = true
+		s.log.Warn("task SLA missed", "run", run.RunID, "task", t.ID, "sla_sec", t.SLA)
+		s.notifyDeadline(d, run, "task_sla_miss", t.ID, t.SLA, elapsed)
+	}
+}
+
+// timeoutRun hard-fails a run past its dagrun_timeout: kill running tasks, mark
+// every non-terminal task timed_out, set the run timed_out, and alert. Mirrors
+// CancelRun's kill pattern; called under finalizeMu.
+func (s *Scheduler) timeoutRun(ctx context.Context, d *model.DAG, run *model.DagRun, tis []*model.TaskInstance, elapsed time.Duration) {
+	fin := time.Now().UTC()
+	if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunTimedOut, run.StartedAt, &fin); err != nil {
+		s.log.Error("timeout run", "run", run.RunID, "err", err)
+		return
+	}
+	for _, ti := range tis {
+		if ti.State.IsTerminal() {
+			continue
+		}
+		if ti.ExecutorRef != "" {
+			_ = s.exec.Cancel(ctx, ti.ExecutorRef)
+		}
+		ti.State = model.TaskTimedOut
+		ti.FinishedAt = &fin
+		// Guarded (unlike CancelRun's override): if the task's poll goroutine
+		// finalized it to a real terminal state between the snapshot and here, that
+		// genuine outcome wins — we don't relabel a just-succeeded task timed_out.
+		if _, err := s.store.UpdateTaskInstanceGuarded(ctx, ti, ti.ExecutorRef); err != nil {
+			s.log.Error("timeout task", "ti", ti.ID, "err", err)
+		}
+	}
+	s.log.Warn("run timed out", "run", run.RunID, "dagrun_timeout_sec", d.DagrunTimeout, "elapsed", elapsed.String())
+	after, _ := s.store.ListTaskInstances(ctx, run.RunID)
+	runCopy := *run
+	runCopy.State = model.RunTimedOut
+	s.notifyRun(d, &runCopy, model.RunTimedOut, fin, after)
+	s.clearSLAKeys(run.RunID)
+}
+
+// clearSLAKeys drops a run's SLA-dedup entries once it finalizes (bounded growth).
+func (s *Scheduler) clearSLAKeys(runID string) {
+	delete(s.slaAlerted, runID)
+	prefix := runID + "\x00"
+	for k := range s.slaAlerted {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.slaAlerted, k)
+		}
+	}
+}
+
+// findTI returns the task instance for taskID, or nil.
+func findTI(tis []*model.TaskInstance, taskID string) *model.TaskInstance {
+	for _, ti := range tis {
+		if ti.TaskID == taskID {
+			return ti
 		}
 	}
 	return nil

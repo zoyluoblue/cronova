@@ -19,15 +19,18 @@ import (
 // human-readable summary so Slack/Feishu/Discord incoming webhooks render it
 // directly; the structured fields serve custom endpoints. All times are UTC.
 type notifyPayload struct {
-	Text        string   `json:"text"`
-	DagID       string   `json:"dag_id"`
-	RunID       string   `json:"run_id"`
-	State       string   `json:"state"`
-	LogicalDate string   `json:"logical_date"`
-	StartedAt   string   `json:"started_at,omitempty"`
-	FinishedAt  string   `json:"finished_at,omitempty"`
-	DurationMS  int64    `json:"duration_ms"`
-	FailedTasks []string `json:"failed_tasks,omitempty"` // tasks that did not succeed (failed/upstream_failed/cancelled)
+	Text         string   `json:"text"`
+	DagID        string   `json:"dag_id"`
+	RunID        string   `json:"run_id"`
+	State        string   `json:"state"`
+	LogicalDate  string   `json:"logical_date"`
+	StartedAt    string   `json:"started_at,omitempty"`
+	FinishedAt   string   `json:"finished_at,omitempty"`
+	DurationMS   int64    `json:"duration_ms"`
+	FailedTasks  []string `json:"failed_tasks,omitempty"`  // tasks that did not succeed (failed/upstream_failed/cancelled/timed_out)
+	TaskID       string   `json:"task_id,omitempty"`       // set for a task-level SLA miss
+	ThresholdSec int      `json:"threshold_sec,omitempty"` // the SLA/timeout deadline that was breached
+	ElapsedMS    int64    `json:"elapsed_ms,omitempty"`    // how long the run had been going at breach time
 }
 
 // notifyTargetBlocked reports whether an outbound webhook must NOT connect to ip.
@@ -105,27 +108,32 @@ func newNotifyClient(allowPrivate bool) *http.Client {
 // state matches the DAG's notify_on list. It never blocks the scheduler tick;
 // delivery is tracked by s.inflight so a graceful shutdown waits for it.
 func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunState, finishedAt time.Time, tis []*model.TaskInstance) {
-	if d.NotifyURL == "" || len(d.NotifyOn) == 0 {
+	if d.NotifyURL == "" {
 		return
 	}
 	ev := ""
 	switch final {
 	case model.RunSuccess:
 		ev = "success"
-	case model.RunFailed, model.RunCancelled:
-		ev = "failure" // a cancelled/failed run is a non-success for alerting purposes
+	case model.RunFailed, model.RunCancelled, model.RunTimedOut:
+		ev = "failure" // cancelled/failed/timed-out are all non-success for alerting
 	}
 	if ev == "" {
 		return
 	}
-	want := false
-	for _, e := range d.NotifyOn {
-		if e == ev {
-			want = true
+	// A dagrun_timeout kill always alerts when a webhook is configured — the operator
+	// opted in by setting the timeout, same as SLA — so it is NOT gated by notify_on
+	// (unlike a normal success/failure finalize, which requires the event to be listed).
+	if final != model.RunTimedOut {
+		want := false
+		for _, e := range d.NotifyOn {
+			if e == ev {
+				want = true
+			}
 		}
-	}
-	if !want {
-		return
+		if !want {
+			return
+		}
 	}
 
 	// Name every task that did not succeed so a failure alert points somewhere.
@@ -134,7 +142,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	var affected []string
 	for _, ti := range tis {
 		switch ti.State {
-		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled:
+		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskCancelled, model.TaskTimedOut:
 			affected = append(affected, ti.TaskID)
 		}
 	}
@@ -156,11 +164,37 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	// Snapshot everything the goroutine needs so it never touches run/d/tis after
-	// processRun returns and their memory may be reused. Log only the host, never
-	// the full URL — for Slack/Feishu/Discord the delivery secret is in the path.
-	url, runID, host := d.NotifyURL, run.RunID, notifyHost(d.NotifyURL)
+	s.postNotify(d.NotifyURL, p)
+}
 
+// notifyDeadline fires a soft SLA-miss alert mid-run (the run keeps going). kind
+// is "sla_miss" (run) or "task_sla_miss" (a specific task); taskID is set only for
+// the latter. It fires whenever a webhook is configured — setting the threshold is
+// itself the opt-in — independent of notify_on (which gates finalize alerts).
+func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID string, thresholdSec int, elapsed time.Duration) {
+	if d.NotifyURL == "" {
+		return
+	}
+	summary := fmt.Sprintf("cronova · %s · run %s missed SLA (%ds)", d.DagID, run.RunID, thresholdSec)
+	if taskID != "" {
+		summary = fmt.Sprintf("cronova · %s · run %s task %s missed SLA (%ds)", d.DagID, run.RunID, taskID, thresholdSec)
+	}
+	p := notifyPayload{
+		Text: summary, DagID: d.DagID, RunID: run.RunID, State: kind, TaskID: taskID,
+		LogicalDate:  run.LogicalDate.UTC().Format(time.RFC3339),
+		ThresholdSec: thresholdSec, ElapsedMS: elapsed.Milliseconds(),
+	}
+	if run.StartedAt != nil {
+		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
+	}
+	s.postNotify(d.NotifyURL, p)
+}
+
+// postNotify delivers a payload to the webhook asynchronously (best-effort,
+// tracked by s.inflight for graceful shutdown). It snapshots everything the
+// goroutine needs and logs only the host — never the secret-bearing URL.
+func (s *Scheduler) postNotify(rawURL string, p notifyPayload) {
+	url, runID, host, state := rawURL, p.RunID, notifyHost(rawURL), p.State
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
@@ -182,7 +216,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 		if resp.StatusCode >= 300 {
 			s.log.Warn("notify non-2xx", "run", runID, "host", host, "status", resp.StatusCode)
 		} else {
-			s.log.Info("notify sent", "run", runID, "state", final)
+			s.log.Info("notify sent", "run", runID, "state", state)
 		}
 	}()
 }

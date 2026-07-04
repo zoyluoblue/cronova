@@ -522,7 +522,7 @@ WHERE id=?`,
 	return nil
 }
 
-const terminalTaskStates = `'success','failed','upstream_failed','skipped','cancelled'`
+const terminalTaskStates = `'success','failed','upstream_failed','skipped','cancelled','timed_out'`
 
 // UpdateTaskInstanceGuarded applies the update only if the row still carries
 // expectRef AND is not already terminal — an optimistic CAS. It lets a polling
