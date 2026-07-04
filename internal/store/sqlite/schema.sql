@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS dag_dependencies (
     PRIMARY KEY (upstream_dag, downstream_dag)
 );
 
+-- Reserved for a future event-driven trigger queue (source/event_key/consumed).
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
@@ -64,6 +65,19 @@ CREATE TABLE IF NOT EXISTS events (
     consumed    INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Operations audit trail: who (actor) did what (action) to which target, when.
+-- actor is a username, or 'anonymous' when auth is disabled.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actor    TEXT NOT NULL DEFAULT '',
+    action   TEXT NOT NULL,
+    target   TEXT NOT NULL DEFAULT '',
+    detail   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target);
 
 -- Console/API accounts. Passwords are PBKDF2-HMAC-SHA256 hashes (never plaintext). role is
 -- 'admin' (full access) or 'viewer' (read-only). Auth is opt-in (auth.enabled).

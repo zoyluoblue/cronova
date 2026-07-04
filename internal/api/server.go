@@ -47,12 +47,13 @@ type Info struct {
 
 // Server holds the API dependencies.
 type Server struct {
-	store  store.Store
-	eng    Engine
-	logDir string
-	web    fs.FS
-	info   Info
-	auth   AuthConfig
+	store   store.Store
+	eng     Engine
+	logDir  string
+	web     fs.FS
+	info    Info
+	auth    AuthConfig
+	started time.Time // for /metrics uptime
 }
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
@@ -62,7 +63,7 @@ func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Serve
 		// honest label for "what timezone do cron fields mean".
 		info.TZ = "UTC"
 	}
-	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info}
+	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info, started: time.Now()}
 }
 
 // SetAuth enables/configures authentication. Must be called before Handler().
@@ -109,6 +110,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("GET /metrics", s.metrics) // Prometheus; unauthenticated (non-/api/ path)
+	mux.HandleFunc("GET /api/audit", s.listAudit)
 	if s.web != nil {
 		// no-cache: embedded assets share a fixed modtime, so without this a
 		// browser can serve a stale console after the binary is upgraded.
@@ -343,6 +346,7 @@ func (s *Server) deleteDAG(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err) // ErrNotFound -> 404, ErrActiveRuns -> 409
 		return
 	}
+	s.audit(r, "delete_dag", r.PathValue("id"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
@@ -359,6 +363,7 @@ func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "trigger", r.PathValue("id"), runID)
 	writeJSON(w, http.StatusOK, map[string]string{"run_id": runID})
 }
 
@@ -367,6 +372,7 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "cancel", r.PathValue("runID"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
 }
 
@@ -375,6 +381,7 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "retry_run", r.PathValue("runID"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"retried": true})
 }
 
@@ -383,6 +390,7 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "retry_task", r.PathValue("runID"), r.PathValue("taskID"))
 	writeJSON(w, http.StatusOK, map[string]bool{"retried": true})
 }
 
@@ -409,6 +417,7 @@ func (s *Server) markTask(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "mark_task", r.PathValue("runID"), r.PathValue("taskID")+"="+state)
 	writeJSON(w, http.StatusOK, map[string]bool{"marked": true})
 }
 
@@ -422,6 +431,7 @@ func (s *Server) markRun(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "mark_run", r.PathValue("runID"), state)
 	writeJSON(w, http.StatusOK, map[string]bool{"marked": true})
 }
 
@@ -436,6 +446,7 @@ func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error()) // YAML/validation errors are client errors
 		return
 	}
+	s.audit(r, "create_dag", dagID, "")
 	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
 }
 
@@ -487,10 +498,18 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Audit a genuinely NEW dag as create_dag; an edit (the console re-POSTs this on
+	// every debounced save) is not audited, so the trail stays meaningful, not spammed.
+	// A soft-deleted id counts as new — CreateDAG revives it (deleted_at cleared).
+	existing, existsErr := s.store.GetDAG(r.Context(), spec.DagID)
+	isNew := errors.Is(existsErr, store.ErrNotFound) || (existing != nil && existing.DeletedAt != nil)
 	dagID, err := s.eng.CreateDAG(r.Context(), string(yml))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if isNew {
+		s.audit(r, "create_dag", dagID, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
 }
@@ -751,6 +770,11 @@ func (s *Server) pauseDAG(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	action := "unpause"
+	if paused {
+		action = "pause"
+	}
+	s.audit(r, action, r.PathValue("id"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"paused": paused})
 }
 

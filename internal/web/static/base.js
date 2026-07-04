@@ -56,7 +56,9 @@ const DICT = {
     t_sla: "任务 SLA（秒）", t_sla_hint: "从 run 开始算，此任务超时未完成即告警。0=关闭。", t_timeout_hint: "单次执行超时即杀（秒）。0=不限。",
     danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
     nd_more: "调度与更多选项", nd_less: "收起",
-    nav_resources: "变量 & 连接",
+    nav_resources: "变量 & 连接", nav_audit: "审计",
+    audit_sub: "运维操作记录:谁在何时对哪个 DAG/运行做了什么。", audit_empty: "暂无操作记录", au_time: "时间", au_actor: "操作人", au_action: "操作", au_target: "对象",
+    act_trigger: "触发", act_cancel: "取消", act_retry_run: "重跑运行", act_retry_task: "重跑任务", act_mark_task: "标记任务", act_mark_run: "标记运行", act_save_dag: "保存 DAG", act_create_dag: "创建 DAG", act_delete_dag: "删除 DAG", act_pause: "暂停", act_unpause: "恢复",
     res_vars: "变量", res_conns: "连接",
     res_sub: "跨任务共享的配置。命令里用 {{ var.KEY }} / {{ conn.ID.字段 }} 引用，触发时用 {{ params.KEY }}。",
     v_key: "变量名", v_value: "值", v_add: "添加变量", v_none: "还没有变量", v_save: "保存",
@@ -158,7 +160,9 @@ const DICT = {
     t_sla: "Task SLA (sec)", t_sla_hint: "From run start; alert if this task hasn't finished in time. 0 = off.", t_timeout_hint: "Kill a single execution after this many seconds. 0 = none.",
     danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
     nd_more: "Schedule & more options", nd_less: "Hide",
-    nav_resources: "Variables & Connections",
+    nav_resources: "Variables & Connections", nav_audit: "Audit",
+    audit_sub: "Operations log: who did what to which DAG/run, and when.", audit_empty: "No operations logged yet", au_time: "Time", au_actor: "Actor", au_action: "Action", au_target: "Target",
+    act_trigger: "trigger", act_cancel: "cancel", act_retry_run: "retry run", act_retry_task: "retry task", act_mark_task: "mark task", act_mark_run: "mark run", act_save_dag: "save DAG", act_create_dag: "create DAG", act_delete_dag: "delete DAG", act_pause: "pause", act_unpause: "unpause",
     res_vars: "Variables", res_conns: "Connections",
     res_sub: "Config shared across tasks. Reference in commands as {{ var.KEY }} / {{ conn.ID.field }}, or {{ params.KEY }} at trigger time.",
     v_key: "Key", v_value: "Value", v_add: "Add variable", v_none: "No variables yet", v_save: "Save",
@@ -543,6 +547,7 @@ function applyRoute() {
   if (seg[0] === "pools") return showPools();
   if (seg[0] === "resources") return showResources();
   if (seg[0] === "graph") return showGraph();
+  if (seg[0] === "audit") return showAudit();
   if (seg[0] === "run" && seg[1]) return showRun(seg[1]);
   if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {
     return showDag(seg[1]).then(() => { if (D && D.dag.dag_id === seg[1] && D.tasks.some((x) => x.id === seg[3])) showTask(seg[1], seg[3]); });
@@ -666,7 +671,7 @@ function startApp() {
 let lastNavLabel = null;
 function setNav(navKey, crumb) {
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
-  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : "DAGs");
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : navKey === "audit" ? t("nav_audit") : "DAGs");
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
   // search stays visible everywhere now (global jump-to-DAG), not just the dashboard
@@ -696,5 +701,6 @@ function setLang(l) {
   else if (view === "pools") showPools();
   else if (view === "resources") renderResources(); // from in-memory RES, no refetch
   else if (view === "graph") showGraph();
+  else if (view === "audit") showAudit();
 }
 

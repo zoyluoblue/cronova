@@ -1107,6 +1107,25 @@ async function showPools() {
   $("addp").onclick = () => save($("np").value.trim(), +$("ns").value);
 }
 
+// ---- audit trail (operations log) ----
+// t() returns the key itself when unknown, so guard: show the raw action verb
+// for an action that has no act_* label rather than the literal "act_foo".
+function auditActionLabel(a) { const v = t("act_" + a); return v === "act_" + a ? a : v; }
+function auditRows(entries) {
+  return entries.map((e) => `<tr><td style="font-size:12.5px">${fmt(e.ts)}</td><td class="mono">${esc(e.actor)}</td><td><span class="tag">${esc(auditActionLabel(e.action))}</span></td><td class="mono">${esc(e.target || "—")}${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</td></tr>`).join("");
+}
+async function showAudit() {
+  view = "audit"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("audit"); setHash("#/audit");
+  let entries = [];
+  try { entries = await api("/api/audit?limit=200"); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  main.innerHTML = `
+    <div class="page-h"><h1>${t("nav_audit")}</h1><span class="num">${entries.length}</span></div>
+    <div class="page-sub">${t("audit_sub")}</div>
+    ${entries.length
+      ? `<table class="tbl"><thead><tr><th style="width:180px">${t("au_time")}</th><th>${t("au_actor")}</th><th>${t("au_action")}</th><th>${t("au_target")}</th></tr></thead><tbody>${auditRows(entries)}</tbody></table>`
+      : `<div class="empty">${t("audit_empty")}</div>`}`;
+}
+
 // ---- variables & connections (UI-managed shared config) ----
 const CFG_KEY_RE = /^[A-Za-z0-9_.-]+$/; // mirrors the backend cfgKeyRe
 let RES = null, resTab = "vars";

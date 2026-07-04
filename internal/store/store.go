@@ -47,6 +47,13 @@ type Store interface {
 	RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, error)
 	UpdateDagRunState(ctx context.Context, runID string, state model.RunState, startedAt, finishedAt *time.Time) error
 	CountActiveRuns(ctx context.Context, dagID string) (int, error)
+	// CountRunsByState returns the all-time run count grouped by state (for /metrics).
+	CountRunsByState(ctx context.Context) (map[model.RunState]int, error)
+
+	// --- audit log ---
+	RecordAudit(ctx context.Context, e *model.AuditEntry) error
+	// ListAudit returns audit entries newest-first; target != "" filters to one dag/run.
+	ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error)
 
 	// --- task instances ---
 	CreateTaskInstance(ctx context.Context, ti *model.TaskInstance) error

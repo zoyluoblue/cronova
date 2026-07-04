@@ -424,3 +424,39 @@ func TestPools(t *testing.T) {
 		t.Errorf("list pools: code=%d body=%v", rec.Code, body)
 	}
 }
+
+func TestMetrics(t *testing.T) {
+	h, _, _, _ := setup(t)
+	rec, body := get(t, h, "GET", "/metrics")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	text, _ := body.(string)
+	for _, want := range []string{"cronova_up 1", "cronova_dags_total 1", `cronova_runs_total{state="success"} 1`, "# TYPE cronova_runs_active gauge"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("/metrics missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestAuditTrail(t *testing.T) {
+	h, _, _, _ := setup(t)
+	// a trigger is recorded (the stub engine succeeds, so the handler audits it)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/dags/etl/trigger", nil))
+	if rec.Code != 200 {
+		t.Fatalf("trigger status = %d", rec.Code)
+	}
+	rec2, body := get(t, h, "GET", "/api/audit")
+	if rec2.Code != 200 {
+		t.Fatalf("audit status = %d", rec2.Code)
+	}
+	entries, _ := body.([]any)
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1: %v", len(entries), body)
+	}
+	e := entries[0].(map[string]any)
+	if e["action"] != "trigger" || e["target"] != "etl" || e["actor"] != "anonymous" {
+		t.Fatalf("audit entry = %v", e)
+	}
+}

@@ -218,6 +218,18 @@ type Connection struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// AuditEntry records one operator action (trigger/cancel/retry/mark/create/
+// delete/pause) for the operations audit trail. Actor is a username, or
+// "anonymous" when auth is disabled.
+type AuditEntry struct {
+	ID     int64     `json:"id"`
+	TS     time.Time `json:"ts"`
+	Actor  string    `json:"actor"`
+	Action string    `json:"action"`
+	Target string    `json:"target,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+}
+
 // Session is an opaque server-side session bound to a user.
 type Session struct {
 	Token     string    `json:"-"`

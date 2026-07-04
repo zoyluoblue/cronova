@@ -878,3 +878,65 @@ func (s *Store) DeleteConnection(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// CountRunsByState returns the all-time run count grouped by state (for /metrics).
+func (s *Store) CountRunsByState(ctx context.Context) (map[model.RunState]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT state, COUNT(*) FROM dag_runs GROUP BY state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[model.RunState]int{}
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err != nil {
+			return nil, err
+		}
+		out[model.RunState(st)] = n
+	}
+	return out, rows.Err()
+}
+
+// RecordAudit appends one entry to the operations audit trail.
+func (s *Store) RecordAudit(ctx context.Context, e *model.AuditEntry) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (ts, actor, action, target, detail) VALUES (?,?,?,?,?)`,
+		fmtTime(time.Now().UTC()), e.Actor, e.Action, e.Target, e.Detail)
+	return err
+}
+
+// ListAudit returns audit entries newest-first (by id); target != "" filters to
+// one dag/run. limit is clamped to [1,500] (default 100).
+func (s *Store) ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if target != "" {
+		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log WHERE target=? ORDER BY id DESC LIMIT ?`, target, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log ORDER BY id DESC LIMIT ?`, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.AuditEntry
+	for rows.Next() {
+		var e model.AuditEntry
+		var ts string
+		if err := rows.Scan(&e.ID, &ts, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, err
+		}
+		e.TS = parseLoose(ts)
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
