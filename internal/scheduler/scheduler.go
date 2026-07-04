@@ -57,6 +57,7 @@ type Scheduler struct {
 	schedules map[string]cron.Schedule
 
 	notifyClient *http.Client // hardened outbound client for notify webhooks
+	opBinary     string       // path to this binary, used to run typed operators (`<opBinary> run-op ...`)
 
 	// finalizeMu serializes a tick's processRun against the manual mark ops
 	// (MarkTask/MarkRun), which run on API goroutines. Without it the tick can
@@ -85,6 +86,10 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
+	opBinary, _ := os.Executable() // for `run-op` typed operators; falls back to "cronova" on PATH
+	if opBinary == "" {
+		opBinary = "cronova"
+	}
 	return &Scheduler{
 		store:          st,
 		exec:           ex,
@@ -93,6 +98,7 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 		dags:           map[string]*model.DAG{},
 		schedules:      map[string]cron.Schedule{},
 		notifyClient:   newNotifyClient(opts.AllowPrivateNotifyTargets),
+		opBinary:       opBinary,
 		notifySuppress: map[string]bool{},
 		slaAlerted:     map[string]bool{},
 		bootTime:       time.Now().UTC(),
@@ -1179,11 +1185,22 @@ func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Tas
 // and recovery re-attaches to it on restart.
 func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance) {
 	base := templateVars(run, t, ti.TryNumber)
+	resolve := s.templateResolver(ctx, base, run.Params)
+	env := taskEnv(base, run.Params)
+	command := renderCommand(t.Command, resolve)
+	// Typed operators (http/…) run natively via `<binary> run-op <type>`, reusing the
+	// executor's normal launch/probe/cancel/log path. The spec (templates resolved) is
+	// passed by env, not interpolated into the shell string — no injection.
+	if t.Type == "http" && t.HTTP != nil {
+		blob, _ := json.Marshal(resolveHTTPSpec(*t.HTTP, resolve))
+		env["CRONOVA_OP_SPEC"] = string(blob)
+		command = shellQuote(s.opBinary) + " run-op http"
+	}
 	spec := executor.Spec{
 		TaskRunID: ti.ExecutorRef,
 		Type:      t.Type,
-		Command:   renderCommand(t.Command, s.templateResolver(ctx, base, run.Params)),
-		Env:       taskEnv(base, run.Params),
+		Command:   command,
+		Env:       env,
 		Timeout:   time.Duration(t.Timeout) * time.Second,
 		LogPath:   ti.LogPath,
 	}
@@ -1447,6 +1464,28 @@ func renderCommand(cmd string, resolve func(string) (string, bool)) string {
 		}
 		return m
 	})
+}
+
+// resolveHTTPSpec applies {{ }} templates to an http task's url, header values,
+// and body (the same resolver used for shell commands — var./conn./params./etc).
+func resolveHTTPSpec(h model.HTTPSpec, resolve func(string) (string, bool)) model.HTTPSpec {
+	out := h
+	out.URL = renderCommand(h.URL, resolve)
+	out.Body = renderCommand(h.Body, resolve)
+	if len(h.Headers) > 0 {
+		hdr := make(map[string]string, len(h.Headers))
+		for k, v := range h.Headers {
+			hdr[k] = renderCommand(v, resolve)
+		}
+		out.Headers = hdr
+	}
+	return out
+}
+
+// shellQuote wraps s in single quotes for safe inclusion in an `sh -c` string
+// (the binary path may contain spaces). Embedded single quotes are escaped.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // templateResolver resolves a placeholder name to its value: base vars first,

@@ -274,17 +274,18 @@ func (s *Server) dagGraph(w http.ResponseWriter, r *http.Request) {
 // pointers so an UNSET value (which inherits default_retries) round-trips as null
 // rather than being collapsed into — and then baked back as — the effective int.
 type editTask struct {
-	ID          string   `json:"id"`
-	Type        string   `json:"type"`
-	Command     string   `json:"command"`
-	Deps        []string `json:"deps,omitempty"`
-	Pool        string   `json:"pool"`
-	Priority    int      `json:"priority"`
-	Retries     *int     `json:"retries"`     // null => inherit default_retries
-	RetryDelay  *int     `json:"retry_delay"` // null => inherit default
-	Timeout     int      `json:"timeout"`
-	SLA         int      `json:"sla"`
-	TriggerRule string   `json:"trigger_rule"`
+	ID          string          `json:"id"`
+	Type        string          `json:"type"`
+	Command     string          `json:"command"`
+	Deps        []string        `json:"deps,omitempty"`
+	Pool        string          `json:"pool"`
+	Priority    int             `json:"priority"`
+	Retries     *int            `json:"retries"`     // null => inherit default_retries
+	RetryDelay  *int            `json:"retry_delay"` // null => inherit default
+	Timeout     int             `json:"timeout"`
+	SLA         int             `json:"sla"`
+	TriggerRule string          `json:"trigger_rule"`
+	HTTP        *model.HTTPSpec `json:"http,omitempty"`
 }
 
 // dagDetail is the editor-facing DAG. The outer Tasks shadows model.DAG.Tasks in
@@ -325,7 +326,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -440,17 +441,18 @@ func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {
 // --- structured DAG builder (UI form -> YAML -> create/update) ---
 
 type taskSpec struct {
-	ID          string   `json:"id"`
-	Type        string   `json:"type"`
-	Command     string   `json:"command"`
-	Deps        []string `json:"deps"`
-	Pool        string   `json:"pool"`
-	Priority    int      `json:"priority"`
-	Retries     *int     `json:"retries"`
-	RetryDelay  *int     `json:"retry_delay"`
-	Timeout     int      `json:"timeout"`
-	SLA         int      `json:"sla"`
-	TriggerRule string   `json:"trigger_rule"`
+	ID          string          `json:"id"`
+	Type        string          `json:"type"`
+	Command     string          `json:"command"`
+	Deps        []string        `json:"deps"`
+	Pool        string          `json:"pool"`
+	Priority    int             `json:"priority"`
+	Retries     *int            `json:"retries"`
+	RetryDelay  *int            `json:"retry_delay"`
+	Timeout     int             `json:"timeout"`
+	SLA         int             `json:"sla"`
+	TriggerRule string          `json:"trigger_rule"`
+	HTTP        *model.HTTPSpec `json:"http,omitempty"`
 }
 
 type dagSpec struct {
@@ -492,10 +494,17 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func specToYAML(spec dagSpec) ([]byte, error) {
+	type httpOut struct {
+		Method         string            `yaml:"method,omitempty"`
+		URL            string            `yaml:"url"`
+		Headers        map[string]string `yaml:"headers,omitempty"`
+		Body           string            `yaml:"body,omitempty"`
+		ExpectedStatus []int             `yaml:"expected_status,omitempty"`
+	}
 	type taskOut struct {
 		ID          string   `yaml:"id"`
 		Type        string   `yaml:"type,omitempty"`
-		Command     string   `yaml:"command"`
+		Command     string   `yaml:"command,omitempty"`
 		Deps        []string `yaml:"deps,omitempty"`
 		Pool        string   `yaml:"pool,omitempty"`
 		Priority    int      `yaml:"priority,omitempty"`
@@ -504,6 +513,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		Timeout     int      `yaml:"timeout,omitempty"`
 		SLA         int      `yaml:"sla,omitempty"`
 		TriggerRule string   `yaml:"trigger_rule,omitempty"`
+		HTTP        *httpOut `yaml:"http,omitempty"`
 	}
 	type triggerOut struct {
 		DagID string `yaml:"dag_id"`
@@ -542,11 +552,18 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		out.Notify = &notifyOut{URL: url, On: on}
 	}
 	for _, t := range spec.Tasks {
-		out.Tasks = append(out.Tasks, taskOut{
+		to := taskOut{
 			ID: t.ID, Type: t.Type, Command: t.Command, Deps: t.Deps, Pool: t.Pool,
 			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay, Timeout: t.Timeout,
 			SLA: t.SLA, TriggerRule: t.TriggerRule,
-		})
+		}
+		if t.Type == "http" && t.HTTP != nil {
+			to.HTTP = &httpOut{
+				Method: t.HTTP.Method, URL: t.HTTP.URL, Headers: t.HTTP.Headers,
+				Body: t.HTTP.Body, ExpectedStatus: t.HTTP.ExpectedStatus,
+			}
+		}
+		out.Tasks = append(out.Tasks, to)
 	}
 	for _, ta := range spec.TriggerAfter {
 		if ta != "" {

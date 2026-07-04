@@ -123,6 +123,20 @@ type Task struct {
 	Timeout     int      `json:"timeout"`       // execution timeout seconds; 0 = none (kills the attempt)
 	SLA         int      `json:"sla,omitempty"` // soft deadline (seconds from run start); breach alerts only
 	TriggerRule string   `json:"trigger_rule"`  // when to run vs. upstream states (default all_success)
+	// HTTP is set when Type == "http": a native HTTP request run via `cronova run-op`
+	// instead of a shell Command. URL/Headers/Body may contain {{ var. }}/{{ conn. }}
+	// templates, resolved server-side at dispatch.
+	HTTP *HTTPSpec `json:"http,omitempty"`
+}
+
+// HTTPSpec configures an http-type task's request. ExpectedStatus lists the
+// status codes counted as success; empty means any 2xx.
+type HTTPSpec struct {
+	Method         string            `json:"method,omitempty"` // default GET
+	URL            string            `json:"url"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Body           string            `json:"body,omitempty"`
+	ExpectedStatus []int             `json:"expected_status,omitempty"`
 }
 
 // DagRun is one concrete execution of a DAG, keyed by its logical period.

@@ -34,6 +34,13 @@ type taskYAML struct {
 	Timeout     int      `yaml:"timeout"`     // seconds
 	SLA         int      `yaml:"sla"`         // seconds from run start (soft alert)
 	TriggerRule string   `yaml:"trigger_rule"`
+	HTTP        *struct {
+		Method         string            `yaml:"method"`
+		URL            string            `yaml:"url"`
+		Headers        map[string]string `yaml:"headers"`
+		Body           string            `yaml:"body"`
+		ExpectedStatus []int             `yaml:"expected_status"`
+	} `yaml:"http"`
 }
 
 type dagYAML struct {
@@ -175,7 +182,21 @@ func Parse(raw []byte) (*model.DAG, error) {
 		if t.RetryDelay != nil {
 			task.RetryDelay = *t.RetryDelay
 		}
-		if task.Command == "" {
+		if task.Type == "http" {
+			// an http task carries a request spec instead of a shell command.
+			if t.HTTP == nil || strings.TrimSpace(t.HTTP.URL) == "" {
+				return nil, fmt.Errorf("dag %q: http task %q requires http.url", y.DagID, t.ID)
+			}
+			for _, code := range t.HTTP.ExpectedStatus {
+				if code < 100 || code > 599 {
+					return nil, fmt.Errorf("dag %q: task %q invalid expected_status %d", y.DagID, t.ID, code)
+				}
+			}
+			task.HTTP = &model.HTTPSpec{
+				Method: t.HTTP.Method, URL: strings.TrimSpace(t.HTTP.URL),
+				Headers: t.HTTP.Headers, Body: t.HTTP.Body, ExpectedStatus: t.HTTP.ExpectedStatus,
+			}
+		} else if task.Command == "" {
 			return nil, fmt.Errorf("dag %q: task %q has empty command", y.DagID, t.ID)
 		}
 		d.Tasks = append(d.Tasks, task)

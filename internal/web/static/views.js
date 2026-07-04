@@ -126,7 +126,8 @@ async function showDag(id, tab) {
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success" })),
+    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+      httpMethod: h.method || "GET", httpUrl: h.url || "", httpHeaders: h.headers ? Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "", httpBody: h.body || "", httpStatus: (h.expected_status || []).join(", ") }; }),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
     // adding tasks); anything else opens on Runs (the monitoring intent).
@@ -631,6 +632,18 @@ function insertAtCaret(el, text) {
 function hlVars(cmd) { return esc(cmd).replace(/\{\{\s*\w+\s*\}\}/g, (m) => `<span class="varhl">${m}</span>`); }
 function commandFieldHtml(tk) {
   const chips = `<div class="varchips" title="${t("var_insert")}">${TEMPLATE_VARS.map((v) => `<span class="chip varchip" data-var="${v}">{{ ${v} }}</span>`).join("")}</div>`;
+  if (tk.type === "http") {
+    const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
+    const m = tk.httpMethod || "GET";
+    return `<div class="b-field full"><label>${t("t_http")}</label>${chips}
+      <div class="tc-grid">
+        <div class="b-field"><label>${t("http_method")}</label><select class="hf" data-h="httpMethod">${methods.map((o) => `<option ${m === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+        <div class="b-field full"><label>${t("http_url")}</label><input class="hf cmd" data-h="httpUrl" value="${esc(tk.httpUrl || "")}" placeholder="https://{{ conn.api.host }}/path"></div>
+      </div>
+      <div class="b-field full"><label>${t("http_headers")}</label><textarea class="hf cmd" data-h="httpHeaders" rows="3" spellcheck="false" placeholder="Authorization: Bearer {{ var.TOKEN }}">${esc(tk.httpHeaders || "")}</textarea><div class="field-hint">${t("http_headers_hint")}</div></div>
+      <div class="b-field full"><label>${t("http_body")}</label><textarea class="hf cmd" data-h="httpBody" rows="3" spellcheck="false" placeholder='{"k":"{{ var.X }}"}'>${esc(tk.httpBody || "")}</textarea></div>
+      <div class="b-field"><label>${t("http_status")}</label><input class="hf" data-h="httpStatus" value="${esc(tk.httpStatus || "")}" placeholder="200, 201"><div class="field-hint">${t("http_status_hint")}</div></div></div>`;
+  }
   const b = CMD_BUILDERS[tk.type];
   if (cmdRaw || !b) {
     const toForm = b ? ` <a class="raw-toggle" id="cmd-toform">${t("cmd_use_form")}</a>` : "";
@@ -663,7 +676,7 @@ function wireCommandField(tk) {
   }
   main.querySelectorAll(".varchip").forEach((c) => c.onclick = () => {
     const target = (lastCmdField && main.contains(lastCmdField)) ? lastCmdField
-      : main.querySelector('[data-k="command"]') || main.querySelector('.cf[data-cf="args"]') || main.querySelector('.cf[data-cf="query"]') || main.querySelector('.cf[data-cf="target"]');
+      : main.querySelector('[data-k="command"]') || main.querySelector('.hf.cmd[data-h="httpUrl"]') || main.querySelector('.cf[data-cf="args"]') || main.querySelector('.cf[data-cf="query"]') || main.querySelector('.cf[data-cf="target"]');
     if (!target) return;
     insertAtCaret(target, `{{ ${c.dataset.var} }}`);
     target.dispatchEvent(new Event("input", { bubbles: true }));
@@ -681,7 +694,7 @@ function renderTaskPage() {
     <div class="form-page">
       <div class="tc-grid">
         <div class="b-field"><label>${t("t_id")}</label><input class="tf" data-k="id" value="${esc(tk.id)}" placeholder="step_a"></div>
-        <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+        <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar", "http"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
       </div>
       ${commandFieldHtml(tk)}
       <div class="section-h">${t("t_deps")}</div>
@@ -719,6 +732,13 @@ function renderTaskPage() {
     el.onblur = () => saveDag();
   });
   wireCommandField(tk);
+  main.querySelectorAll(".hf").forEach((el) => {
+    const h = el.dataset.h;
+    if (el.tagName === "SELECT") { el.onchange = () => { tk[h] = el.value; saveDag(); }; return; }
+    el.oninput = () => { tk[h] = el.value; };
+    el.onblur = () => saveDag();
+    if (el.classList.contains("cmd")) el.onfocus = () => lastCmdField = el; // template chips insert here
+  });
   main.querySelectorAll(".chip.dep").forEach((c) => c.onclick = () => {
     const dep = c.dataset.dep, arr = tk.deps, j = arr.indexOf(dep);
     j < 0 ? arr.push(dep) : arr.splice(j, 1); c.classList.toggle("on");
@@ -763,7 +783,8 @@ function validateDag() {
   if (ids.some((id) => !id)) e.push(t("err_emptyid"));
   if (nonEmpty.some((id) => !ID_RE.test(id))) e.push(t("err_taskid"));
   if (new Set(nonEmpty).size !== nonEmpty.length) e.push(t("err_dup"));
-  if (D.tasks.some((x) => x.id && !String(x.command).trim())) e.push(t("err_emptycmd"));
+  if (D.tasks.some((x) => x.id && x.type !== "http" && !String(x.command).trim())) e.push(t("err_emptycmd"));
+  if (D.tasks.some((x) => x.id && x.type === "http" && !String(x.httpUrl || "").trim())) e.push(t("err_httpurl"));
   if (hasCycle(D.tasks.filter((x) => x.id))) e.push(t("err_cycle"));
   const nurl = (D.dag && D.dag.notify_url || "").trim();
   if (nurl && !/^https?:\/\//i.test(nurl)) e.push(t("err_notify_url"));
@@ -778,14 +799,35 @@ function dagSpecFrom(st) {
     // events are meaningless without a URL — keep the persisted state consistent
     notify_url: (d.notify_url || "").trim(), notify_on: (d.notify_url || "").trim() ? (d.notify_on || []).slice() : [],
     sla: Math.max(0, +d.sla || 0), dagrun_timeout: Math.max(0, +d.dagrun_timeout || 0),
-    tasks: st.tasks.filter((tk) => tk.id).map((tk) => ({
-      id: tk.id, type: tk.type, command: tk.command, pool: tk.pool || "default",
-      priority: +tk.priority || 0, deps: (tk.deps || []).filter((dep) => st.tasks.some((x) => x.id === dep)),
-      timeout: Math.max(0, +tk.timeout || 0), sla: Math.max(0, +tk.sla || 0), trigger_rule: tk.trigger_rule || "all_success",
-      retries: tk.retries === "" || tk.retries == null ? null : +tk.retries,
-      retry_delay: tk.retry_delay === "" || tk.retry_delay == null ? null : +tk.retry_delay,
-    })),
+    tasks: st.tasks.filter((tk) => tk.id).map((tk) => {
+      const o = {
+        id: tk.id, type: tk.type, pool: tk.pool || "default",
+        priority: +tk.priority || 0, deps: (tk.deps || []).filter((dep) => st.tasks.some((x) => x.id === dep)),
+        timeout: Math.max(0, +tk.timeout || 0), sla: Math.max(0, +tk.sla || 0), trigger_rule: tk.trigger_rule || "all_success",
+        retries: tk.retries === "" || tk.retries == null ? null : +tk.retries,
+        retry_delay: tk.retry_delay === "" || tk.retry_delay == null ? null : +tk.retry_delay,
+      };
+      if (tk.type === "http") {
+        o.http = { method: tk.httpMethod || "GET", url: (tk.httpUrl || "").trim(), headers: parseHeaderLines(tk.httpHeaders), body: tk.httpBody || "", expected_status: parseStatusList(tk.httpStatus) };
+      } else {
+        o.command = tk.command;
+      }
+      return o;
+    }),
   };
+}
+// "Key: Value" lines → header map (blank/invalid lines skipped).
+function parseHeaderLines(text) {
+  const h = {};
+  String(text || "").split("\n").forEach((line) => {
+    const i = line.indexOf(":");
+    if (i > 0) { const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim(); if (k) h[k] = v; }
+  });
+  return h;
+}
+// "200, 201" → [200, 201] (invalid entries dropped).
+function parseStatusList(text) {
+  return String(text || "").split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => n >= 100 && n <= 599);
 }
 function setSaveState(state, msg) {
   document.querySelectorAll(".savestate").forEach((el) => {

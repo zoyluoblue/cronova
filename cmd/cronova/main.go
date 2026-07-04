@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/zoyluo/cronova/internal/auth"
 	"github.com/zoyluo/cronova/internal/executor"
 	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/operator"
 	"github.com/zoyluo/cronova/internal/scheduler"
 	"github.com/zoyluo/cronova/internal/store"
 	"github.com/zoyluo/cronova/internal/store/sqlite"
@@ -56,6 +58,8 @@ func main() {
 		err = cmdUsers(args)
 	case "healthcheck":
 		err = cmdHealthcheck(args)
+	case "run-op":
+		err = cmdRunOp(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -66,6 +70,29 @@ func main() {
 	}
 	if err != nil {
 		log.Fatalf("cronova %s: %v", cmd, err)
+	}
+}
+
+// cmdRunOp executes a typed task operator in this subprocess. It is invoked
+// internally by the scheduler ("<cronova> run-op <type>") for non-shell task
+// types; the operator spec (with templates already resolved) arrives as JSON in
+// CRONOVA_OP_SPEC. Output goes to stdout (the task log); the exit code drives the
+// task's success/retry, so a request failure exits non-zero rather than erroring.
+func cmdRunOp(args []string) error {
+	if len(args) < 1 {
+		return errors.New("run-op requires an operator type (e.g. http)")
+	}
+	blob := os.Getenv("CRONOVA_OP_SPEC")
+	switch args[0] {
+	case "http":
+		var spec model.HTTPSpec
+		if err := json.Unmarshal([]byte(blob), &spec); err != nil {
+			return fmt.Errorf("bad op spec: %w", err)
+		}
+		os.Exit(operator.RunHTTP(context.Background(), spec, os.Stdout))
+		return nil
+	default:
+		return fmt.Errorf("unknown operator type %q", args[0])
 	}
 }
 

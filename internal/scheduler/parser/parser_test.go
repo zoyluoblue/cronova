@@ -184,6 +184,57 @@ notify:
 	}
 }
 
+func TestParseHTTPTask(t *testing.T) {
+	raw := []byte(`
+dag_id: apis
+tasks:
+  - id: fetch
+    type: http
+    http:
+      method: POST
+      url: "https://{{ conn.api.host }}/ingest"
+      headers:
+        Authorization: "Bearer {{ var.TOKEN }}"
+      body: '{"k":1}'
+      expected_status: [200, 201]
+`)
+	d, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	h := d.Tasks[0].HTTP
+	if h == nil {
+		t.Fatal("http spec nil")
+	}
+	if h.Method != "POST" || h.URL != "https://{{ conn.api.host }}/ingest" {
+		t.Errorf("method/url = %q/%q", h.Method, h.URL)
+	}
+	if h.Headers["Authorization"] != "Bearer {{ var.TOKEN }}" {
+		t.Errorf("header = %q", h.Headers["Authorization"])
+	}
+	if len(h.ExpectedStatus) != 2 || h.ExpectedStatus[0] != 200 {
+		t.Errorf("expected_status = %v", h.ExpectedStatus)
+	}
+}
+
+func TestParseRejectsBadHTTP(t *testing.T) {
+	// http task without a url
+	noURL := []byte("dag_id: b\ntasks:\n  - id: a\n    type: http\n    http:\n      method: GET\n")
+	if _, err := Parse(noURL); err == nil || !strings.Contains(err.Error(), "http.url") {
+		t.Errorf("http task without url should error, got %v", err)
+	}
+	// a shell task still requires a command
+	noCmd := []byte("dag_id: c\ntasks:\n  - id: a\n    type: shell\n")
+	if _, err := Parse(noCmd); err == nil || !strings.Contains(err.Error(), "empty command") {
+		t.Errorf("shell task without command should error, got %v", err)
+	}
+	// invalid expected_status
+	badCode := []byte("dag_id: d\ntasks:\n  - id: a\n    type: http\n    http:\n      url: http://x/y\n      expected_status: [99]\n")
+	if _, err := Parse(badCode); err == nil || !strings.Contains(err.Error(), "expected_status") {
+		t.Errorf("invalid status code should error, got %v", err)
+	}
+}
+
 func TestParseDeadlines(t *testing.T) {
 	raw := []byte(`
 dag_id: deadlines
