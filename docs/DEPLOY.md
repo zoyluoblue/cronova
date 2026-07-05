@@ -24,9 +24,37 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 `bootstrap.sh` detects the CPU architecture, downloads the matching prebuilt
 release, verifies its SHA256, extracts it, and runs `install.sh` — which creates
-the service user, lays out the directories, installs the systemd unit, generates
-a random admin password (enabling auth), and starts the service. It prints the
-console URL and the generated credentials at the end.
+the service user, lays out the directories, installs the systemd unit, runs the
+**setup wizard** (`cronova init`), and starts the service.
+
+When a terminal is attached — **even through `curl | sudo bash`**, via `/dev/tty`
+— the wizard walks you through the settings, each with a default that Enter
+accepts:
+
+```
+cronova setup — press Enter to accept the [default].
+
+HTTP port [8090]:
+Console reachable from:
+  1) all interfaces (0.0.0.0) — reachable by server IP
+  2) this machine only (127.0.0.1) — use a reverse proxy / SSH tunnel
+choose [1]:
+Admin username [admin]:
+Admin password (blank = generate a strong one):   (input hidden)
+Require login for the console/API (recommended) [Y/n]:
+```
+
+With no terminal (CI, `CRONOVA_NONINTERACTIVE=1`, or a plain pipe) it takes the
+defaults and `CRONOVA_ADMIN_USER` / `CRONOVA_ADMIN_PASSWORD` from the env,
+generating a random password if none is given. Either way the admin credentials
+(including any generated password) are printed at the end.
+
+Re-run it anytime to reconfigure:
+
+```bash
+sudo cronova init -config /etc/cronova/cronova.yaml -env /etc/cronova/cronova.env
+sudo systemctl restart cronova
+```
 
 Knobs (all optional): `CRONOVA_VERSION` (default `latest`), `CRONOVA_ADMIN_USER`,
 `CRONOVA_ADMIN_PASSWORD` (default: generated), `CRONOVA_START=0` to install

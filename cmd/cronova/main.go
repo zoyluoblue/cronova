@@ -56,6 +56,8 @@ func main() {
 		err = cmdPools(args)
 	case "users":
 		err = cmdUsers(args)
+	case "init":
+		err = cmdInit(args)
 	case "healthcheck":
 		err = cmdHealthcheck(args)
 	case "run-op":
@@ -124,6 +126,7 @@ usage:
   cronova users add <name> -role admin|viewer -password ...   create an account
   cronova users passwd <name> -password ...   change a password
   cronova users delete <name>                 remove an account
+  cronova init               interactive first-time setup (port/bind/admin/auth)
   cronova healthcheck        probe /readyz and exit non-zero if unhealthy
 
 run "cronova <command> -h" for command flags

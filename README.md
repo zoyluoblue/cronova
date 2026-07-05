@@ -65,12 +65,15 @@ that runs with the **host's own interpreters** (`sh`, `python3`, `java`, `psql`,
 …), Azkaban-style. So it deploys as a single static binary under systemd — no
 container, no bundled runtimes.
 
-**One-click install** (downloads a prebuilt binary for your CPU, sets up systemd,
-starts it, prints a generated admin password):
+**One-click install** — downloads a prebuilt binary for your CPU, sets up
+systemd, and runs an interactive setup wizard (port, bind scope, admin account,
+auth — each with a sensible default; Enter accepts). Works even through the pipe:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
 ```
+
+Non-interactive (CI, or to accept all defaults) — add `CRONOVA_NONINTERACTIVE=1`.
 
 Prefer to inspect first? Download, read, then run:
 

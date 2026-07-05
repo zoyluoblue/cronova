@@ -64,36 +64,17 @@ done
 install -d -m 0755 "$CONF_DIR"
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 0750 "$STATE_DIR" "$DAGS_DIR" "$LOG_DIR"
 
-# 5. config (never overwrite an existing one)
+# 5. first-time setup (only when there's no config yet — upgrades keep it).
+#    `cronova init` writes cronova.yaml + cronova.env (the admin seed). It runs
+#    interactively when a terminal is attached — even under `curl | sudo bash`,
+#    via /dev/tty — and otherwise takes defaults + CRONOVA_* env.
 if [[ ! -f "$CONF_DIR/cronova.yaml" ]]; then
-  install -m 0644 "$SRC_DIR/cronova.yaml.example" "$CONF_DIR/cronova.yaml"
-  echo "==> seeded $CONF_DIR/cronova.yaml"
-fi
-
-# 5b. secrets: seed cronova.env with an admin password on first install only.
-#     Use the provided password, or generate a random one and enable auth so a
-#     reachable console is never left open. Re-runs never touch an existing file.
-GEN_PW=""
-if [[ ! -f "$CONF_DIR/cronova.env" ]]; then
-  admin_user="${CRONOVA_ADMIN_USER:-admin}"
-  if [[ -n "${CRONOVA_ADMIN_PASSWORD:-}" ]]; then
-    admin_pw="$CRONOVA_ADMIN_PASSWORD"
+  init=("$BIN_DST" init -config "$CONF_DIR/cronova.yaml" -env "$CONF_DIR/cronova.env")
+  if [[ "${CRONOVA_NONINTERACTIVE:-0}" != "1" ]] && [[ -e /dev/tty ]] && ( : </dev/tty ) 2>/dev/null; then
+    "${init[@]}" </dev/tty
   else
-    set +o pipefail
-    admin_pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
-    set -o pipefail
-    GEN_PW="$admin_pw"
+    "${init[@]}" -yes
   fi
-  umask 077
-  cat > "$CONF_DIR/cronova.env" <<EOF
-CRONOVA_ADMIN_USER=$admin_user
-CRONOVA_ADMIN_PASSWORD=$admin_pw
-# CRONOVA_SECURE_COOKIE=true   # enable when serving behind HTTPS
-EOF
-  chmod 600 "$CONF_DIR/cronova.env"
-  # secure default: require login (the env just seeded an admin)
-  sed -i 's/^\([[:space:]]*\)enabled: false/\1enabled: true/' "$CONF_DIR/cronova.yaml"
-  echo "==> seeded $CONF_DIR/cronova.env and enabled auth"
 fi
 
 # 6. seed example DAGs only if the dags dir is empty (don't clobber console edits)
@@ -118,22 +99,16 @@ fi
 
 # --- summary ---------------------------------------------------------------
 echo
+# (the admin credentials, incl. any generated password, were printed by
+#  'cronova init' above — scroll up to save them.)
 if [[ $started -eq 1 ]]; then
-  echo "cronova is running. Console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):8090"
+  echo "cronova is running."
   echo "  systemctl status cronova   |   journalctl -u cronova -f"
 else
   echo "cronova installed (not started). Start it with:"
   echo "  systemctl enable --now cronova"
-  echo "  console: http://<server>:8090"
 fi
-if [[ -n "$GEN_PW" ]]; then
-  echo
-  echo "  ┌─ admin login (generated — save it) ───────────────────"
-  echo "  │  user:     ${CRONOVA_ADMIN_USER:-admin}"
-  echo "  │  password: $GEN_PW"
-  echo "  └────────────────────────────────────────────────────────"
-  echo "  change it later: cronova users passwd ${CRONOVA_ADMIN_USER:-admin} -db $STATE_DIR/cronova.db"
-fi
+echo "  reconfigure anytime:  sudo cronova init -config $CONF_DIR/cronova.yaml -env $CONF_DIR/cronova.env"
 echo
 echo "Tasks run with the HOST's interpreters — install python3 / java / psql / etc."
 echo "as needed and make sure they're on the PATH set in $UNIT."
