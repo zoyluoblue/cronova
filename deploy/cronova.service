@@ -1,0 +1,59 @@
+[Unit]
+Description=cronova workflow scheduler
+Documentation=https://github.com/zoyluo/cronova
+# tasks may reach the network (http operator, remote DBs); wait for it
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Dedicated unprivileged account. Create it once (install.sh does this for you):
+#   useradd --system --home-dir /var/lib/cronova --shell /usr/sbin/nologin cronova
+User=cronova
+Group=cronova
+WorkingDirectory=/var/lib/cronova
+
+# systemd creates and chowns these to the service user on start:
+#   ConfigurationDirectory -> /etc/cronova        (read-only at runtime)
+#   StateDirectory         -> /var/lib/cronova     (DB + DAGs, writable)
+#   LogsDirectory          -> /var/log/cronova     (task logs, writable)
+ConfigurationDirectory=cronova
+StateDirectory=cronova
+LogsDirectory=cronova
+
+# DAGs live under the writable state dir on purpose: the web console writes DAG
+# YAML there. The config file stays under /etc (read-only). The DB is pure-Go
+# SQLite; logs are one file per task try.
+ExecStart=/usr/local/bin/cronova serve \
+    -config /etc/cronova/cronova.yaml \
+    -db /var/lib/cronova/cronova.db \
+    -dags /var/lib/cronova/dags \
+    -logs /var/log/cronova
+
+# cronova only SCHEDULES; each task is a subprocess run with the HOST's own
+# interpreters (sh, python3, java, psql, ...). systemd hands services a minimal
+# PATH, so set one that covers where those binaries actually live. Add extra
+# dirs here if your tasks use tools from e.g. /opt/<tool>/bin.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Optional secrets (first-admin seed, etc.) from a root-only file (chmod 600).
+# The leading '-' makes the file optional. See cronova.env.example.
+EnvironmentFile=-/etc/cronova/cronova.env
+
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+
+# --- baseline hardening ---------------------------------------------------
+# cronova runs ARBITRARY task commands, so the sandbox is deliberately mild:
+# it protects system dirs but leaves /var, /opt, /srv, /home writable for tasks.
+# Tighten (ProtectSystem=strict + ReadWritePaths=) or loosen per your workload.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+# --------------------------------------------------------------------------
+
+[Install]
+WantedBy=multi-user.target

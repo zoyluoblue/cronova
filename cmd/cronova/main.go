@@ -424,8 +424,8 @@ func cmdRuns(args []string) error {
 }
 
 // cmdHealthcheck probes /readyz over HTTP and exits non-zero if unhealthy. It
-// exists so a distroless container (no shell/curl) can define a Docker HEALTHCHECK
-// using the cronova binary itself.
+// lets an external supervisor (systemd, a load balancer, a cron probe) check
+// liveness using the cronova binary itself, with no curl/shell dependency.
 func cmdHealthcheck(args []string) error {
 	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
 	addr := fs.String("http", envOr("CRONOVA_HTTP", ":8090"), "server HTTP address")

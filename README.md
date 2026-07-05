@@ -48,6 +48,25 @@ go build -o cronova-executor ./cmd/cronova-executor
 
 Now `kill -9` the scheduler mid-run and restart it: running tasks survive in the executor and are re-attached on recovery.
 
+## Deploy on a server (systemd)
+
+cronova is a **scheduler, not a runtime**: it launches each task as a subprocess
+that runs with the **host's own interpreters** (`sh`, `python3`, `java`, `psql`,
+…), Azkaban-style. So it deploys as a single static binary under systemd — no
+container, no bundled runtimes.
+
+```bash
+make release              # -> dist/cronova (static, no CGO, linux/amd64; needs Go 1.26)
+sudo ./deploy/install.sh  # create user, install binary + systemd unit, seed config
+sudoedit /etc/cronova/cronova.env       # set CRONOVA_ADMIN_PASSWORD
+sudo systemctl enable --now cronova     # console at http://<server>:8090
+```
+
+`sql` and `http` tasks are self-contained in the binary; `shell` and `python`
+tasks (and anything a shell task invokes, e.g. `java -jar`) need that tool
+installed on the host and on the service `PATH`. Full guide, layout, and the
+systemd `PATH` gotcha: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
 ## Defining a DAG
 
 Drop a YAML file in `./dags/` (see [dags/](dags/) for examples):
