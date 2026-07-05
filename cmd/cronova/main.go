@@ -58,6 +58,8 @@ func main() {
 		err = cmdUsers(args)
 	case "init":
 		err = cmdInit(args)
+	case "start", "stop", "restart", "status":
+		err = cmdService(cmd)
 	case "healthcheck":
 		err = cmdHealthcheck(args)
 	case "run-op":
@@ -127,6 +129,8 @@ usage:
   cronova users passwd <name> -password ...   change a password
   cronova users delete <name>                 remove an account
   cronova init               interactive first-time setup (port/bind/admin/auth)
+  cronova start|stop|restart control the installed service (systemd/launchd; needs sudo)
+  cronova status             show the installed service's status
   cronova healthcheck        probe /readyz and exit non-zero if unhealthy
 
 run "cronova <command> -h" for command flags

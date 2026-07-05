@@ -160,6 +160,21 @@ journalctl -u cronova -f
 
 Console + API: `http://<server>:8090`.
 
+## Controlling the service
+
+`cronova` wraps the platform service manager, so the same commands work on Linux
+(systemd) and macOS (launchd) — no need to remember `systemctl`/`launchctl`:
+
+```bash
+sudo cronova start      # start (and enable auto-start where applicable)
+sudo cronova stop       # stop
+sudo cronova restart    # restart (after editing config)
+cronova status          # show status (sudo on macOS)
+```
+
+They shell out to `systemctl <action> cronova` / `launchctl` under the hood, so
+the native commands (below) still work if you prefer them.
+
 ## macOS (launchd)
 
 The one-click installer above works on macOS too. To install from source instead

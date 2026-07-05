@@ -35,6 +35,7 @@ const DICT = {
     h_dag: "DAG", h_last: "最近运行", h_spark: "最近 14 次", h_pool: "POOL", h_next: "下次调度", h_act: "操作",
     no_match: "没有匹配的 DAG", no_dags_title: "还没有 DAG", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
     back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
+    run_progress: "进度",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败", run_done_timeout: "运行超时",
     run_cancel: "取消运行", run_retry: "重跑失败", task_retry: "重跑", run_cancelled_toast: "运行已取消", run_retried_toast: "已重新排队",
@@ -148,6 +149,7 @@ const DICT = {
     h_dag: "DAG", h_last: "LAST RUN", h_spark: "LAST 14", h_pool: "POOL", h_next: "NEXT", h_act: "ACTIONS",
     no_match: "No matching DAGs", no_dags_title: "No DAGs yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
     back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
+    run_progress: "Progress",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed", run_done_timeout: "Run timed out",
     run_cancel: "Cancel run", run_retry: "Retry failed", task_retry: "Retry", run_cancelled_toast: "Run cancelled", run_retried_toast: "Re-queued",
@@ -723,4 +725,3 @@ function setLang(l) {
   else if (view === "audit") showAudit();
   else if (view === "api") renderApi(); // from in-memory TOKENS, no refetch
 }
-

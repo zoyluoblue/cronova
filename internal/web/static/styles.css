@@ -327,10 +327,33 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .live:not(:empty)::after { content: "▋"; margin-left: 3px; color: var(--run); animation: blink 1.1s steps(1) infinite; }
 
 /* ---- live run view + Gantt timeline (Phase 2) ---- */
-.run-prog { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 2px; }
-.run-actions { margin-left: auto; display: flex; gap: 8px; }
-.run-tabs { display: flex; gap: 8px; margin: 22px 0 12px; }
+.run-crumb { margin-bottom: 14px; }
+.run-hero { border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); padding: 18px 20px 16px; }
+.run-title-row { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.run-title-main { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+.run-title-main h1 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 650; letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-title-main h1 .copyable { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.run-progress-wrap { width: 260px; display: grid; grid-template-columns: auto 1fr; gap: 3px 9px; align-items: center; color: var(--muted); }
+.run-progress-label { font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase; color: var(--faint); }
+.run-prog { font-size: 12.5px; color: var(--text); font-variant-numeric: tabular-nums; }
+.run-meter { grid-column: 1 / -1; height: 5px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.run-meter i { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width var(--dur) var(--ease); }
+.run-actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
+.run-facts { margin-top: 18px; border: 1px solid var(--line); border-radius: var(--r-sm); display: grid; grid-template-columns: 1.35fr .8fr .8fr 1.05fr; background: color-mix(in srgb, var(--panel-2) 35%, transparent); }
+.run-fact { min-width: 0; padding: 14px 18px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 5px; }
+.run-fact:last-child { border-right: 0; }
+.run-fact .k { font-size: 10.5px; letter-spacing: .65px; text-transform: uppercase; color: var(--faint); }
+.run-fact .v { font-size: 13.5px; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.run-fact .copyable { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.run-section-h { margin-top: 18px; }
+.run-graph-panel .graph-wrap { min-height: 172px; }
+.run-graph-panel .graph-node text { font-size: 12.5px; }
+.run-tabs { display: flex; gap: 8px; margin: 22px 0 0; border-bottom: 1px solid var(--line); }
 .run-tabs .pill { cursor: pointer; }
+.run-tabs .pill.active { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: var(--accent); }
+#run-body .tbl { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 var(--r) var(--r); overflow: hidden; }
+#run-body .tbl th { padding-top: 13px; padding-bottom: 10px; }
+#run-body .tbl td { padding-top: 12px; padding-bottom: 12px; }
 /* subtle pulse on a running node (global reduced-motion rule neutralizes it) */
 .graph-node.g-running rect { animation: pulse 1.6s var(--ease) infinite; }
 .gantt { border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
@@ -389,6 +412,11 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .log-toolbar { display: flex; align-items: center; gap: 12px; margin: 6px 0 8px; }
 .log-toolbar .muted { font-size: 12px; }
 .log-toolbar a { font-size: 12.5px; }
+.run-log-panel { margin-top: 18px; border: 1px solid var(--line); border-radius: var(--r); background: var(--panel); overflow: hidden; }
+.run-log-head { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.run-log-head a { margin-left: auto; font-size: 12.5px; }
+.run-log-panel .log-toolbar { margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.run-log-panel .logbox { border: 0; border-radius: 0; max-height: 216px; background: #06070a; }
 /* YAML drawer + paste-import */
 .yaml-view { font-family: var(--mono); font-size: 12px; line-height: 1.6; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 12px 14px; margin: 0; max-height: 52vh; overflow: auto; white-space: pre; }
 .yaml-input { width: 100%; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; resize: vertical; min-height: 220px; }

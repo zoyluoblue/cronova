@@ -94,6 +94,12 @@ make install              # build for the host + install the native service (nee
 # Linux:  systemd unit + `cronova` system user   ·   macOS: launchd LaunchDaemon
 ```
 
+Once installed, control it the same way on both platforms (wraps systemd/launchd):
+
+```bash
+sudo cronova start | stop | restart      # cronova status  to check
+```
+
 `sql` and `http` tasks are self-contained in the binary; `shell` and `python`
 tasks (and anything a shell task invokes, e.g. `java -jar`) need that tool
 installed on the host and on the service `PATH`. Full guide, layout, and the

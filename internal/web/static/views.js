@@ -891,15 +891,29 @@ async function showRun(runID) {
   // static shell — the graph and #logwrap are built ONCE; polling patches only
   // the leaf containers below, so a live log stream (in #logwrap) is never torn down.
   main.innerHTML = `
-    <div class="crumb-bar"><a id="back">← ${esc(r.dag_id)}</a> / ${t("run_word")}</div>
-    <div class="page-h"><h1 class="mono" style="font-size:16px">${copySpan(r.run_id)}</h1><span id="run-badge">${badge(r.state)}</span><span class="run-prog" id="run-progress"></span><span class="run-actions" id="run-actions"></span></div>
-    <div class="kv" style="margin:14px 0 4px">
-      <div class="card"><div class="k">${t("k_logical")}</div><div class="v mono" style="font-size:13px">${copySpan(r.logical_date)}</div></div>
-      <div class="card"><div class="k">${t("k_trig")}</div><div class="v">${typeLabel(r.trigger_type)}</div></div>
-      <div class="card"><div class="k">${t("k_dur")}</div><div class="v" id="run-dur">${dur(r.started_at, r.finished_at)}</div></div>
-      <div class="card"><div class="k">${t("k_started")}</div><div class="v" style="font-size:13px">${fmt(r.started_at)}</div></div></div>
+    <div class="crumb-bar run-crumb"><a id="back">← ${esc(r.dag_id)}</a> / ${t("run_word")}</div>
+    <div class="run-hero">
+      <div class="run-title-row">
+        <div class="run-title-main">
+          <h1 class="mono">${copySpan(r.run_id)}</h1>
+          <span id="run-badge">${badge(r.state)}</span>
+        </div>
+        <div class="run-progress-wrap">
+          <span class="run-progress-label">${t("run_progress")}</span>
+          <span class="run-prog" id="run-progress"></span>
+          <div class="run-meter" aria-hidden="true"><i id="run-meter-bar"></i></div>
+        </div>
+        <span class="run-actions" id="run-actions"></span>
+      </div>
+      <div class="run-facts">
+        <div class="run-fact"><span class="k">${t("k_logical")}</span><span class="v mono">${copySpan(r.logical_date)}</span></div>
+        <div class="run-fact"><span class="k">${t("k_trig")}</span><span class="v">${typeLabel(r.trigger_type)}</span></div>
+        <div class="run-fact"><span class="k">${t("k_dur")}</span><span class="v mono" id="run-dur">${dur(r.started_at, r.finished_at)}</span></div>
+        <div class="run-fact"><span class="k">${t("k_started")}</span><span class="v">${fmt(r.started_at)}</span></div>
+      </div>
+    </div>
     ${r.params && Object.keys(r.params).length ? `<div class="run-parambar"><span class="rp-k">${t("run_params")}</span>${Object.entries(r.params).map(([k, v]) => `<span class="rp-chip mono">${esc(k)}=<b>${esc(v)}</b></span>`).join("")}</div>` : ""}
-    <div class="section-h">${t("sec_graph")}</div><div id="run-graph">${renderGraph(runDag.tasks, initSbt, { tag: true })}</div>
+    <div class="section-h run-section-h">${t("sec_graph")}</div><div id="run-graph" class="run-graph-panel">${renderGraph(runDag.tasks, initSbt, { tag: true })}</div>
     <div class="run-tabs" id="run-tabs">
       <button class="pill ${runTab === "instances" ? "active" : ""}" data-rt="instances">${t("sec_instances")}</button>
       <button class="pill ${runTab === "timeline" ? "active" : ""}" data-rt="timeline">${t("g_timeline")}</button>
@@ -914,6 +928,7 @@ async function showRun(runID) {
     renderRunBody(runDataCache);
   });
   renderRunDynamic(data);
+  openDefaultRunLog(data);
   if (runLive(r.state)) startRunPoll(runID, gen);
 }
 let runDataCache = null;
@@ -941,6 +956,8 @@ function renderRunDynamic(data) {
   $("run-dur").textContent = dur(r.started_at, r.finished_at);
   const done = tasks.filter((tk) => TASK_TERMINAL[tk.state]).length, running = tasks.filter((tk) => tk.state === "running").length;
   $("run-progress").textContent = tasks.length ? `${done}/${tasks.length}${running ? ` · ${running} ${stateLabel("running")}` : ""}` : "";
+  const bar = $("run-meter-bar");
+  if (bar) bar.style.width = tasks.length ? `${Math.max(4, Math.round(done / tasks.length * 100))}%` : "0%";
   renderRunActions(r, tasks);
   patchGraphStates(sbt);
   renderRunBody(data);
@@ -1021,6 +1038,14 @@ function renderRunBody(data) {
   el.querySelectorAll(".markbtn").forEach((b) => b.onclick = () => markTaskUI(data.run.run_id, b.dataset.mtask));
   el.querySelectorAll(".gantt-row[data-ti]").forEach((row) => row.onclick = () => showLog(row.dataset.ti, row.dataset.task));
 }
+function openDefaultRunLog(data) {
+  const wrap = $("logwrap");
+  if (!wrap || wrap.dataset.opened) return;
+  const tasks = data.tasks || [];
+  const tk = tasks.find((x) => x.state === "running") || tasks.find((x) => !TASK_TERMINAL[x.state]) || tasks[0];
+  if (!tk || !tk.id) return;
+  showLog(tk.id, tk.task_id);
+}
 function instancesTableHtml(data) {
   const tasks = data.tasks || [];
   if (!tasks.length) return `<div class="empty">${t("run_no_tasks")}</div>`;
@@ -1059,14 +1084,19 @@ function ganttHtml(data) {
 const LOG_CAP = 5000; // live-view buffer cap; the download link always serves the full file
 function showLog(tiID, taskID) {
   closeLog();
+  const wrap = $("logwrap");
+  if (wrap) wrap.dataset.opened = "1";
   $("logwrap").innerHTML = `
-    <div class="section-h">${t("log_word")} · <span class="mono">${esc(taskID)}</span> <span class="live" id="live"></span></div>
+    <div class="run-log-panel">
+    <div class="run-log-head">
+      <div>${t("log_word")} · <span class="mono">${esc(taskID)}</span> <span class="live" id="live"></span></div>
+      <a id="log-dl" href="/api/tasks/${tiID}/log" download="${esc(taskID)}.log">${t("log_download")}</a>
+    </div>
     <div class="log-toolbar">
       <input id="log-find" placeholder="${t("log_find_ph")}" style="max-width:220px">
       <span class="muted" id="log-count"></span>
-      <a id="log-dl" href="/api/tasks/${tiID}/log" download="${esc(taskID)}.log" style="margin-left:auto">${t("log_download")}</a>
     </div>
-    <div class="logbox" id="logbox"></div>`;
+    <div class="logbox" id="logbox"></div></div>`;
   const box = $("logbox");
   let lines = [], filter = "";
   const render = () => { // full rebuild — only on filter change or cap trim
