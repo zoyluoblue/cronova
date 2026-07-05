@@ -244,7 +244,11 @@ const docsHTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🛰️</text></svg>"/>
   <style>
-    body { margin: 0; padding: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    /* Redoc's standalone bundle ships a light theme only; pin the page to a light
+       surface so it stays legible under a dark-mode OS/browser (otherwise its
+       black text renders on the UA's dark canvas). */
+    html { color-scheme: light; background: #ffffff; }
+    body { margin: 0; padding: 0; background: #ffffff; color: #1a1a2e; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     #redoc-loading { padding: 3rem; color: #6b7bff; font: 500 15px/1.5 system-ui, sans-serif; }
   </style>
 </head>
