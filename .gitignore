@@ -12,4 +12,6 @@
 /dist/
 /data/
 /logs/
+# scratch screenshots / working artifacts (never commit)
+/tmp/
 node_modules/
