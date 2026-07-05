@@ -55,10 +55,29 @@ that runs with the **host's own interpreters** (`sh`, `python3`, `java`, `psql`,
 …), Azkaban-style. So it deploys as a single static binary under systemd — no
 container, no bundled runtimes.
 
+**One-click install** (downloads a prebuilt binary for your CPU, sets up systemd,
+starts it, prints a generated admin password):
+
 ```bash
-make release              # -> dist/cronova (static, no CGO, linux/amd64; needs Go 1.26)
+curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
+```
+
+Prefer to inspect first? Download, read, then run:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh
+less bootstrap.sh && sudo bash bootstrap.sh
+```
+
+Pin a version or preset the admin with env vars:
+`CRONOVA_VERSION=v0.1.0 CRONOVA_ADMIN_PASSWORD=… sudo -E bash bootstrap.sh`.
+
+**From source** (needs Go 1.26; or use the throwaway build container in
+[docs/DEPLOY.md](docs/DEPLOY.md)):
+
+```bash
+make release              # -> dist/cronova (static, no CGO)
 sudo ./deploy/install.sh  # create user, install binary + systemd unit, seed config
-sudoedit /etc/cronova/cronova.env       # set CRONOVA_ADMIN_PASSWORD
 sudo systemctl enable --now cronova     # console at http://<server>:8090
 ```
 

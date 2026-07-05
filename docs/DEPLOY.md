@@ -14,6 +14,31 @@ bundle: the box's own tooling does the work.
 > want the scheduler containerised, run the standalone `cronova-executor` on the
 > host and point the scheduler at it over gRPC — see the README.)
 
+## Quick install (one-click)
+
+On a fresh amd64/arm64 Linux box with nothing but `curl`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
+```
+
+`bootstrap.sh` detects the CPU architecture, downloads the matching prebuilt
+release, verifies its SHA256, extracts it, and runs `install.sh` — which creates
+the service user, lays out the directories, installs the systemd unit, generates
+a random admin password (enabling auth), and starts the service. It prints the
+console URL and the generated credentials at the end.
+
+Knobs (all optional): `CRONOVA_VERSION` (default `latest`), `CRONOVA_ADMIN_USER`,
+`CRONOVA_ADMIN_PASSWORD` (default: generated), `CRONOVA_START=0` to install
+without starting. With env vars, use `sudo -E`:
+
+```bash
+CRONOVA_VERSION=v0.1.0 CRONOVA_ADMIN_PASSWORD='s3cret' curl -fsSL .../bootstrap.sh | sudo -E bash
+```
+
+The rest of this doc covers the **from-source** path and the layout/PATH details
+that both paths share.
+
 ## What each task type needs on the host
 
 | Task `type` | Runs as | Host requirement |
@@ -127,3 +152,29 @@ sudo systemctl restart cronova
 In-process executor: a restart ends running tasks. For zero-loss restarts run the
 standalone `cronova-executor` and point `serve` at it (`-executor`); see the
 README's crash-recovery section.
+
+## Cutting a release (maintainers)
+
+The one-click installer pulls prebuilt binaries from GitHub Releases. To publish
+a version, push a tag — `.github/workflows/release.yml` does the rest:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow cross-compiles static `linux/amd64` and `linux/arm64` binaries,
+bundles each with `deploy/`, `cronova.yaml.example`, the example DAGs and
+`docs/DEPLOY.md` into `cronova_linux_<arch>.tar.gz`, generates `SHA256SUMS`, and
+attaches all three to the release. `bootstrap.sh` downloads from
+`releases/latest/download/` (or `releases/download/<tag>/` when pinned).
+
+Build the same artifacts locally:
+
+```bash
+make package          # -> dist/cronova_linux_{amd64,arm64}.tar.gz + SHA256SUMS
+```
+
+> Requires a **public** repo (or the target has a token) so `curl` can fetch
+> `bootstrap.sh` from `raw.githubusercontent.com` and the release assets.
+

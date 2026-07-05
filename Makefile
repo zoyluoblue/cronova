@@ -23,6 +23,13 @@ release-executor: ## static linux/amd64 standalone executor -> dist/cronova-exec
 test: ## run the full test suite with the race detector
 	go test -race ./...
 
+.PHONY: package
+package: ## build release tarballs (amd64+arm64) + checksums -> dist/
+	./scripts/package.sh amd64
+	./scripts/package.sh arm64
+	cd dist && sha256sum cronova_linux_*.tar.gz > SHA256SUMS
+	@echo "==> dist/SHA256SUMS"
+
 .PHONY: install
 install: release ## build + install as a systemd service (needs root)
 	sudo ./deploy/install.sh dist/cronova
