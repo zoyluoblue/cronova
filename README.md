@@ -1,6 +1,16 @@
 # cronova
 
+[![Release](https://img.shields.io/github/v/release/zoyluoblue/cronova?sort=semver&logo=github)](https://github.com/zoyluoblue/cronova/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64-informational)](docs/DEPLOY.md)
+[![Go](https://img.shields.io/github/go-mod/go-version/zoyluoblue/cronova)](go.mod)
+
 A workflow scheduler in the spirit of Airflow / Azkaban — single Go binary, embedded SQLite, polyglot tasks, crash-recoverable execution.
+
+**Install on any Linux server in one line** (details: [docs/DEPLOY.md](docs/DEPLOY.md)):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
+```
 
 cronova runs **DAGs** of tasks: each task is launched as an OS subprocess, so a task can be written in any language (Python, SQL via a CLI, a JAR, a shell one-liner, …). The framework language (Go) is fully decoupled from the task language.
 
