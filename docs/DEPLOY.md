@@ -1,11 +1,16 @@
-# Deploying cronova on Linux
+# Deploying cronova (Linux & macOS)
 
 cronova is a **scheduler**, not a runtime. It schedules DAGs and launches each
 task as an OS subprocess that runs with the **host machine's own interpreters**
 (`sh`, `python3`, `java`, `psql`, …) — the same model as Azkaban. So the
-recommended deployment is a single static binary managed by **systemd**, running
-directly on the server. There is no container image to build and no runtimes to
-bundle: the box's own tooling does the work.
+recommended deployment is a single static binary managed by the OS service
+manager — **systemd** on Linux, **launchd** on macOS — running directly on the
+box. There is no container image to build and no runtimes to bundle: the box's
+own tooling does the work.
+
+Both platforms install the same way (one-click `curl | sudo bash` below); they
+differ only in the service manager and file layout — see
+[Platform layout](#platform-layout).
 
 > Why not Docker? A container only sees the interpreters baked into its image,
 > not the host's. Containerising a polyglot subprocess scheduler therefore forces
@@ -16,16 +21,19 @@ bundle: the box's own tooling does the work.
 
 ## Quick install (one-click)
 
-On a fresh amd64/arm64 Linux box with nothing but `curl`:
+On a fresh amd64/arm64 **Linux or macOS** box with nothing but `curl`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
 ```
 
-`bootstrap.sh` detects the CPU architecture, downloads the matching prebuilt
-release, verifies its SHA256, extracts it, and runs `install.sh` — which creates
-the service user, lays out the directories, installs the systemd unit, runs the
-**setup wizard** (`cronova init`), and starts the service.
+`bootstrap.sh` detects the OS and CPU architecture, downloads the matching
+prebuilt release, verifies its SHA256, extracts it, and runs the platform
+installer — `install.sh` (Linux/systemd) or `install-macos.sh` (macOS/launchd) —
+which lays out the directories, installs the service, runs the **setup wizard**
+(`cronova init`), and starts it. On Linux it also creates a dedicated `cronova`
+system user; on macOS the service runs as the invoking (`sudo`) user so tasks
+stay unprivileged.
 
 When a terminal is attached — **even through `curl | sudo bash`**, via `/dev/tty`
 — the wizard walks you through the settings, each with a default that Enter
@@ -56,13 +64,38 @@ sudo cronova init -config /etc/cronova/cronova.yaml -env /etc/cronova/cronova.en
 sudo systemctl restart cronova
 ```
 
-Knobs (all optional): `CRONOVA_VERSION` (default `latest`), `CRONOVA_ADMIN_USER`,
-`CRONOVA_ADMIN_PASSWORD` (default: generated), `CRONOVA_START=0` to install
-without starting. With env vars, use `sudo -E`:
+### Presetting config (non-interactive)
+
+Env vars let you configure everything up front — ideal for CI or unattended
+installs. With `CRONOVA_NONINTERACTIVE=1` (or a plain pipe with no TTY) the wizard
+is skipped and these values are baked into `cronova.yaml` / `cronova.env`. Pass
+them through the pipe with `sudo -E`:
 
 ```bash
-CRONOVA_VERSION=v0.1.0 CRONOVA_ADMIN_PASSWORD='s3cret' curl -fsSL .../bootstrap.sh | sudo -E bash
+curl -fsSL .../bootstrap.sh | \
+  CRONOVA_NONINTERACTIVE=1 \
+  CRONOVA_HTTP="127.0.0.1:9000" CRONOVA_AUTH=true CRONOVA_TICK=5s \
+  CRONOVA_ADMIN_USER=ops CRONOVA_ADMIN_PASSWORD='s3cret' \
+  sudo -E bash
 ```
+
+| Env var | Default | Effect |
+|---|---|---|
+| `CRONOVA_VERSION` | `latest` | Which release to install. |
+| `CRONOVA_START` | `1` | `0` = install but don't start. |
+| `CRONOVA_NONINTERACTIVE` | `0` | `1` = skip the wizard even with a TTY. |
+| `CRONOVA_BASE_URL` | GitHub | Download origin (private mirror / air-gapped). |
+| `CRONOVA_ADMIN_USER` | `admin` | First admin username (→ `cronova.env`). |
+| `CRONOVA_ADMIN_PASSWORD` | generated | First admin password (→ `cronova.env`). |
+| `CRONOVA_HTTP` | `:8090` | Console/API listen addr. `:8090` = all interfaces; `127.0.0.1:8090` = local only. |
+| `CRONOVA_AUTH` | `true` | Require login for the console/API. |
+| `CRONOVA_SESSION_TTL` | `24h` | Login session lifetime. |
+| `CRONOVA_SECURE_COOKIE` | `false` | Mark the session cookie `Secure` (set behind HTTPS). |
+| `CRONOVA_TICK` | `2s` | Scheduler loop interval (lower = snappier + more CPU). |
+| `CRONOVA_EXECUTOR` | in-process | gRPC executor target for crash-recovery (e.g. `unix:///run/cronova/executor.sock`). |
+
+Storage paths (`db`/`dags`/`logs`) are **not** presettable this way — the service
+unit/plist sets them via flags, which win. Change them by editing the unit/plist.
 
 The rest of this doc covers the **from-source** path and the layout/PATH details
 that both paths share.
@@ -127,6 +160,35 @@ journalctl -u cronova -f
 
 Console + API: `http://<server>:8090`.
 
+## macOS (launchd)
+
+The one-click installer above works on macOS too. To install from source instead
+(needs **Go 1.26+**):
+
+```bash
+make build                       # -> ./cronova for the host (Apple Silicon/Intel)
+sudo ./deploy/install-macos.sh   # installs a launchd LaunchDaemon + runs the wizard
+```
+
+`install-macos.sh` mirrors the Linux installer: it lays out `/usr/local/etc/cronova`
+(config), `/usr/local/var/cronova` (DB + DAGs), `/usr/local/var/log/cronova`
+(logs), renders `com.cronova.plist` into `/Library/LaunchDaemons`, and loads it.
+The daemon runs as **the user who ran `sudo`** (not root), so tasks stay
+unprivileged and the console can edit DAGs.
+
+```bash
+sudo launchctl print system/com.cronova          # status
+tail -f /usr/local/var/log/cronova/service.log    # logs
+sudo launchctl kickstart -k system/com.cronova    # restart (after editing config)
+sudo launchctl bootout system/com.cronova         # stop + unload
+```
+
+`launchd` also hands a minimal `PATH`; the plist already includes the Homebrew
+dirs (`/opt/homebrew/bin`, `/usr/local/bin`). If your tasks use tools elsewhere
+(pyenv/conda Python, SDKMAN `java`, …), add those dirs to the `PATH` string in
+`/Library/LaunchDaemons/com.cronova.plist` and `sudo launchctl kickstart -k
+system/com.cronova`.
+
 ## PATH: the one gotcha
 
 systemd gives services a **minimal `PATH`**. cronova's `shell`/`python` tasks
@@ -149,16 +211,21 @@ sudo systemctl edit cronova     # writes /etc/systemd/system/cronova.service.d/o
 Environment=PATH=/opt/tool/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-## Layout reference
+## Platform layout
 
-| Path | Purpose | Perms |
+Same binary, same wizard; the service manager and paths differ:
+
+| Purpose | Linux (systemd) | macOS (launchd) |
 |---|---|---|
-| `/usr/local/bin/cronova` | binary | 0755 |
-| `/etc/cronova/cronova.yaml` | config (read-only at runtime) | 0644 |
-| `/etc/cronova/cronova.env` | secrets (admin seed) | 0600 |
-| `/var/lib/cronova/cronova.db` | SQLite metadata | 0750 dir |
-| `/var/lib/cronova/dags/` | DAG YAML (console-editable) | 0750 dir |
-| `/var/log/cronova/` | one log file per task try | 0750 dir |
+| binary | `/usr/local/bin/cronova` | `/usr/local/bin/cronova` |
+| config | `/etc/cronova/cronova.yaml` | `/usr/local/etc/cronova/cronova.yaml` |
+| secrets (admin seed, 0600) | `/etc/cronova/cronova.env` | `/usr/local/etc/cronova/cronova.env` |
+| SQLite DB | `/var/lib/cronova/cronova.db` | `/usr/local/var/cronova/cronova.db` |
+| DAG YAML (console-editable) | `/var/lib/cronova/dags/` | `/usr/local/var/cronova/dags/` |
+| task logs | `/var/log/cronova/` | `/usr/local/var/log/cronova/` |
+| service unit | `/etc/systemd/system/cronova.service` | `/Library/LaunchDaemons/com.cronova.plist` |
+| runs as | `cronova` system user | the `sudo` user |
+| control | `systemctl`, `journalctl` | `launchctl`, `service.log` |
 
 ## Sandbox
 

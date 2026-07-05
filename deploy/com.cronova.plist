@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cronova launchd LaunchDaemon — the macOS counterpart of deploy/cronova.service.
+  install-macos.sh substitutes __USER__/__GROUP__ with the invoking (sudo) user so
+  tasks run unprivileged, not as root. Secrets (the admin seed) are sourced from
+  the 0600 cronova.env by the sh wrapper — launchd has no EnvironmentFile.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cronova</string>
+
+  <!-- run as the console user, not root (tasks are arbitrary host commands) -->
+  <key>UserName</key>
+  <string>__USER__</string>
+  <key>GroupName</key>
+  <string>__GROUP__</string>
+
+  <key>WorkingDirectory</key>
+  <string>/usr/local/var/cronova</string>
+
+  <!-- source cronova.env (admin seed etc.) then exec serve, mirroring the
+       systemd unit's EnvironmentFile + ExecStart -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; [ -f /usr/local/etc/cronova/cronova.env ] &amp;&amp; . /usr/local/etc/cronova/cronova.env; set +a; exec /usr/local/bin/cronova serve -config /usr/local/etc/cronova/cronova.yaml -db /usr/local/var/cronova/cronova.db -dags /usr/local/var/cronova/dags -logs /usr/local/var/log/cronova</string>
+  </array>
+
+  <!-- cronova only SCHEDULES; each task runs with the host's own interpreters.
+       launchd hands a minimal PATH, so cover Homebrew (Apple Silicon + Intel)
+       and the system dirs. Add more via `sudo launchctl` overrides if needed. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- restart on failure only (mirrors Restart=on-failure) -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/cronova/service.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/cronova/service.log</string>
+</dict>
+</plist>

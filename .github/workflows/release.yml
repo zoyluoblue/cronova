@@ -23,8 +23,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build release tarballs (amd64 + arm64)
-        run: make package
+      - name: Build release tarballs (linux + macOS, amd64 + arm64)
+        run: make package   # darwin cross-builds from Linux: pure Go, CGO disabled
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -33,4 +33,6 @@ jobs:
           files: |
             dist/cronova_linux_amd64.tar.gz
             dist/cronova_linux_arm64.tar.gz
+            dist/cronova_darwin_amd64.tar.gz
+            dist/cronova_darwin_arm64.tar.gz
             dist/SHA256SUMS

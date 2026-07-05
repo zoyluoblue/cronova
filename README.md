@@ -6,7 +6,7 @@
 
 A workflow scheduler in the spirit of Airflow / Azkaban — single Go binary, embedded SQLite, polyglot tasks, crash-recoverable execution.
 
-**Install on any Linux server in one line** (details: [docs/DEPLOY.md](docs/DEPLOY.md)):
+**Install on any Linux or macOS box in one line** (details: [docs/DEPLOY.md](docs/DEPLOY.md)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
@@ -65,9 +65,10 @@ that runs with the **host's own interpreters** (`sh`, `python3`, `java`, `psql`,
 …), Azkaban-style. So it deploys as a single static binary under systemd — no
 container, no bundled runtimes.
 
-**One-click install** — downloads a prebuilt binary for your CPU, sets up
-systemd, and runs an interactive setup wizard (port, bind scope, admin account,
-auth — each with a sensible default; Enter accepts). Works even through the pipe:
+**One-click install** — downloads a prebuilt binary for your OS + CPU, sets up
+the native service (systemd on Linux, launchd on macOS), and runs an interactive
+setup wizard (port, bind scope, admin account, auth — each with a sensible
+default; Enter accepts). Works even through the pipe:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
@@ -89,15 +90,14 @@ Pin a version or preset the admin with env vars:
 [docs/DEPLOY.md](docs/DEPLOY.md)):
 
 ```bash
-make release              # -> dist/cronova (static, no CGO)
-sudo ./deploy/install.sh  # create user, install binary + systemd unit, seed config
-sudo systemctl enable --now cronova     # console at http://<server>:8090
+make install              # build for the host + install the native service (needs sudo)
+# Linux:  systemd unit + `cronova` system user   ·   macOS: launchd LaunchDaemon
 ```
 
 `sql` and `http` tasks are self-contained in the binary; `shell` and `python`
 tasks (and anything a shell task invokes, e.g. `java -jar`) need that tool
 installed on the host and on the service `PATH`. Full guide, layout, and the
-systemd `PATH` gotcha: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+service `PATH` gotcha: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ## Defining a DAG
 

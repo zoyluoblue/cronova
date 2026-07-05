@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -63,14 +64,35 @@ func applyEnv(c *Config) {
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
 	if v, ok := os.LookupEnv("CRONOVA_AUTH"); ok {
-		c.Auth.Enabled = v == "1" || v == "true" || v == "yes"
+		// Only a RECOGNIZED value flips the control; an unknown/blank value keeps
+		// the current setting rather than failing open (auth defaults on for a
+		// fresh install, so a typo like "True" or "on" must not silently disable it).
+		if b, valid := parseBool(v); valid {
+			c.Auth.Enabled = b
+		}
 	}
 	env("CRONOVA_SESSION_TTL", &c.Auth.SessionTTL)
 	if v, ok := os.LookupEnv("CRONOVA_SECURE_COOKIE"); ok {
-		c.Auth.SecureCookie = v == "1" || v == "true" || v == "yes"
+		if b, valid := parseBool(v); valid {
+			c.Auth.SecureCookie = b
+		}
 	}
 	env("CRONOVA_ADMIN_USER", &c.Auth.AdminUser)
 	env("CRONOVA_ADMIN_PASSWORD", &c.Auth.AdminPassword)
+}
+
+// parseBool parses a boolean-ish env value leniently (case-insensitive, trimmed).
+// valid is false for unrecognized or blank input, so callers can keep a secure
+// default instead of failing open on an unexpected value.
+func parseBool(s string) (val, valid bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on", "y", "enable", "enabled":
+		return true, true
+	case "0", "false", "no", "off", "n", "disable", "disabled":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // sessionTTL parses the configured TTL, falling back to 24h on empty/invalid.

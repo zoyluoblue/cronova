@@ -24,15 +24,22 @@ test: ## run the full test suite with the race detector
 	go test -race ./...
 
 .PHONY: package
-package: ## build release tarballs (amd64+arm64) + checksums -> dist/
-	./scripts/package.sh amd64
-	./scripts/package.sh arm64
-	cd dist && sha256sum cronova_linux_*.tar.gz > SHA256SUMS
+package: ## build release tarballs (linux+darwin, amd64+arm64) + checksums -> dist/
+	./scripts/package.sh linux  amd64
+	./scripts/package.sh linux  arm64
+	./scripts/package.sh darwin amd64
+	./scripts/package.sh darwin arm64
+	cd dist && { command -v sha256sum >/dev/null 2>&1 && sha256sum cronova_*.tar.gz || shasum -a 256 cronova_*.tar.gz; } > SHA256SUMS
 	@echo "==> dist/SHA256SUMS"
 
 .PHONY: install
-install: release ## build + install as a systemd service (needs root)
-	sudo ./deploy/install.sh dist/cronova
+install: ## build for host + install as a native service (systemd/launchd; needs root)
+	$(MAKE) build
+	@case "$$(uname -s)" in \
+	  Darwin) sudo ./deploy/install-macos.sh ./cronova ;; \
+	  Linux)  sudo ./deploy/install.sh ./cronova ;; \
+	  *) echo "unsupported OS: $$(uname -s)" >&2; exit 1 ;; \
+	esac
 
 .PHONY: clean
 clean:

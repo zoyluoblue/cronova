@@ -26,13 +26,33 @@ func cmdInit(args []string) error {
 
 	// Prefill from an existing config so a re-run shows current values as defaults.
 	cfg := defaultConfig()
+	_, statErr := os.Stat(*configPath)
+	fileExisted := statErr == nil // re-run (reconfigure) vs. fresh install
 	if err := loadConfigFile(&cfg, *configPath, false); err != nil {
 		return err
 	}
+	// CRONOVA_* overlays the file/defaults for the fields written to cronova.yaml
+	// (http, tick, executor, auth.session_ttl, auth.secure_cookie), so a
+	// non-interactive install can preset them; interactive prompts still override
+	// the ones they cover. Storage paths (db/dags/logs) are intentionally left to
+	// the service unit/plist flags, so they are not applied here.
+	applyEnv(&cfg)
 	port, bindAll := splitHTTP(cfg.HTTP)
 	adminUser := envOr("CRONOVA_ADMIN_USER", "admin")
 	adminPass := os.Getenv("CRONOVA_ADMIN_PASSWORD")
+
+	// Resolve auth: a FRESH install defaults to on (secure); a re-run keeps the
+	// existing file's choice; a RECOGNIZED CRONOVA_AUTH overrides either. An
+	// unrecognized/blank CRONOVA_AUTH never disables auth (no fail-open).
 	authEnabled := true
+	if fileExisted {
+		authEnabled = cfg.Auth.Enabled
+	}
+	if v, ok := os.LookupEnv("CRONOVA_AUTH"); ok {
+		if b, valid := parseBool(v); valid {
+			authEnabled = b
+		}
+	}
 	genPW := false
 
 	interactive := !*yes && isTerminal(os.Stdin)
@@ -60,16 +80,19 @@ func cmdInit(args []string) error {
 			}
 			fmt.Println("  passwords did not match, try again")
 		}
-		authEnabled = promptYesNo(in, "Require login for the console/API (recommended)", true)
+		authEnabled = promptYesNo(in, "Require login for the console/API (recommended)", authEnabled)
+
+		// the wizard owns the listen address; rebuild it from the prompts. In
+		// non-interactive mode cfg.HTTP keeps its env/file/default value.
+		bind := ""
+		if !bindAll {
+			bind = "127.0.0.1"
+		}
+		cfg.HTTP = bind + ":" + port
 	} else if adminPass == "" {
 		adminPass, genPW = randPassword(24), true
 	}
 
-	bind := ""
-	if !bindAll {
-		bind = "127.0.0.1"
-	}
-	cfg.HTTP = bind + ":" + port
 	cfg.Auth.Enabled = authEnabled
 
 	if err := writeFileMode(*configPath, renderConfigYAML(cfg), 0o644); err != nil {
