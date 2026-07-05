@@ -230,6 +230,19 @@ type AuditEntry struct {
 	Detail string    `json:"detail,omitempty"`
 }
 
+// APIToken is a bearer credential for programmatic/machine API access. Only the
+// hash is persisted; Plaintext is populated ONLY in the create response (shown
+// once). Prefix is the leading chars, kept for display in the token list.
+type APIToken struct {
+	ID         int64      `json:"id"`
+	Name       string     `json:"name"`
+	Role       Role       `json:"role"`
+	Prefix     string     `json:"prefix"`
+	Plaintext  string     `json:"token,omitempty"` // create-response only; never stored
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
 // Session is an opaque server-side session bound to a user.
 type Session struct {
 	Token     string    `json:"-"`

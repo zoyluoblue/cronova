@@ -1126,6 +1126,95 @@ async function showAudit() {
       : `<div class="empty">${t("audit_empty")}</div>`}`;
 }
 
+// ---- API & integration (interactive docs + API tokens) ----
+let TOKENS = null;
+async function showApi() {
+  view = "api"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("api"); setHash("#/api");
+  try { TOKENS = await api("/api/tokens"); }
+  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  renderApi();
+}
+function roleLabel(role) { return role === "viewer" ? t("role_viewer_ro") : t("role_admin_full"); }
+function renderApi() {
+  if (view !== "api" || !TOKENS) return;
+  const admin = !authUser || authUser.role === "admin";
+  const rows = TOKENS.map((k) => `<tr>
+      <td class="mono">${esc(k.name)}</td>
+      <td><span class="tag">${esc(roleLabel(k.role))}</span></td>
+      <td class="mono muted">${esc(k.prefix)}…</td>
+      <td style="font-size:12.5px">${fmt(k.created_at)}</td>
+      <td style="font-size:12.5px" class="muted">${k.last_used_at ? fmt(k.last_used_at) : t("tok_never")}</td>
+      ${admin ? `<td><button class="icon danger" data-tokdel="${k.id}" data-tokname="${esc(k.name)}" aria-label="${t("tok_revoke")}">✕</button></td>` : "<td></td>"}
+    </tr>`).join("");
+  main.innerHTML = `
+    <div class="page-h"><h1>${t("api_title")}</h1></div>
+    <div class="page-sub">${esc(t("api_sub"))}</div>
+
+    <div class="api-docs-card">
+      <div class="adc-body">
+        <div class="adc-h">${t("api_docs_h")}</div>
+        <div class="adc-hint">${esc(t("api_docs_hint"))}</div>
+      </div>
+      <div class="adc-actions">
+        <a class="btn primary" href="/docs" target="_blank" rel="noopener">${t("api_open_docs")}</a>
+        <a class="btn" href="/openapi.json" target="_blank" rel="noopener">${t("api_spec_link")}</a>
+      </div>
+    </div>
+
+    <div class="page-h" style="margin-top:26px"><h2 style="font-size:16px;margin:0">${t("tok_title")}</h2><span class="num">${TOKENS.length}</span></div>
+    <div class="page-sub">${esc(t("tok_sub"))}</div>
+    ${TOKENS.length ? `<table class="tbl">
+      <thead><tr><th>${t("tok_name")}</th><th style="width:150px">${t("tok_role")}</th><th style="width:130px">${t("tok_prefix")}</th><th style="width:170px">${t("tok_created")}</th><th style="width:170px">${t("tok_lastused")}</th><th style="width:50px"></th></tr></thead>
+      <tbody>${rows}</tbody></table>` : `<div class="empty">${t("tok_none")}</div>`}
+    ${admin ? `<div class="toolbar" style="margin-top:16px">
+      <input id="tok-name" class="mono" placeholder="${t("tok_name_ph")}" style="width:220px" maxlength="60">
+      <select id="tok-role"><option value="admin">${t("role_admin_full")}</option><option value="viewer">${t("role_viewer_ro")}</option></select>
+      <button class="primary" id="tok-add">${t("tok_create")}</button>
+    </div>` : ""}`;
+  if (admin) {
+    main.querySelectorAll("[data-tokdel]").forEach((b) => b.onclick = () => revokeToken(+b.dataset.tokdel, b.dataset.tokname));
+    const add = $("tok-add"); if (add) add.onclick = createToken;
+    const nameInput = $("tok-name");
+    if (nameInput) nameInput.onkeydown = (e) => { if (e.key === "Enter") createToken(); };
+  }
+}
+async function createToken() {
+  const name = $("tok-name").value.trim();
+  if (!name) { toast(t("tok_need_name"), "warn"); return; }
+  const role = $("tok-role").value;
+  try {
+    const tok = await api("/api/tokens", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, role }) });
+    TOKENS.unshift(tok); // newest first (matches backend ORDER BY id DESC)
+    renderApi();
+    toast(t("tok_created_ok"), "ok");
+    revealToken(tok); // show the plaintext ONCE
+  } catch (e) { toast(e.message, "fail"); }
+}
+async function revokeToken(id, name) {
+  if (!(await confirmDialog(t("tok_revoke_title", name), t("tok_revoke_body"), { danger: true, okLabel: t("tok_revoke") }))) return;
+  try { await api(`/api/tokens/${id}`, { method: "DELETE" }); TOKENS = TOKENS.filter((k) => k.id !== id); renderApi(); toast(t("tok_revoked"), "ok"); }
+  catch (e) { toast(e.message, "fail"); }
+}
+// one-time reveal of a freshly created token's plaintext (never retrievable again)
+function revealToken(tok) {
+  const root = $("modal-root");
+  root.innerHTML = `<div class="overlay" id="tk-ovl"><div class="modal" role="dialog" aria-modal="true" aria-label="${t("tok_reveal_h")}">
+    <h2>${t("tok_reveal_h")}</h2>
+    <div class="body">
+      <div class="tok-reveal-row"><code class="tok-plain mono" id="tk-plain">${esc(tok.token)}</code><button class="primary" id="tk-copy">${t("tok_copy")}</button></div>
+      <div class="tok-warn">⚠ ${esc(t("tok_reveal_warn"))}</div>
+    </div>
+    <div class="foot"><button class="primary" id="tk-done">${t("tok_done")}</button></div>
+  </div></div>`;
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  $("tk-ovl").onclick = (e) => { if (e.target.id === "tk-ovl") close(); };
+  $("tk-copy").onclick = () => copyText(tok.token).then((ok) => toast(ok ? t("copied") : t("copy_fail"), ok ? "ok" : "warn"));
+  $("tk-done").onclick = close;
+  $("tk-copy").focus();
+}
+
 // ---- variables & connections (UI-managed shared config) ----
 const CFG_KEY_RE = /^[A-Za-z0-9_.-]+$/; // mirrors the backend cfgKeyRe
 let RES = null, resTab = "vars";

@@ -51,6 +51,33 @@ func (s *Server) currentUser(r *http.Request) (*model.User, error) {
 	return s.store.GetUserByID(r.Context(), sess.UserID)
 }
 
+// tokenTouchInterval throttles the last_used_at write so a busy token does not
+// issue a DB write on every single request (MaxOpenConns is 1).
+const tokenTouchInterval = time.Minute
+
+// authenticate resolves a request principal from either an Authorization: Bearer
+// API token (machine access) or the session cookie (console). Tokens take
+// precedence when the header is present. The returned *model.User is synthetic
+// for tokens (Username "token:<name>", no DB user row) so it flows through the
+// same role-gating and audit path as a logged-in user.
+func (s *Server) authenticate(r *http.Request) (*model.User, error) {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+		if raw == "" {
+			return nil, errors.New("empty bearer token")
+		}
+		tok, err := s.store.GetAPITokenByHash(r.Context(), auth.HashAPIToken(raw))
+		if err != nil {
+			return nil, err
+		}
+		if tok.LastUsedAt == nil || time.Since(*tok.LastUsedAt) > tokenTouchInterval {
+			_ = s.store.TouchAPIToken(r.Context(), tok.ID) // best-effort, throttled
+		}
+		return &model.User{Username: "token:" + tok.Name, Role: tok.Role}, nil
+	}
+	return s.currentUser(r)
+}
+
 // withAuth guards /api/* when auth is enabled. Static assets, login, and health
 // probes stay public so the login screen can load and probes work; /api/info is
 // NOT public (it discloses the executor target/tick) — the pre-auth flow only
@@ -68,7 +95,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		user, err := s.currentUser(r)
+		user, err := s.authenticate(r)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return

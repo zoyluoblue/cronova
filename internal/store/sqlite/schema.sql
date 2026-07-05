@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target);
 
+-- API tokens for machine/programmatic access (Authorization: Bearer <token>).
+-- Only the SHA-256 hash of the token is stored; the plaintext is shown once at
+-- creation. role is 'admin' (full) or 'viewer' (read-only), same as users.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    role         TEXT NOT NULL DEFAULT 'admin',
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL DEFAULT '',
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_token_hash ON api_tokens(token_hash);
+
 -- Console/API accounts. Passwords are PBKDF2-HMAC-SHA256 hashes (never plaintext). role is
 -- 'admin' (full access) or 'viewer' (read-only). Auth is opt-in (auth.enabled).
 CREATE TABLE IF NOT EXISTS users (

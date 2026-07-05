@@ -940,3 +940,88 @@ func (s *Store) ListAudit(ctx context.Context, target string, limit int) ([]*mod
 	}
 	return out, rows.Err()
 }
+
+// CreateAPIToken inserts a token, storing only its hash. The plaintext is never
+// persisted (the caller returns it once in the create response).
+func (s *Store) CreateAPIToken(ctx context.Context, t *model.APIToken, hash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO api_tokens (name, role, token_hash, prefix, created_at) VALUES (?,?,?,?,?)`,
+		t.Name, string(t.Role), hash, t.Prefix, fmtTime(time.Now().UTC()))
+	if err != nil {
+		return err
+	}
+	t.ID, _ = res.LastInsertId()
+	t.CreatedAt = time.Now().UTC()
+	return nil
+}
+
+// ListAPITokens returns all tokens newest-first (never the hash or plaintext).
+func (s *Store) ListAPITokens(ctx context.Context) ([]*model.APIToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, role, prefix, created_at, last_used_at FROM api_tokens ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.APIToken
+	for rows.Next() {
+		t := &model.APIToken{}
+		var role, created string
+		var lastUsed sql.NullString
+		if err := rows.Scan(&t.ID, &t.Name, &role, &t.Prefix, &created, &lastUsed); err != nil {
+			return nil, err
+		}
+		t.Role = model.Role(role)
+		t.CreatedAt = parseLoose(created)
+		if lastUsed.Valid && lastUsed.String != "" {
+			lt := parseLoose(lastUsed.String)
+			t.LastUsedAt = &lt
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// GetAPITokenByHash resolves an incoming bearer token's hash to its record, or
+// ErrNotFound. Used on every Bearer-authenticated request.
+func (s *Store) GetAPITokenByHash(ctx context.Context, hash string) (*model.APIToken, error) {
+	t := &model.APIToken{}
+	var role, created string
+	var lastUsed sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, role, prefix, created_at, last_used_at FROM api_tokens WHERE token_hash=?`, hash).
+		Scan(&t.ID, &t.Name, &role, &t.Prefix, &created, &lastUsed)
+	if err == sql.ErrNoRows {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	t.Role = model.Role(role)
+	t.CreatedAt = parseLoose(created)
+	if lastUsed.Valid && lastUsed.String != "" {
+		lt := parseLoose(lastUsed.String)
+		t.LastUsedAt = &lt
+	}
+	return t, nil
+}
+
+// TouchAPIToken records the token's most recent use (best-effort, throttled by
+// the caller).
+func (s *Store) TouchAPIToken(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE api_tokens SET last_used_at=? WHERE id=?`, fmtTime(time.Now().UTC()), id)
+	return err
+}
+
+// DeleteAPIToken revokes a token by id. Returns ErrNotFound if absent.
+func (s *Store) DeleteAPIToken(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM api_tokens WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}

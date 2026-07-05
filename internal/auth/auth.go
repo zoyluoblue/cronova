@@ -74,3 +74,26 @@ func NewSessionToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// APITokenPrefix labels cronova bearer tokens so they are recognizable in logs
+// and secret scanners (e.g. "cnv_pat_" = cronova personal access token).
+const APITokenPrefix = "cnv_pat_"
+
+// NewAPIToken mints a bearer token: the plaintext (shown once) and its SHA-256
+// hex hash (stored). The plaintext is APITokenPrefix + 256 bits of base64url.
+func NewAPIToken() (plaintext, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", err
+	}
+	plaintext = APITokenPrefix + base64.RawURLEncoding.EncodeToString(b)
+	return plaintext, HashAPIToken(plaintext), nil
+}
+
+// HashAPIToken returns the lowercase SHA-256 hex of a bearer token. Bearer
+// tokens are high-entropy random values, so a plain (unsalted) hash is
+// sufficient — it lets us look up by hash and never store the plaintext.
+func HashAPIToken(plaintext string) string {
+	sum := sha256.Sum256([]byte(plaintext))
+	return hex.EncodeToString(sum[:])
+}

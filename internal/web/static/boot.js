@@ -20,7 +20,7 @@ $("newdag").onclick = () => newDagModal();
 $("lang").onclick = () => setLang(lang === "zh" ? "en" : "zh");
 $("theme").onclick = () => { theme = theme === "dark" ? "light" : "dark"; localStorage.setItem("cnv_theme", theme); applyTheme(); };
 applyTheme();
-document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.onclick = () => { const v = n.dataset.nav; v === "pools" ? showPools() : v === "graph" ? showGraph() : v === "resources" ? showResources() : v === "audit" ? showAudit() : loadDags(); });
+document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.onclick = () => { const v = n.dataset.nav; v === "pools" ? showPools() : v === "graph" ? showGraph() : v === "resources" ? showResources() : v === "audit" ? showAudit() : v === "api" ? showApi() : loadDags(); });
 // One delegated keydown (on the stable document, survives every innerHTML swap):
 // Enter/Space activates any focusable widget we expose with a role (rows, toggles,
 // chips, nav items) — so the focus ring lands on something operable. (#5)

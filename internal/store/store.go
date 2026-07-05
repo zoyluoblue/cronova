@@ -55,6 +55,14 @@ type Store interface {
 	// ListAudit returns audit entries newest-first; target != "" filters to one dag/run.
 	ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error)
 
+	// --- API tokens (Bearer auth) ---
+	CreateAPIToken(ctx context.Context, t *model.APIToken, hash string) error
+	ListAPITokens(ctx context.Context) ([]*model.APIToken, error)
+	// GetAPITokenByHash resolves an incoming bearer token's hash to its record.
+	GetAPITokenByHash(ctx context.Context, hash string) (*model.APIToken, error)
+	TouchAPIToken(ctx context.Context, id int64) error
+	DeleteAPIToken(ctx context.Context, id int64) error
+
 	// --- task instances ---
 	CreateTaskInstance(ctx context.Context, ti *model.TaskInstance) error
 	GetTaskInstance(ctx context.Context, id int64) (*model.TaskInstance, error)

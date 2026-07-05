@@ -112,6 +112,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /metrics", s.metrics) // Prometheus; unauthenticated (non-/api/ path)
 	mux.HandleFunc("GET /api/audit", s.listAudit)
+	mux.HandleFunc("GET /api/tokens", s.listTokens)
+	mux.HandleFunc("POST /api/tokens", s.createToken)
+	mux.HandleFunc("DELETE /api/tokens/{id}", s.deleteToken)
+	mux.HandleFunc("GET /openapi.json", s.openAPISpec) // unauthenticated (non-/api/ path)
+	mux.HandleFunc("GET /docs", s.docsPage)            // unauthenticated (non-/api/ path)
 	if s.web != nil {
 		// no-cache: embedded assets share a fixed modtime, so without this a
 		// browser can serve a stale console after the binary is upgraded.

@@ -56,9 +56,18 @@ const DICT = {
     t_sla: "任务 SLA（秒）", t_sla_hint: "从 run 开始算，此任务超时未完成即告警。0=关闭。", t_timeout_hint: "单次执行超时即杀（秒）。0=不限。",
     danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
     nd_more: "调度与更多选项", nd_less: "收起",
-    nav_resources: "变量 & 连接", nav_audit: "审计",
+    nav_resources: "变量 & 连接", nav_audit: "审计", nav_api: "API",
     audit_sub: "运维操作记录:谁在何时对哪个 DAG/运行做了什么。", audit_empty: "暂无操作记录", au_time: "时间", au_actor: "操作人", au_action: "操作", au_target: "对象",
-    act_trigger: "触发", act_cancel: "取消", act_retry_run: "重跑运行", act_retry_task: "重跑任务", act_mark_task: "标记任务", act_mark_run: "标记运行", act_save_dag: "保存 DAG", act_create_dag: "创建 DAG", act_delete_dag: "删除 DAG", act_pause: "暂停", act_unpause: "恢复",
+    act_trigger: "触发", act_cancel: "取消", act_retry_run: "重跑运行", act_retry_task: "重跑任务", act_mark_task: "标记任务", act_mark_run: "标记运行", act_save_dag: "保存 DAG", act_create_dag: "创建 DAG", act_delete_dag: "删除 DAG", act_pause: "暂停", act_unpause: "恢复", act_create_token: "创建 Token", act_delete_token: "撤销 Token",
+    api_title: "API 与集成", api_sub: "把 cronova 的全部能力对接到你的平台。查看交互式 API 文档,并管理机器访问用的 API Token。",
+    api_docs_h: "API 文档", api_docs_hint: "完整的 OpenAPI 参考,内置 curl / Go / Python / Java 示例,可在页面内切换语言。", api_open_docs: "打开 API 文档 →", api_spec_link: "OpenAPI 规范",
+    tok_title: "API Tokens", tok_sub: "机器访问凭据。以 Authorization: Bearer <token> 调用 API。明文仅在创建时显示一次。",
+    tok_name: "名称", tok_role: "角色", tok_prefix: "前缀", tok_created: "创建时间", tok_lastused: "最近使用", tok_never: "从未使用",
+    tok_create: "创建 Token", tok_none: "还没有 Token", tok_name_ph: "如 ci-bot", tok_revoke: "撤销", tok_need_name: "请填写名称",
+    tok_revoke_title: (n) => `撤销 Token“${n}”?`, tok_revoke_body: "撤销后使用该 Token 的调用会立即失败,且不可恢复。",
+    tok_created_ok: "Token 已创建", tok_revoked: "Token 已撤销",
+    tok_reveal_h: "你的新 API Token", tok_reveal_warn: "请立即复制并妥善保存 —— 关闭后将无法再次查看明文。", tok_copy: "复制", tok_done: "我已保存",
+    role_admin_full: "管理员(读写)", role_viewer_ro: "只读(仅 GET)",
     res_vars: "变量", res_conns: "连接",
     res_sub: "跨任务共享的配置。命令里用 {{ var.KEY }} / {{ conn.ID.字段 }} 引用，触发时用 {{ params.KEY }}。",
     v_key: "变量名", v_value: "值", v_add: "添加变量", v_none: "还没有变量", v_save: "保存",
@@ -160,9 +169,18 @@ const DICT = {
     t_sla: "Task SLA (sec)", t_sla_hint: "From run start; alert if this task hasn't finished in time. 0 = off.", t_timeout_hint: "Kill a single execution after this many seconds. 0 = none.",
     danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
     nd_more: "Schedule & more options", nd_less: "Hide",
-    nav_resources: "Variables & Connections", nav_audit: "Audit",
+    nav_resources: "Variables & Connections", nav_audit: "Audit", nav_api: "API",
     audit_sub: "Operations log: who did what to which DAG/run, and when.", audit_empty: "No operations logged yet", au_time: "Time", au_actor: "Actor", au_action: "Action", au_target: "Target",
-    act_trigger: "trigger", act_cancel: "cancel", act_retry_run: "retry run", act_retry_task: "retry task", act_mark_task: "mark task", act_mark_run: "mark run", act_save_dag: "save DAG", act_create_dag: "create DAG", act_delete_dag: "delete DAG", act_pause: "pause", act_unpause: "unpause",
+    act_trigger: "trigger", act_cancel: "cancel", act_retry_run: "retry run", act_retry_task: "retry task", act_mark_task: "mark task", act_mark_run: "mark run", act_save_dag: "save DAG", act_create_dag: "create DAG", act_delete_dag: "delete DAG", act_pause: "pause", act_unpause: "unpause", act_create_token: "create token", act_delete_token: "revoke token",
+    api_title: "API & Integration", api_sub: "Drive cronova from your own platform. Browse the interactive API reference and manage API tokens for machine access.",
+    api_docs_h: "API reference", api_docs_hint: "Full OpenAPI reference with built-in curl / Go / Python / Java samples and an in-page language switcher.", api_open_docs: "Open API reference →", api_spec_link: "OpenAPI spec",
+    tok_title: "API Tokens", tok_sub: "Machine credentials. Call the API with Authorization: Bearer <token>. The plaintext is shown only once, at creation.",
+    tok_name: "Name", tok_role: "Role", tok_prefix: "Prefix", tok_created: "Created", tok_lastused: "Last used", tok_never: "Never used",
+    tok_create: "Create token", tok_none: "No tokens yet", tok_name_ph: "e.g. ci-bot", tok_revoke: "Revoke", tok_need_name: "Name is required",
+    tok_revoke_title: (n) => `Revoke token “${n}”?`, tok_revoke_body: "Calls using this token will fail immediately. This cannot be undone.",
+    tok_created_ok: "Token created", tok_revoked: "Token revoked",
+    tok_reveal_h: "Your new API token", tok_reveal_warn: "Copy it now and store it securely — you won't be able to see the plaintext again.", tok_copy: "Copy", tok_done: "I've saved it",
+    role_admin_full: "Admin (read-write)", role_viewer_ro: "Viewer (GET only)",
     res_vars: "Variables", res_conns: "Connections",
     res_sub: "Config shared across tasks. Reference in commands as {{ var.KEY }} / {{ conn.ID.field }}, or {{ params.KEY }} at trigger time.",
     v_key: "Key", v_value: "Value", v_add: "Add variable", v_none: "No variables yet", v_save: "Save",
@@ -548,6 +566,7 @@ function applyRoute() {
   if (seg[0] === "resources") return showResources();
   if (seg[0] === "graph") return showGraph();
   if (seg[0] === "audit") return showAudit();
+  if (seg[0] === "api") return showApi();
   if (seg[0] === "run" && seg[1]) return showRun(seg[1]);
   if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {
     return showDag(seg[1]).then(() => { if (D && D.dag.dag_id === seg[1] && D.tasks.some((x) => x.id === seg[3])) showTask(seg[1], seg[3]); });
@@ -671,7 +690,7 @@ function startApp() {
 let lastNavLabel = null;
 function setNav(navKey, crumb) {
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
-  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : navKey === "audit" ? t("nav_audit") : "DAGs");
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "api" ? t("nav_api") : "DAGs");
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
   // search stays visible everywhere now (global jump-to-DAG), not just the dashboard
@@ -702,5 +721,6 @@ function setLang(l) {
   else if (view === "resources") renderResources(); // from in-memory RES, no refetch
   else if (view === "graph") showGraph();
   else if (view === "audit") showAudit();
+  else if (view === "api") renderApi(); // from in-memory TOKENS, no refetch
 }
 
