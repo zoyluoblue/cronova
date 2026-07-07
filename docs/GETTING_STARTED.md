@@ -2,7 +2,7 @@
 
 Install cronova, start the scheduler and web console, write and trigger your first DAG, and wire your own scripts into a workflow — the hands-on path for the single-binary, self-hosted **workflow scheduler** and open-source [Apache Airflow](https://airflow.apache.org/) / Azkaban alternative.
 
-This guide is task-oriented. For the full field-by-field DAG spec see the [DAG Reference](DAG_REFERENCE.md); for every command and flag see the [CLI Reference](CLI.md); for production install see [Deployment](DEPLOY.md). New to cronova? Start with the [README](../README.md).
+This guide is task-oriented. For the full field-by-field DAG spec see the [DAG Reference](DAG_REFERENCE.md); for every command and flag see the [CLI Reference](CLI.md); for production install see [Deployment](DEPLOY.md). New to cronova? Start with the [README](https://github.com/zoyluoblue/cronova#readme).
 
 ## 1. Install cronova
 
@@ -105,7 +105,7 @@ tasks:
     deps: [greet]            # runs after greet succeeds
 ```
 
-The scheduler loads `*.yaml` and `*.yml` files from the DAG directory. A malformed file is logged and skipped, not fatal. See the runnable examples in [`dags/`](../dags/) — `example_etl.yaml`, `ticker.yaml`, `upstream_ingest.yaml`, and `downstream_report.yaml`.
+The scheduler loads `*.yaml` and `*.yml` files from the DAG directory. A malformed file is logged and skipped, not fatal. See the runnable examples in [`dags/`](https://github.com/zoyluoblue/cronova/tree/main/dags) — `example_etl.yaml`, `ticker.yaml`, `upstream_ingest.yaml`, and `downstream_report.yaml`.
 
 Now run it. With `serve` running, list and trigger the DAG:
 

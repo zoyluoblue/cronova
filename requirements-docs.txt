@@ -1,0 +1,4 @@
+# Docs-site build deps (Material for MkDocs). Used by `make docs-*` and CI only;
+# nothing here ships in the cronova binary.
+mkdocs-material>=9.7,<10
+mkdocs-static-i18n>=1.3,<2

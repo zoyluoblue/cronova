@@ -1,6 +1,6 @@
 # cronova vs. Airflow, Azkaban, Dagster, Prefect & cron
 
-How cronova compares to popular workflow schedulers and orchestrators — and when to choose it. cronova targets the gap between a bare `crontab` and a full data-orchestration platform: **real DAG scheduling with almost no operational overhead**, shipped as a single Go binary. For the project overview see the [README](../README.md); for common questions see the [FAQ](FAQ.md).
+How cronova compares to popular workflow schedulers and orchestrators — and when to choose it. cronova targets the gap between a bare `crontab` and a full data-orchestration platform: **real DAG scheduling with almost no operational overhead**, shipped as a single Go binary. For the project overview see the [README](https://github.com/zoyluoblue/cronova#readme); for common questions see the [FAQ](FAQ.md).
 
 > This page describes cronova's capabilities from its actual features; comparisons to other tools reflect their widely documented, general characteristics, not a benchmark. Every tool here is good at what it was built for.
 
@@ -58,4 +58,4 @@ For anything beyond isolated commands, yes: it speaks cron syntax and `@every` i
 
 ## See also
 
-- [README](../README.md) · [Getting Started](GETTING_STARTED.md) · [DAG Reference](DAG_REFERENCE.md) · [Architecture](ARCHITECTURE.md) · [FAQ](FAQ.md)
+- [README](https://github.com/zoyluoblue/cronova#readme) · [Getting Started](GETTING_STARTED.md) · [DAG Reference](DAG_REFERENCE.md) · [Architecture](ARCHITECTURE.md) · [FAQ](FAQ.md)

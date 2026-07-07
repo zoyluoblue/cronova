@@ -1,8 +1,8 @@
 # DAG & Task Reference
 
-The complete YAML schema for a cronova **DAG** (directed acyclic graph of tasks) — every DAG-level and task-level field, the five task types, trigger rules, and resource pools. For a hands-on introduction see [Getting Started](GETTING_STARTED.md); for the project overview see the [README](../README.md).
+The complete YAML schema for a cronova **DAG** (directed acyclic graph of tasks) — every DAG-level and task-level field, the five task types, trigger rules, and resource pools. For a hands-on introduction see [Getting Started](GETTING_STARTED.md); for the project overview see the [README](https://github.com/zoyluoblue/cronova#readme).
 
-A DAG is a single YAML file in the `dags/` directory (default `./dags`, or the service's data dir). cronova validates and cycle-checks every DAG on load; runnable examples live in [`dags/`](../dags/).
+A DAG is a single YAML file in the `dags/` directory (default `./dags`, or the service's data dir). cronova validates and cycle-checks every DAG on load; runnable examples live in [`dags/`](https://github.com/zoyluoblue/cronova/tree/main/dags).
 
 ```yaml
 dag_id: daily_etl
@@ -165,7 +165,7 @@ cronova pools                    # list pools and usage
 cronova pools set reports 4      # create/resize the "reports" pool to 4 slots
 ```
 
-Every task defaults to the `default` pool. See the [CLI Reference](CLI.md#pools) and [Architecture](ARCHITECTURE.md).
+Every task defaults to the `default` pool. See the [CLI Reference](CLI.md#local-operations) and [Architecture](ARCHITECTURE.md).
 
 ## See also
 

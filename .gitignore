@@ -15,3 +15,6 @@
 # scratch screenshots / working artifacts (never commit)
 /tmp/
 node_modules/
+# mkdocs build output + docs venv
+/site/
+/.venv-docs/

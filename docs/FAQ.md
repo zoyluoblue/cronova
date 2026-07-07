@@ -2,7 +2,7 @@
 
 Answers to the most common questions about cronova, the single-binary, self-hosted **workflow scheduler** and open-source Airflow / Azkaban alternative — what it is, how it installs, where it stores data, and how to run it in production.
 
-This page expands on the short FAQ in the [README](../README.md). For task-by-task guides see [Getting Started](GETTING_STARTED.md), [DAG Reference](DAG_REFERENCE.md), [CLI Reference](CLI.md), [AI Agents (MCP)](AGENTS.md), [Deployment](DEPLOY.md), and [Architecture](ARCHITECTURE.md).
+This page expands on the short FAQ in the [README](https://github.com/zoyluoblue/cronova#readme). For task-by-task guides see [Getting Started](GETTING_STARTED.md), [DAG Reference](DAG_REFERENCE.md), [CLI Reference](CLI.md), [AI Agents (MCP)](AGENTS.md), [Deployment](DEPLOY.md), and [Architecture](ARCHITECTURE.md).
 
 ## What is cronova?
 
@@ -105,11 +105,11 @@ Like other mutating commands, `uninstall` needs root and auto-elevates via `sudo
 
 ## What license is cronova released under?
 
-cronova is released under the **[MIT License](../LICENSE)** — a permissive license that allows commercial and private use, modification, and redistribution.
+cronova is released under the **[MIT License](https://github.com/zoyluoblue/cronova/blob/main/LICENSE)** — a permissive license that allows commercial and private use, modification, and redistribution.
 
 ## See also
 
-- [README](../README.md) — project overview and quick start
+- [README](https://github.com/zoyluoblue/cronova#readme) — project overview and quick start
 - [Getting Started](GETTING_STARTED.md) — install, first DAG, projects, template variables
 - [DAG Reference](DAG_REFERENCE.md) — every DAG/task field, task types, triggers, pools
 - [CLI Reference](CLI.md) — every `cronova` command and flag

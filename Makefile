@@ -42,9 +42,26 @@ install: ## build for host + install as a native service (systemd/launchd; needs
 	  *) echo "unsupported OS: $$(uname -s)" >&2; exit 1 ;; \
 	esac
 
+# ---- docs site (Material for MkDocs). Published to GitHub Pages automatically by
+# .github/workflows/docs.yml on push to main; these targets are for local dev only.
+# Python is docs-tooling only — nothing here ships in the cronova binary.
+DOCS_VENV  := .venv-docs
+
+$(DOCS_VENV)/bin/mkdocs:
+	python3 -m venv $(DOCS_VENV)
+	$(DOCS_VENV)/bin/pip -q install -r requirements-docs.txt
+
+.PHONY: docs-serve
+docs-serve: $(DOCS_VENV)/bin/mkdocs ## live-reload docs preview at http://127.0.0.1:8000
+	$(DOCS_VENV)/bin/mkdocs serve
+
+.PHONY: docs-build
+docs-build: $(DOCS_VENV)/bin/mkdocs ## build the docs site -> ./site (strict; same as CI)
+	$(DOCS_VENV)/bin/mkdocs build --strict
+
 .PHONY: clean
 clean:
-	rm -rf dist cronova cronova-executor
+	rm -rf dist cronova cronova-executor site $(DOCS_VENV)
 
 .PHONY: help
 help:

@@ -1,0 +1,161 @@
+# cronova documentation site (Material for MkDocs), published to GitHub Pages at
+# https://zoyluoblue.github.io/cronova/ by .github/workflows/docs.yml on push to main.
+#
+#   make docs-serve    # live-reload preview at http://127.0.0.1:8000
+#   make docs-build    # build ./site (strict: broken links fail the build)
+#   (deploy is automatic via GitHub Actions; no manual step)
+#
+# Sources are the SAME docs/*.md that render on GitHub (docs-as-code, one source
+# of truth). docs/README.md is the GitHub-facing index and is excluded here;
+# docs/index.md is the site home. Chinese pages use the *.zh.md suffix
+# (mkdocs-static-i18n); untranslated pages fall back to English.
+
+site_name: cronova
+site_description: >-
+  cronova — a lightweight, self-hosted workflow scheduler in a single Go binary.
+  An open-source Airflow / Azkaban alternative with DAGs, catchup, retries,
+  a web console, a REST API, and a built-in MCP server for AI agents.
+site_url: https://zoyluoblue.github.io/cronova/
+repo_url: https://github.com/zoyluoblue/cronova
+repo_name: zoyluoblue/cronova
+edit_uri: edit/main/docs/
+copyright: MIT © cronova authors
+
+docs_dir: docs
+site_dir: site
+exclude_docs: |
+  README.md
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/graph
+    repo: fontawesome/brands/github
+  palette:
+    # dark first: matches the cronova console's own theme
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      # unicode slugs: keeps GitHub-style anchors for Chinese headings
+      # (ARCHITECTURE.md's hand-written TOC), instead of stripping non-ASCII.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds: { case: lower }
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav_translations:
+            Home: 首页
+            Quick start: 快速上手
+            Tutorial: 教程
+            Install cronova: 安装 cronova
+            Your first DAG: 第一个 DAG
+            Scheduling & catchup: 调度与补跑
+            Dependencies & trigger rules: 依赖与触发规则
+            Template variables: 模板变量
+            Variables, connections & params: 变量、连接与参数
+            Run your own scripts & projects: 运行你的脚本与工程
+            Task types: 任务类型
+            Retries, timeouts & pools: 重试、超时与资源池
+            Cross-DAG triggers & notifications: 跨 DAG 触发与通知
+            Advanced: 进阶
+            Reference: 参考
+            About: 关于
+            Deployment: 部署
+            AI Agents (MCP): AI 智能体(MCP)
+            DAG & Task Reference: DAG 与任务参考
+            CLI Reference: CLI 参考
+            Architecture: 架构
+            Design Notes: 设计笔记
+            Comparison: 对比
+            FAQ: 常见问题
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/zoyluoblue/cronova
+
+nav:
+  - Home: index.md
+  - Quick start: GETTING_STARTED.md
+  - Tutorial:
+      - tutorial/index.md
+      - Install cronova: tutorial/install.md
+      - Your first DAG: tutorial/first-dag.md
+      - Scheduling & catchup: tutorial/scheduling.md
+      - Dependencies & trigger rules: tutorial/dependencies.md
+      - Template variables: tutorial/template-variables.md
+      - Variables, connections & params: tutorial/variables-connections-params.md
+      - Run your own scripts & projects: tutorial/projects.md
+      - Task types: tutorial/task-types.md
+      - Retries, timeouts & pools: tutorial/retries-timeouts-pools.md
+      - Cross-DAG triggers & notifications: tutorial/cross-dag.md
+  - Advanced:
+      - Deployment: DEPLOY.md
+      - AI Agents (MCP): AGENTS.md
+  - Reference:
+      - DAG & Task Reference: DAG_REFERENCE.md
+      - CLI Reference: CLI.md
+  - About:
+      - Architecture: ARCHITECTURE.md
+      - Design Notes: DESIGN.md
+      - Comparison: COMPARISON.md
+      - FAQ: FAQ.md
