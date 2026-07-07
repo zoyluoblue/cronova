@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -32,17 +33,28 @@ const maxBinary = 256 << 20 // 256 MiB
 // the counterpart to the bootstrap installer: same asset naming, same checksum
 // verification, but self-contained in the binary.
 //
-//	cronova update            # latest release
-//	cronova update v0.2.0     # a specific tag (re-install / downgrade allowed)
+//	cronova update                              # latest release
+//	cronova update v0.2.0                        # a specific tag (re-install / downgrade)
+//	cronova update -proxy http://127.0.0.1:7890  # download through a proxy
 //
 // CRONOVA_BASE_URL overrides the download origin (private mirror / testing).
 func cmdUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	proxy := fs.String("proxy", "", "proxy for the download: http(s)://host:port or socks5://host:port, e.g. http://127.0.0.1:7890 (env CRONOVA_UPDATE_PROXY; also honors HTTPS_PROXY/ALL_PROXY)")
+	pos := parsePositionals(fs, args)
 	target := "latest"
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			return fmt.Errorf("unknown flag %q (usage: cronova update [version])", a)
+	if len(pos) > 0 {
+		target = pos[0]
+	}
+
+	proxyVal := *proxy
+	if proxyVal == "" {
+		proxyVal = os.Getenv("CRONOVA_UPDATE_PROXY")
+	}
+	if proxyVal != "" {
+		if _, err := normalizeProxyURL(proxyVal); err != nil {
+			return fmt.Errorf("invalid -proxy %q: %w", proxyVal, err)
 		}
-		target = a
 	}
 
 	if err := ensureRoot("update"); err != nil {
@@ -54,8 +66,12 @@ func cmdUpdate(args []string) error {
 		return err
 	}
 	asset := releaseAsset()
-	fmt.Printf("cronova: fetching %s (%s)…\n", asset, target)
-	bins, newVer, err := fetchRelease(base, asset)
+	if proxyVal != "" {
+		fmt.Printf("cronova: fetching %s (%s) via proxy %s…\n", asset, target, proxyVal)
+	} else {
+		fmt.Printf("cronova: fetching %s (%s)…\n", asset, target)
+	}
+	bins, newVer, err := fetchRelease(base, asset, proxyVal)
 	if err != nil {
 		return err
 	}
@@ -159,12 +175,45 @@ func releaseBaseURL(target string) string {
 	return "https://github.com/" + releaseRepo + "/releases/download/" + target
 }
 
-func httpClient() *http.Client {
+// httpClient builds the download client. A non-empty proxy (http(s)/socks5)
+// routes the download through it; empty falls back to the standard *_PROXY env
+// vars (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY) — a custom Transport does NOT read
+// them unless we ask it to.
+func httpClient(proxy string) *http.Client {
+	tr := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	if proxy != "" {
+		if pu, err := normalizeProxyURL(proxy); err == nil {
+			tr.Proxy = http.ProxyURL(pu)
+		}
+	} else {
+		tr.Proxy = http.ProxyFromEnvironment
+	}
 	return &http.Client{
 		Timeout:       10 * time.Minute,
-		Transport:     &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
+		Transport:     tr,
 		CheckRedirect: checkRedirect,
 	}
+}
+
+// normalizeProxyURL turns a proxy spec into a URL, defaulting a bare host:port to
+// an http proxy. Accepts http/https/socks5 (e.g. clash's 7890=http, 7891=socks5).
+func normalizeProxyURL(s string) (*url.URL, error) {
+	if !strings.Contains(s, "://") {
+		s = "http://" + s // "127.0.0.1:7890" -> http proxy
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q (use http, https, or socks5)", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("proxy is missing host:port")
+	}
+	return u, nil
 }
 
 // checkRedirect refuses to follow a redirect that downgrades to cleartext — a
@@ -215,13 +264,13 @@ func validateBaseURL(base string) error {
 // fetchRelease downloads the tarball, verifies it against SHA256SUMS when the
 // release publishes one (a missing sums file is a warning, a mismatch is fatal —
 // same trust model as deploy/bootstrap.sh), and extracts the binaries + version.
-func fetchRelease(base, asset string) (bins map[string][]byte, version string, err error) {
-	tarball, err := httpGet(base + "/" + asset)
+func fetchRelease(base, asset, proxy string) (bins map[string][]byte, version string, err error) {
+	tarball, err := httpGet(base+"/"+asset, proxy)
 	if err != nil {
 		return nil, "", fmt.Errorf("download %s: %w — see https://github.com/%s/releases", asset, err, releaseRepo)
 	}
 
-	if sums, sErr := httpGet(base + "/SHA256SUMS"); sErr != nil {
+	if sums, sErr := httpGet(base+"/SHA256SUMS", proxy); sErr != nil {
 		fmt.Fprintf(os.Stderr, "cronova: warning — could not fetch SHA256SUMS (%v), skipping verification\n", sErr)
 	} else if want, ok := sumFor(string(sums), asset); !ok {
 		fmt.Fprintf(os.Stderr, "cronova: warning — %s not listed in SHA256SUMS, skipping verification\n", asset)
@@ -245,8 +294,8 @@ func fetchRelease(base, asset string) (bins map[string][]byte, version string, e
 
 // httpGet returns the body of a 200 response; any other status or transport
 // error is returned as an error.
-func httpGet(url string) ([]byte, error) {
-	resp, err := httpClient().Get(url)
+func httpGet(url, proxy string) ([]byte, error) {
+	resp, err := httpClient(proxy).Get(url)
 	if err != nil {
 		return nil, err
 	}

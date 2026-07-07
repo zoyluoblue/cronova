@@ -22,7 +22,7 @@ func TestFetchReleaseAgainstRealGitHub(t *testing.T) {
 	base := releaseBaseURL("latest")
 	asset := releaseAsset()
 
-	bins, ver, err := fetchRelease(base, asset) // download + SHA256 verify + untar
+	bins, ver, err := fetchRelease(base, asset, "") // download + SHA256 verify + untar
 	if err != nil {
 		t.Fatalf("fetchRelease(%s/%s): %v", base, asset, err)
 	}

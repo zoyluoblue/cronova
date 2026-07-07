@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -131,6 +133,84 @@ func TestConfirmFrom(t *testing.T) {
 	}
 }
 
+// TestFetchReleaseThroughProxy proves the download actually ROUTES through the
+// proxy: a local forward-proxy counts every request, and fetchRelease's traffic
+// to the mirror must pass through it.
+func TestFetchReleaseThroughProxy(t *testing.T) {
+	tb := makeTarGz(t, map[string][]byte{"cronova": []byte("hi"), "VERSION": []byte("v1")})
+	sum := fmt.Sprintf("%x", sha256.Sum256(tb))
+	asset := releaseAsset()
+
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if filepath.Base(r.URL.Path) == asset {
+			w.Write(tb)
+		} else {
+			fmt.Fprint(w, sum+"  "+asset+"\n")
+		}
+	}))
+	defer mirror.Close()
+
+	var hits int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1) // an http proxy receives the ABSOLUTE URL
+		out, _ := http.NewRequest(r.Method, r.URL.String(), r.Body)
+		resp, err := http.DefaultTransport.RoundTrip(out)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+	defer proxy.Close()
+
+	bins, ver, err := fetchRelease(mirror.URL, asset, proxy.URL)
+	if err != nil {
+		t.Fatalf("fetchRelease via proxy: %v", err)
+	}
+	if string(bins["cronova"]) != "hi" || ver != "v1" {
+		t.Fatalf("got %q / %q", bins["cronova"], ver)
+	}
+	if n := atomic.LoadInt32(&hits); n < 1 {
+		t.Fatalf("download did NOT go through the proxy (hits=%d)", n)
+	}
+}
+
+func TestNormalizeProxyURL(t *testing.T) {
+	ok := map[string]string{
+		"127.0.0.1:7890":          "http://127.0.0.1:7890", // bare host:port -> http proxy
+		"http://127.0.0.1:7890":   "http://127.0.0.1:7890",
+		"https://proxy.corp:8080": "https://proxy.corp:8080",
+		"socks5://127.0.0.1:7891": "socks5://127.0.0.1:7891",
+	}
+	for in, want := range ok {
+		u, err := normalizeProxyURL(in)
+		if err != nil || u.String() != want {
+			t.Errorf("normalizeProxyURL(%q) = %v, %v; want %q", in, u, err, want)
+		}
+	}
+	for _, bad := range []string{"", "ftp://x:1", "://", "http://"} {
+		if _, err := normalizeProxyURL(bad); err == nil {
+			t.Errorf("normalizeProxyURL(%q) should error", bad)
+		}
+	}
+}
+
+func TestHTTPClientProxyWiring(t *testing.T) {
+	// explicit proxy -> the transport routes through it
+	tr := httpClient("http://127.0.0.1:7890").Transport.(*http.Transport)
+	req, _ := http.NewRequest("GET", "https://github.com/x", nil)
+	pu, err := tr.Proxy(req)
+	if err != nil || pu == nil || pu.Host != "127.0.0.1:7890" {
+		t.Errorf("explicit proxy: got %v, %v", pu, err)
+	}
+	// empty proxy -> falls back to the env proxy resolver (not nil)
+	if httpClient("").Transport.(*http.Transport).Proxy == nil {
+		t.Error("empty proxy should fall back to ProxyFromEnvironment, not disable proxying")
+	}
+}
+
 func TestSumFor(t *testing.T) {
 	sums := "abc123  cronova_linux_amd64.tar.gz\n" +
 		"def456 *cronova_darwin_arm64.tar.gz\n" +
@@ -193,7 +273,7 @@ func TestFetchRelease(t *testing.T) {
 	t.Run("verified", func(t *testing.T) {
 		srv := newServer(sum+"  "+asset+"\n", true)
 		defer srv.Close()
-		bins, ver, err := fetchRelease(srv.URL, asset)
+		bins, ver, err := fetchRelease(srv.URL, asset, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -205,7 +285,7 @@ func TestFetchRelease(t *testing.T) {
 	t.Run("checksum mismatch is fatal", func(t *testing.T) {
 		srv := newServer("deadbeef  "+asset+"\n", true)
 		defer srv.Close()
-		if _, _, err := fetchRelease(srv.URL, asset); err == nil {
+		if _, _, err := fetchRelease(srv.URL, asset, ""); err == nil {
 			t.Fatal("expected a checksum-mismatch error")
 		}
 	})
@@ -213,7 +293,7 @@ func TestFetchRelease(t *testing.T) {
 	t.Run("missing SHA256SUMS still succeeds", func(t *testing.T) {
 		srv := newServer("", false)
 		defer srv.Close()
-		if _, _, err := fetchRelease(srv.URL, asset); err != nil {
+		if _, _, err := fetchRelease(srv.URL, asset, ""); err != nil {
 			t.Fatalf("missing sums should warn+skip, not fail: %v", err)
 		}
 	})
@@ -221,7 +301,7 @@ func TestFetchRelease(t *testing.T) {
 	t.Run("404 asset errors", func(t *testing.T) {
 		srv := newServer("", true)
 		defer srv.Close()
-		if _, _, err := fetchRelease(srv.URL, "cronova_nope_nope.tar.gz"); err == nil {
+		if _, _, err := fetchRelease(srv.URL, "cronova_nope_nope.tar.gz", ""); err == nil {
 			t.Fatal("expected a download error for a missing asset")
 		}
 	})

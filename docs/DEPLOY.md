@@ -185,17 +185,24 @@ under the hood, so the native commands (below) still work if you prefer them.
 ### Updating
 
 ```bash
-cronova update          # latest release for this OS/arch, verified + swapped atomically
-cronova update v0.2.0   # a specific tag (re-install or downgrade)
+cronova update                              # latest release for this OS/arch, verified + swapped atomically
+cronova update v0.2.0                        # a specific tag (re-install or downgrade)
+cronova update -proxy http://127.0.0.1:7890  # download through a proxy
 ```
 
 `update` downloads the prebuilt release from GitHub (same asset + `SHA256SUMS`
 verification as the bootstrap installer), atomically replaces the installed
-binary (backing the old one up, so a failed restart — verified by confirming the
-service actually stays running — rolls back automatically), and restarts the
-service. `CRONOVA_BASE_URL=<origin>` points it at a private mirror; it **must be
-`https://`** (plain `http://` is allowed only for `localhost`), and downgrade
-redirects are refused. `update` does **not** touch your config, DB or DAGs.
+binary and refreshes the service definition (backing the old ones up, so a failed
+restart — verified by confirming the service actually stays running — rolls back
+automatically), and restarts the service. `CRONOVA_BASE_URL=<origin>` points it at
+a private mirror; it **must be `https://`** (plain `http://` is allowed only for
+`localhost`), and downgrade redirects are refused. `update` does **not** touch
+your config, DB or DAGs.
+
+**Behind a proxy** (e.g. a restricted network): `-proxy http://host:port` or
+`-proxy socks5://host:port` routes the download through it (bare `host:port` means
+an http proxy). It also honors the standard `CRONOVA_UPDATE_PROXY`, `HTTPS_PROXY`,
+and `ALL_PROXY` env vars — and those survive the automatic `sudo` escalation.
 
 ### Uninstalling
 

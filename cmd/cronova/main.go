@@ -190,7 +190,7 @@ usage:
 
   cronova start|stop|restart control the installed service (auto-elevates via sudo)
   cronova status             show the installed service's status
-  cronova update [version]   download + install the latest (or given) release, then restart
+  cronova update [version] [-proxy URL]   download + install the latest (or given) release, then restart
   cronova uninstall [--purge] remove the service + binary (--purge also deletes data)
   cronova version            print the build version and platform
   cronova healthcheck        probe /readyz and exit non-zero if unhealthy

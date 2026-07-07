@@ -50,6 +50,9 @@ func run(name string, args ...string) error {
 	return c.Run()
 }
 
+// proxyEnvNames are the standard proxy env vars forwarded through sudo (upper-cased).
+var proxyEnvNames = map[string]bool{"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true}
+
 // ensureRoot guarantees the current process is root for a mutating action. If it
 // is not, it transparently re-executes the exact same command under `sudo`
 // (replacing this process, so sudo's exit status becomes ours) — the "one-click"
@@ -75,10 +78,13 @@ func ensureRoot(action string) error {
 	}
 	fmt.Fprintf(os.Stderr, "cronova: %q needs root — re-running under sudo…\n", action)
 
-	// sudo VAR=val … cmd: forward our CRONOVA_* config across the env_reset barrier.
+	// sudo VAR=val … cmd: forward our CRONOVA_* config AND the standard *_PROXY
+	// vars across the env_reset barrier, so e.g. `HTTPS_PROXY=… cronova update`
+	// still reaches the download after escalation.
 	argv := []string{sudo}
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CRONOVA_") {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "CRONOVA_") || proxyEnvNames[strings.ToUpper(name)] {
 			argv = append(argv, kv)
 		}
 	}
