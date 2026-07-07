@@ -381,10 +381,56 @@ body, .sidebar, .topbar, .card, .graph-wrap, .empty-state, .modal, .toast, .tbl 
 .varchips { display: flex; flex-wrap: wrap; gap: 5px; margin: 3px 0 7px; }
 .chip.varchip { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--panel-2); }
 .chip.varchip:hover { border-color: var(--accent); color: var(--accent); }
+.chip.varchip:active { transform: translateY(0.5px); }
+
+/* grouped variable palette (built-in / var / conn / params) */
+.var-palette { display: flex; flex-direction: column; gap: 5px; margin: 3px 0 8px; }
+.vp-group { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.vp-label { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); min-width: 34px; }
+.vp-load { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.vp-hint { color: var(--faint); text-decoration: none; }
+.vp-hint:hover { color: var(--accent); border-color: var(--accent); }
+.varchip[data-kind="var"]:hover { border-color: var(--ok); color: var(--ok); }
+.varchip[data-kind="conn"]:hover { border-color: var(--accent-2); color: var(--accent-2); }
+.vp-keyin { font-family: var(--mono); font-size: 11px; padding: 3px 9px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); width: 130px; height: 24px; }
+.vp-keyin::placeholder { color: var(--faint); }
+.vp-keyin:focus { outline: none; border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 15%, transparent); }
+/* conn field menu */
+.vp-menu { position: fixed; z-index: 60; min-width: 168px; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-sm); box-shadow: 0 10px 30px rgba(0,0,0,.35); padding: 4px; }
+.vp-menu-head { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--faint); padding: 4px 8px 3px; }
+.vp-menu-item { display: block; width: 100%; text-align: left; font-family: var(--mono); font-size: 11.5px; color: var(--muted); background: none; border: none; border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+.vp-menu-item b { color: var(--accent-2); font-weight: 600; }
+.vp-menu-item:hover { background: var(--panel-2); color: var(--text); }
 .cmd-builder { margin: 2px 0 8px; }
 .cmd-preview { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-size: 12px; margin-top: 6px; }
 .cmd-preview .cp-label { color: var(--faint); }
 .cmd-preview code { font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; color: var(--text); word-break: break-all; }
+
+/* ---- variable pill editor (contenteditable command field) ---- */
+.pill-editor { width: 100%; min-height: 76px; font-family: var(--mono); font-size: 12.5px; line-height: 1.95; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+.pill-editor:hover { border-color: var(--line-2); }
+.pill-editor:focus, .pill-editor:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.pill-editor.pe-empty::before { content: attr(data-ph); color: var(--faint); pointer-events: none; }
+.pill-editor[data-single="1"] { min-height: 0; line-height: 1.7; white-space: nowrap; overflow-x: auto; }
+.pill-editor.pe-drop { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+/* a caret marker rendered at the live drop point while dragging */
+.pe-caret { display: inline-block; width: 2px; height: 1.15em; vertical-align: text-bottom; margin: 0 -1px; background: var(--accent); border-radius: 1px; }
+
+.pill { display: inline-flex; align-items: center; gap: 2px; vertical-align: baseline; margin: 0 1px; padding: 1px 3px 1px 7px; border-radius: 6px; font-size: 11.5px; font-family: var(--mono); line-height: 1.35; white-space: nowrap; user-select: none; cursor: grab; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.pill:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.pill.pill-dragging { opacity: .4; cursor: grabbing; }
+.pill-label { pointer-events: none; }
+.pill-x { border: none; background: none; color: inherit; opacity: 0; width: 0; overflow: hidden; cursor: pointer; font-size: 13px; line-height: 1; padding: 0; border-radius: 4px; transition: opacity var(--dur) var(--ease), width var(--dur) var(--ease); }
+.pill:hover .pill-x, .pill:focus-within .pill-x { opacity: .6; width: 14px; }
+.pill-x:hover { opacity: 1 !important; background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* per-family hues, all from design tokens: var=green, conn=violet, params=amber */
+.pill-var { border-color: color-mix(in srgb, var(--ok) 34%, var(--line)); background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+.pill-var:hover { background: color-mix(in srgb, var(--ok) 21%, transparent); }
+.pill-conn { border-color: color-mix(in srgb, var(--accent-2) 36%, var(--line)); background: color-mix(in srgb, var(--accent-2) 14%, transparent); color: var(--accent-2); }
+.pill-conn:hover { background: color-mix(in srgb, var(--accent-2) 22%, transparent); }
+.pill-params { border-color: color-mix(in srgb, var(--warn) 34%, var(--line)); background: color-mix(in srgb, var(--warn) 13%, transparent); color: var(--warn); }
+.pill-params:hover { background: color-mix(in srgb, var(--warn) 21%, transparent); }
+@media (prefers-reduced-motion: reduce) { .pill, .pill-x, .pill-editor { transition: none; } }
 
 /* ---- new-DAG starter templates (T1.3) ---- */
 .tpl-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }

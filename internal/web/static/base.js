@@ -124,7 +124,13 @@ const DICT = {
     cb_interp: "解释器", cb_runas: "运行方式", cb_target: "模块 / 脚本", cb_args: "参数", cb_jar: "Jar 路径", cb_mainclass: "主类", cb_client: "SQL 客户端", cb_query: "SQL 查询",
     cmdopt_module: "模块 (-m)", cmdopt_script: "脚本文件",
     cmd_will_run: "将执行:", cmd_edit_raw: "编辑原始命令", cmd_use_form: "用表单填写", cmd_cant_parse: "当前命令无法解析成表单,已保留原始编辑",
-    var_insert: "点击插入到命令(模板变量)",
+    var_insert: "点击或拖拽插入变量", var_editor_aria: "命令编辑器,可插入变量药丸",
+    var_pill_aria: (n) => `变量 ${n}`, var_pill_remove: (n) => `移除变量 ${n}`,
+    var_empty: "无", var_add_key: "自定义…", var_conn_field: "选字段", var_goto_settings: "去设置",
+    vd_logical_date: "本次运行的逻辑日期(到天)", vd_logical_datetime: "逻辑日期时间(RFC3339)",
+    vd_run_id: "本次运行的唯一 ID", vd_dag_id: "所属 DAG 的 ID", vd_task_id: "当前任务 ID", vd_try_number: "第几次尝试(重试递增)",
+    vd_var: "共享变量", vd_conn: "连接字段", vd_params: "手动触发参数",
+    vg_builtin: "内置", vg_var: "变量", vg_conn: "连接", vg_params: "参数",
     graph_connect_hint: "提示：点上游任务、再点下游任务，即可连接/断开依赖",
     nav_graph: "关系图", graph_title: "DAG 关系图", graph_sub: "按 trigger_after 展示各 DAG 之间的触发依赖",
     graph_none: "暂无跨 DAG 依赖（没有 DAG 配置 trigger_after）", graph_view_hint: "提示：箭头表示「触发后」方向；点击节点查看该 DAG；虚线节点为未找到的 DAG",
@@ -244,7 +250,13 @@ const DICT = {
     cb_interp: "Interpreter", cb_runas: "Run as", cb_target: "Module / script", cb_args: "Arguments", cb_jar: "Jar path", cb_mainclass: "Main class", cb_client: "SQL client", cb_query: "SQL query",
     cmdopt_module: "module (-m)", cmdopt_script: "script file",
     cmd_will_run: "Will run:", cmd_edit_raw: "edit raw command", cmd_use_form: "use form", cmd_cant_parse: "This command can't be parsed into the form; keeping the raw editor",
-    var_insert: "click to insert into the command (template vars)",
+    var_insert: "click or drag to insert a variable", var_editor_aria: "command editor — insert variable pills",
+    var_pill_aria: (n) => `variable ${n}`, var_pill_remove: (n) => `remove variable ${n}`,
+    var_empty: "none", var_add_key: "custom…", var_conn_field: "field", var_goto_settings: "set up",
+    vd_logical_date: "this run's logical date (day)", vd_logical_datetime: "logical date-time (RFC3339)",
+    vd_run_id: "this run's unique id", vd_dag_id: "the DAG id", vd_task_id: "this task's id", vd_try_number: "attempt number (increments on retry)",
+    vd_var: "shared variable", vd_conn: "connection field", vd_params: "manual-trigger param",
+    vg_builtin: "built-in", vg_var: "variables", vg_conn: "connections", vg_params: "params",
     graph_connect_hint: "Tip: click an upstream task then a downstream task to add/remove a dependency",
     nav_graph: "Graph", graph_title: "DAG Graph", graph_sub: "Trigger dependencies between DAGs via trigger_after",
     graph_none: "No cross-DAG dependencies yet (no DAG declares trigger_after)", graph_view_hint: "Tip: arrows point in the trigger-after direction; click a node to open that DAG; dashed nodes are unknown DAGs",
@@ -574,6 +586,7 @@ function setHash(h, replace) {
   suppressHash = true; location.hash = h;
 }
 function applyRoute() {
+  if (typeof closeConnMenu === "function") closeConnMenu(); // dismiss any open popover on navigation
   const seg = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent).filter(Boolean);
   if (!seg.length || seg[0] === "dags") return loadDags();
   if (seg[0] === "pools") return showPools();

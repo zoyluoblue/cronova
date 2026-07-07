@@ -6,6 +6,15 @@
       "runtimeExecutable": "go",
       "runtimeArgs": ["run", "./cmd/cronova", "serve", "-http", ":8090"],
       "port": 8090
+    },
+    {
+      "name": "cronova-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "CRONOVA_WEB_DIR=internal/web/static exec go run ./cmd/cronova serve -http :8091"
+      ],
+      "port": 8091
     }
   ]
 }

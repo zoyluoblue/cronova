@@ -138,7 +138,9 @@ trigger_after:               # optional: run after another DAG succeeds
   - dag_id: upstream_ingest
 ```
 
-Template variables in `command`: `{{ logical_date }}`, `{{ logical_datetime }}`, `{{ run_id }}`, `{{ task_id }}`, `{{ try_number }}`. The same values are injected as `CRONOVA_*` environment variables.
+Template variables in `command`: `{{ logical_date }}`, `{{ logical_datetime }}`, `{{ run_id }}`, `{{ task_id }}`, `{{ try_number }}`. The same values are injected as `CRONOVA_*` environment variables. You can also reference UI-managed values — `{{ var.KEY }}`, `{{ conn.ID.host }}`, `{{ params.KEY }}` — anywhere in a command, url, header, body, or query.
+
+In the console task editor you don't have to type the `{{ }}` syntax: the command box is a live editor where each variable shows as a colored **pill**, and a grouped palette (built-in / variables / connections / params) lets you **click or drag** a variable in. Dev tip: set `CRONOVA_WEB_DIR=internal/web/static` when running `cronova serve` to serve the console assets from disk (edits show up on reload, no rebuild).
 
 ### Running your own scripts / projects
 

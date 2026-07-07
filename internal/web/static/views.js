@@ -612,35 +612,306 @@ function insertAtCaret(el, text) {
 }
 // escape, then tint {{ template }} tokens so substitution is visible in previews
 function hlVars(cmd) { return esc(cmd).replace(/\{\{\s*\w+\s*\}\}/g, (m) => `<span class="varhl">${m}</span>`); }
+
+// ---- variable pill editor -------------------------------------------------
+// A contenteditable VIEW over a template string. Literal text stays editable;
+// every `{{ dotted.name }}` renders as an atomic, non-editable "pill". The stored
+// value never changes shape — readPillEditor() serializes the DOM straight back
+// to the exact `{{ }}`+text string the backend already understands
+// (scheduler.renderCommand). We pill-ify ANY {{ [\w.]+ }} because that is exactly
+// what the backend treats as a substitution; other braces stay literal text.
+const TPL_RE = /\{\{\s*([\w.]+)\s*\}\}/g;
+let activePillEditor = null; // palette clicks target the last-focused pill editor
+
+// tplMeta: pill kind (drives colour) + tooltip text for a template name.
+function tplMeta(name) {
+  const B = { logical_date: "vd_logical_date", logical_datetime: "vd_logical_datetime", run_id: "vd_run_id", dag_id: "vd_dag_id", task_id: "vd_task_id", try_number: "vd_try_number" };
+  if (B[name]) return { kind: "builtin", desc: t(B[name]) };
+  if (name.startsWith("var.")) return { kind: "var", desc: t("vd_var") };
+  if (name.startsWith("conn.")) return { kind: "conn", desc: t("vd_conn") };
+  if (name.startsWith("params.")) return { kind: "params", desc: t("vd_params") };
+  return { kind: "other", desc: "" };
+}
+// makePill builds one pill. textContent (never innerHTML) throughout, so a crafted
+// variable name cannot inject markup.
+function makePill(name) {
+  const m = tplMeta(name);
+  const el = document.createElement("span");
+  el.className = "pill pill-" + m.kind;
+  el.contentEditable = "false";
+  el.setAttribute("data-tpl", name);
+  el.setAttribute("draggable", "true");
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", t("var_pill_aria", name));
+  el.title = m.desc ? name + " — " + m.desc : name;
+  const lbl = document.createElement("span"); lbl.className = "pill-label"; lbl.textContent = name;
+  const x = document.createElement("button");
+  x.type = "button"; x.className = "pill-x"; x.tabIndex = -1;
+  x.setAttribute("aria-label", t("var_pill_remove", name)); x.textContent = "×";
+  el.append(lbl, x);
+  return el;
+}
+// fillPillEditor: string -> editor DOM. Under white-space:pre-wrap a \n inside a
+// text node renders as a line break, so no <br> nodes are needed.
+function fillPillEditor(ed, str) {
+  ed.textContent = "";
+  str = str || "";
+  let last = 0, m; TPL_RE.lastIndex = 0;
+  while ((m = TPL_RE.exec(str))) {
+    if (m.index > last) ed.appendChild(document.createTextNode(str.slice(last, m.index)));
+    ed.appendChild(makePill(m[1]));
+    last = m.index + m[0].length;
+  }
+  if (last < str.length) ed.appendChild(document.createTextNode(str.slice(last)));
+  pePlaceholder(ed);
+}
+// readPillEditor: editor DOM -> string. Text is literal, pills become `{{ name }}`,
+// and <br>/block boundaries become \n. The ZWSP caret anchor that insertPill drops
+// right after a pill is removed \u2014 but ONLY that anchor (a leading ZWSP in the text
+// immediately following a pill), so a ZWSP the user actually pasted elsewhere is
+// preserved rather than silently deleted.
+function readPillEditor(ed) {
+  let out = "", afterPill = false;
+  const walk = (node) => {
+    node.childNodes.forEach((n) => {
+      if (n.nodeType === 3) {
+        let d = n.data;
+        if (afterPill && d.charCodeAt(0) === 0x200b) d = d.slice(1); // drop our anchor only
+        out += d; afterPill = false;
+      } else if (n.nodeType === 1) {
+        if (n.classList.contains("pill")) { out += "{{ " + n.getAttribute("data-tpl") + " }}"; afterPill = true; }
+        else if (n.tagName === "BR") { out += "\n"; afterPill = false; }
+        else { if ((n.tagName === "DIV" || n.tagName === "P") && out && !out.endsWith("\n")) out += "\n"; walk(n); afterPill = false; }
+      }
+    });
+  };
+  walk(ed);
+  return out;
+}
+// removePill deletes a pill and the ZWSP caret-anchor text node insertPill left
+// right after it, so no orphan anchor survives to leak into the serialized value.
+function removePill(pill) {
+  const nxt = pill.nextSibling;
+  if (nxt && nxt.nodeType === 3 && nxt.data === "\u200B") nxt.remove();
+  pill.remove();
+}
+// pillBeforeCaret / pillAfterCaret: the pill immediately adjacent to a collapsed
+// caret (skipping a lone ZWSP anchor), or null. Powers keyboard Backspace/Delete.
+function adjacentPill(range, dir) {
+  let node = range.startContainer, off = range.startOffset, sib;
+  if (node.nodeType === 3) {
+    const side = dir === "before" ? node.data.slice(0, off) : node.data.slice(off);
+    if (!/^\u200B*$/.test(side)) return null; // real text between caret and any pill
+    sib = dir === "before" ? node.previousSibling : node.nextSibling;
+  } else {
+    sib = node.childNodes[dir === "before" ? off - 1 : off];
+  }
+  if (sib && sib.nodeType === 3 && /^\u200B*$/.test(sib.data)) sib = dir === "before" ? sib.previousSibling : sib.nextSibling;
+  return sib && sib.nodeType === 1 && sib.classList && sib.classList.contains("pill") ? sib : null;
+}
+function pePlaceholder(ed) { ed.classList.toggle("pe-empty", readPillEditor(ed) === ""); }
+
+// A document-wide selection tracker: whenever the caret sits inside a pill
+// editor, remember its range on that editor (ed.__range). Palette clicks blur
+// the editor and lose the live selection, so insertions replay this saved range
+// instead of falling back to end-of-editor. Registered once, it survives task-page
+// re-renders (it resolves the editor via closest()).
+if (typeof window !== "undefined" && !window.__peSelTrack) {
+  window.__peSelTrack = true;
+  document.addEventListener("selectionchange", () => {
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return;
+    const n = sel.anchorNode, host = n && (n.nodeType === 1 ? n : n.parentNode);
+    const ed = host && host.closest && host.closest(".pill-editor");
+    if (ed && ed.contains(sel.anchorNode)) ed.__range = sel.getRangeAt(0).cloneRange();
+  });
+}
+// insertNodesAtCaret: replace the caret/selection inside ed with nodes, caret
+// after. Prefers the live selection, then the tracked range, then end-of-editor,
+// and never inserts *inside* a pill (hops to just after it).
+function insertNodesAtCaret(ed, nodes) {
+  ed.focus();
+  const sel = window.getSelection();
+  let range;
+  if (sel.rangeCount && ed.contains(sel.anchorNode)) range = sel.getRangeAt(0);
+  else if (ed.__range && ed.contains(ed.__range.startContainer)) range = ed.__range.cloneRange();
+  else { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  const host = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentNode;
+  const pill = host && host.closest && host.closest(".pill");
+  if (pill) { range.setStartAfter(pill); range.collapse(true); }
+  range.deleteContents();
+  const frag = document.createDocumentFragment();
+  let lastNode = null;
+  nodes.forEach((n) => { frag.appendChild(n); lastNode = n; });
+  range.insertNode(frag);
+  if (lastNode) { range.setStartAfter(lastNode); range.collapse(true); sel.removeAllRanges(); sel.addRange(range); }
+}
+// insertPill: drop a pill at the caret with a ZWSP anchor after it, so the caret
+// has a text home right after the atomic span (esp. at end-of-editor).
+function insertPill(ed, name) {
+  insertNodesAtCaret(ed, [makePill(name), document.createTextNode("\u200B")]);
+  ed.dispatchEvent(new Event("input", { bubbles: true }));
+}
+function insertPlainText(ed, text) {
+  insertNodesAtCaret(ed, [document.createTextNode(text)]);
+  ed.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// ---- drag & drop: palette chip -> editor (copy), pill -> editor (move) -----
+// Shared source state; the dragged pill's DOM node can't ride in dataTransfer.
+let peDrag = null; // { name, source: HTMLElement|null }
+let peDropCaret = null;
+function peRemoveDropCaret() { if (peDropCaret && peDropCaret.parentNode) peDropCaret.parentNode.removeChild(peDropCaret); peDropCaret = null; }
+// caretRangeAtPoint: cross-browser caret range under the pointer.
+function caretRangeAtPoint(x, y) {
+  if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+  if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); if (p) { const r = document.createRange(); r.setStart(p.offsetNode, p.offset); r.collapse(true); return r; } }
+  return null;
+}
+function peDragStart(e, name, source) {
+  peDrag = { name, source: source || null };
+  try { e.dataTransfer.setData("text/plain", "{{ " + name + " }}"); e.dataTransfer.effectAllowed = source ? "move" : "copy"; } catch (_) {}
+  if (source) setTimeout(() => source.classList.add("pill-dragging"), 0); // let the drag image capture first
+}
+function peDragEnd() {
+  if (peDrag && peDrag.source) peDrag.source.classList.remove("pill-dragging");
+  document.querySelectorAll(".pill-editor.pe-drop").forEach((n) => n.classList.remove("pe-drop"));
+  peRemoveDropCaret();
+  peDrag = null;
+}
+function peDragOver(ed, e) {
+  if (!peDrag) return;
+  e.preventDefault();
+  try { e.dataTransfer.dropEffect = peDrag.source ? "move" : "copy"; } catch (_) {}
+  ed.classList.add("pe-drop");
+  peRemoveDropCaret();
+  const r = caretRangeAtPoint(e.clientX, e.clientY);
+  if (!r || !ed.contains(r.startContainer)) return;
+  const host = r.startContainer.nodeType === 1 ? r.startContainer : r.startContainer.parentNode;
+  if (host && host.closest && host.closest(".pill")) return; // don't show a caret inside a pill
+  peDropCaret = document.createElement("span");
+  peDropCaret.className = "pe-caret"; peDropCaret.setAttribute("contenteditable", "false");
+  const rr = r.cloneRange(); rr.collapse(true);
+  try { rr.insertNode(peDropCaret); } catch (_) { peRemoveDropCaret(); }
+}
+function peDrop(ed, e) {
+  if (!peDrag) return;
+  e.preventDefault();
+  const name = peDrag.name, source = peDrag.source;
+  const r = caretRangeAtPoint(e.clientX, e.clientY);
+  peRemoveDropCaret();
+  ed.classList.remove("pe-drop");
+  // Symmetry with peDragOver: if the drop point can't resolve to a caret inside
+  // this editor (null range, or a border/outside hit — no drop caret was shown),
+  // cancel rather than silently inserting at the end and consuming a moved pill.
+  if (!r || !ed.contains(r.startContainer)) { peDragEnd(); return; }
+  const sel = window.getSelection();
+  sel.removeAllRanges(); sel.addRange(r);
+  insertPill(ed, name);                              // insert a fresh pill at the drop point
+  if (source && source.parentNode) removePill(source); // move: drop the original + its anchor
+  ed.normalize();                                    // merge text nodes split by the drop caret
+  ed.dispatchEvent(new Event("input", { bubbles: true }));
+  saveDag();
+}
+// pillEditorHtml renders the (empty) editor shell; wirePillEditor fills it from
+// the model, so the pill DOM is built by makePill (no HTML-string injection).
+function pillEditorHtml(field, ph, single) {
+  return `<div class="pill-editor cmd" data-pe="${esc(field)}"${single ? ' data-single="1"' : ""} contenteditable="true"
+    role="textbox" aria-multiline="${single ? "false" : "true"}" aria-label="${esc(t("var_editor_aria"))}"
+    data-ph="${esc(ph || "")}" spellcheck="false"></div>`;
+}
+// wirePillEditor binds one editor to tk[field]: fill from model, sync on edit,
+// Enter inserts a newline (multiline), paste is forced to plain text, and the
+// pill × removes a token.
+function wirePillEditor(ed, tk) {
+  const field = ed.dataset.pe, single = ed.dataset.single === "1";
+  fillPillEditor(ed, tk[field] || "");
+  const sync = () => {
+    tk[field] = readPillEditor(ed);
+    pePlaceholder(ed);
+    if (field === "command") { const pv = $("cmd-preview"); if (pv) pv.innerHTML = hlVars(tk.command); }
+  };
+  ed.addEventListener("focus", () => { activePillEditor = ed; });
+  ed.addEventListener("input", sync);
+  ed.addEventListener("blur", () => { sync(); saveDag(); });
+  ed.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); if (!single) insertPlainText(ed, "\n"); return; }
+    // keyboard delete: Backspace/Delete removes an adjacent pill (they are
+    // contentEditable=false, so the browser default does not reliably delete them).
+    if (e.key === "Backspace" || e.key === "Delete") {
+      const s = window.getSelection();
+      if (s.isCollapsed && s.rangeCount) {
+        const p = adjacentPill(s.getRangeAt(0), e.key === "Backspace" ? "before" : "after");
+        if (p) { e.preventDefault(); removePill(p); sync(); saveDag(); }
+      }
+    }
+  });
+  ed.addEventListener("paste", (e) => {
+    e.preventDefault();
+    const txt = (e.clipboardData || window.clipboardData).getData("text/plain");
+    insertPlainText(ed, single ? txt.replace(/[\r\n]+/g, " ") : txt);
+  });
+  ed.addEventListener("click", (e) => {
+    const x = e.target.closest(".pill-x");
+    if (x) { e.preventDefault(); const p = x.closest(".pill"); if (p) { removePill(p); sync(); saveDag(); ed.focus(); } }
+  });
+  // drag & drop: pills (move) start here; the editor is a drop target for both
+  // pills and palette chips.
+  ed.addEventListener("dragstart", (e) => { const p = e.target.closest(".pill"); if (p && ed.contains(p)) peDragStart(e, p.getAttribute("data-tpl"), p); });
+  ed.addEventListener("dragend", peDragEnd);
+  ed.addEventListener("dragover", (e) => peDragOver(ed, e));
+  ed.addEventListener("dragleave", (e) => { if (!ed.contains(e.relatedTarget)) { ed.classList.remove("pe-drop"); peRemoveDropCaret(); } });
+  ed.addEventListener("drop", (e) => peDrop(ed, e));
+}
+// ---- variable palette (grouped, click/drag to insert) --------------------
+// Built-ins render immediately; the var/conn groups are populated async from
+// /api/variables + /api/connections in wireVarPalette. conn.<id>.<field> refs
+// pick a field from CONN_FIELDS.
+const CONN_FIELDS = ["host", "port", "login", "password"];
+function varChip(name, kind, label) {
+  return `<span class="chip varchip" data-var="${esc(name)}" data-kind="${esc(kind)}" role="button" tabindex="0" draggable="true" title="${esc(name)}">${esc(label || name)}</span>`;
+}
+// chips are role=button spans; make Enter/Space activate them like a real button.
+function chipKeyActivate(el, fn) { el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } }); }
+function varPaletteHtml() {
+  const builtins = TEMPLATE_VARS.map((v) => varChip(v, "builtin", "{{ " + v + " }}")).join("");
+  const group = (vg, label, inner) => `<div class="vp-group" data-vg="${vg}"><span class="vp-label">${label}</span>${inner}</div>`;
+  return `<div class="var-palette" title="${t("var_insert")}">
+    ${group("builtin", t("vg_builtin"), builtins)}
+    ${group("var", t("vg_var"), `<span class="vp-load">…</span>`)}
+    ${group("conn", t("vg_conn"), `<span class="vp-load">…</span>`)}
+    ${group("params", t("vg_params"), `<input class="vp-keyin" data-kind="params" placeholder="params.key" spellcheck="false" aria-label="${esc(t("vg_params"))}">`)}
+  </div>`;
+}
 function commandFieldHtml(tk) {
-  const chips = `<div class="varchips" title="${t("var_insert")}">${TEMPLATE_VARS.map((v) => `<span class="chip varchip" data-var="${v}">{{ ${v} }}</span>`).join("")}</div>`;
+  const chips = varPaletteHtml();
   if (tk.type === "http") {
     const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
     const m = tk.httpMethod || "GET";
     return `<div class="b-field full"><label>${t("t_http")}</label>${chips}
       <div class="tc-grid">
         <div class="b-field"><label>${t("http_method")}</label><select class="hf" data-h="httpMethod">${methods.map((o) => `<option ${m === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
-        <div class="b-field full"><label>${t("http_url")}</label><input class="hf cmd" data-h="httpUrl" value="${esc(tk.httpUrl || "")}" placeholder="https://{{ conn.api.host }}/path"></div>
+        <div class="b-field full"><label>${t("http_url")}</label>${pillEditorHtml("httpUrl", "https://{{ conn.api.host }}/path", true)}</div>
       </div>
-      <div class="b-field full"><label>${t("http_headers")}</label><textarea class="hf cmd" data-h="httpHeaders" rows="3" spellcheck="false" placeholder="Authorization: Bearer {{ var.TOKEN }}">${esc(tk.httpHeaders || "")}</textarea><div class="field-hint">${t("http_headers_hint")}</div></div>
-      <div class="b-field full"><label>${t("http_body")}</label><textarea class="hf cmd" data-h="httpBody" rows="3" spellcheck="false" placeholder='{"k":"{{ var.X }}"}'>${esc(tk.httpBody || "")}</textarea></div>
+      <div class="b-field full"><label>${t("http_headers")}</label>${pillEditorHtml("httpHeaders", "Authorization: Bearer {{ var.TOKEN }}")}<div class="field-hint">${t("http_headers_hint")}</div></div>
+      <div class="b-field full"><label>${t("http_body")}</label>${pillEditorHtml("httpBody", '{"k":"{{ var.X }}"}')}</div>
       <div class="b-field"><label>${t("http_status")}</label><input class="hf" data-h="httpStatus" value="${esc(tk.httpStatus || "")}" placeholder="200, 201"><div class="field-hint">${t("http_status_hint")}</div></div></div>`;
   }
   if (tk.type === "python") {
     return `<div class="b-field full"><label>${t("t_python")}</label>${chips}
-      <textarea class="tf cmd" data-k="command" rows="8" spellcheck="false" placeholder="import os&#10;print(os.environ['CRONOVA_LOGICAL_DATE'])">${esc(tk.command)}</textarea>
+      ${pillEditorHtml("command", "print(os.environ['CRONOVA_LOGICAL_DATE'])")}
       <div class="field-hint">${t("python_hint")}</div></div>`;
   }
   if (tk.type === "sql") {
     return `<div class="b-field full"><label>${t("t_sql")}</label>${chips}
       <div class="b-field"><label>${t("sql_conn")}</label><input class="tf" data-k="conn" value="${esc(tk.conn || "")}" placeholder="warehouse"><div class="field-hint">${t("sql_conn_hint")}</div></div>
-      <textarea class="tf cmd" data-k="command" rows="6" spellcheck="false" placeholder="SELECT count(*) FROM events WHERE day = '{{ params.day }}'">${esc(tk.command)}</textarea></div>`;
+      ${pillEditorHtml("command", "SELECT count(*) FROM events WHERE day = '{{ params.day }}'")}</div>`;
   }
   const b = CMD_BUILDERS[tk.type];
   if (cmdRaw || !b) {
     const toForm = b ? ` <a class="raw-toggle" id="cmd-toform">${t("cmd_use_form")}</a>` : "";
     return `<div class="b-field full"><label>${t("t_command")}${toForm}</label>${chips}
-      <textarea class="tf cmd" data-k="command" rows="4" spellcheck="false" placeholder="echo running {{ logical_date }}">${esc(tk.command)}</textarea>
+      ${pillEditorHtml("command", "echo running {{ logical_date }}")}
       <div class="cmd-preview"><span class="cp-label">${t("cmd_will_run")}</span> <code id="cmd-preview">${hlVars(tk.command || "")}</code></div></div>`;
   }
   const f = b.parse(tk.command) || {};
@@ -666,16 +937,106 @@ function wireCommandField(tk) {
       el.oninput = recompose; el.onblur = () => { recompose(); saveDag(); };
     });
   }
-  main.querySelectorAll(".varchip").forEach((c) => c.onclick = () => {
-    const target = (lastCmdField && main.contains(lastCmdField)) ? lastCmdField
-      : main.querySelector('[data-k="command"]') || main.querySelector('.hf.cmd[data-h="httpUrl"]') || main.querySelector('.cf[data-cf="args"]') || main.querySelector('.cf[data-cf="query"]') || main.querySelector('.cf[data-cf="target"]');
-    if (!target) return;
-    insertAtCaret(target, `{{ ${c.dataset.var} }}`);
-    target.dispatchEvent(new Event("input", { bubbles: true }));
-    if (target.dataset.k === "command") { tk.command = target.value; } // raw textarea path
+  // pill editors: bind each; the grouped palette inserts tokens into them (or the
+  // builder-form command textarea when there is no pill editor, e.g. the jar form).
+  const pills = main.querySelectorAll(".pill-editor");
+  pills.forEach((ed) => wirePillEditor(ed, tk));
+  wireVarPalette(tk, pills);
+}
+// wireVarPalette wires the grouped palette. Built-ins are present at render; the
+// var/conn groups are filled from the API; params take a free-form key.
+function wireVarPalette(tk, pills) {
+  const target = () => (activePillEditor && main.contains(activePillEditor)) ? activePillEditor : (pills[0] || null);
+  const fallback = () => (lastCmdField && main.contains(lastCmdField)) ? lastCmdField
+    : main.querySelector('[data-k="command"]') || main.querySelector('.cf[data-cf="args"]') || main.querySelector('.cf[data-cf="query"]') || main.querySelector('.cf[data-cf="target"]');
+  const insertVar = (name) => {
+    if (pills.length) { const tg = target(); if (!tg) return; insertPill(tg, name); }
+    else {
+      const tg = fallback(); if (!tg) return;
+      insertAtCaret(tg, `{{ ${name} }}`);
+      tg.dispatchEvent(new Event("input", { bubbles: true }));
+      if (tg.dataset && tg.dataset.k === "command") tk.command = tg.value;
+    }
+    saveDag();
+  };
+  const wireChip = (c) => {
+    const go = () => insertVar(c.dataset.var);
+    c.onclick = go;
+    chipKeyActivate(c, go);
+    c.addEventListener("dragstart", (e) => peDragStart(e, c.dataset.var, null));
+    c.addEventListener("dragend", peDragEnd);
+  };
+  main.querySelectorAll('.varchip[data-kind="builtin"]').forEach(wireChip);
+  const pin = main.querySelector('.vp-keyin[data-kind="params"]');
+  if (pin) pin.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const k = pin.value.trim();
+    if (/^\w+$/.test(k)) { insertVar("params." + k); pin.value = ""; }
+    else if (k) toast(t("cmd_cant_parse"), "warn");
+  });
+  populateVarGroup(wireChip);
+  populateConnGroup(insertVar);
+}
+function varHintHtml() { return `<a class="chip empty-hint vp-hint" href="#/resources">${t("var_empty")} · ${t("var_goto_settings")}</a>`; }
+async function populateVarGroup(wireChip) {
+  const grp = main.querySelector('.vp-group[data-vg="var"]'); if (!grp) return;
+  let vars = [];
+  try { vars = (await api("/api/variables")) || []; } catch (_) {}
+  if (!main.contains(grp)) return; // task page changed while fetching
+  grp.querySelectorAll(".vp-load").forEach((n) => n.remove());
+  if (!vars.length) { grp.insertAdjacentHTML("beforeend", varHintHtml()); return; }
+  vars.forEach((v) => { grp.insertAdjacentHTML("beforeend", varChip("var." + v.key, "var", "var." + v.key)); wireChip(grp.lastElementChild); });
+}
+async function populateConnGroup(insertVar) {
+  const grp = main.querySelector('.vp-group[data-vg="conn"]'); if (!grp) return;
+  let conns = [];
+  try { conns = (await api("/api/connections")) || []; } catch (_) {}
+  if (!main.contains(grp)) return;
+  grp.querySelectorAll(".vp-load").forEach((n) => n.remove());
+  if (!conns.length) { grp.insertAdjacentHTML("beforeend", varHintHtml()); return; }
+  conns.forEach((c) => {
+    grp.insertAdjacentHTML("beforeend", `<span class="chip varchip vp-conn" data-kind="conn" data-conn="${esc(c.id)}" role="button" tabindex="0" aria-haspopup="menu" draggable="true" title="conn.${esc(c.id)}">conn.${esc(c.id)}</span>`);
+    const chip = grp.lastElementChild;
+    chip.addEventListener("dragstart", (e) => peDragStart(e, "conn." + c.id + ".host", null)); // drag defaults to .host
+    chip.addEventListener("dragend", peDragEnd);
+    const open = () => openConnMenu(chip, c.id, insertVar);
+    chip.onclick = open;
+    chipKeyActivate(chip, open);
   });
 }
+// conn field menu: pick host/port/login/password -> {{ conn.<id>.<field> }}
+let connMenuEl = null, connMenuChip = null;
+function closeConnMenu(refocus) {
+  if (!connMenuEl) return;
+  const chip = connMenuChip;
+  connMenuEl.remove(); connMenuEl = null; connMenuChip = null;
+  document.removeEventListener("mousedown", onDocConnMenu, true);
+  if (refocus && chip && document.contains(chip)) chip.focus();
+}
+function onDocConnMenu(e) { if (connMenuEl && !connMenuEl.contains(e.target) && !e.target.classList.contains("vp-conn")) closeConnMenu(); }
+function openConnMenu(chip, id, insertVar) {
+  closeConnMenu();
+  const rect = chip.getBoundingClientRect();
+  connMenuChip = chip;
+  connMenuEl = document.createElement("div");
+  connMenuEl.className = "vp-menu"; connMenuEl.setAttribute("role", "menu");
+  connMenuEl.innerHTML = `<div class="vp-menu-head">${t("var_conn_field")}</div>` + CONN_FIELDS.map((f) => `<button type="button" class="vp-menu-item" role="menuitem" data-field="${f}">conn.${esc(id)}.<b>${f}</b></button>`).join("");
+  document.body.appendChild(connMenuEl);
+  connMenuEl.style.left = Math.round(rect.left) + "px";
+  connMenuEl.style.top = Math.round(rect.bottom + 4) + "px";
+  connMenuEl.querySelectorAll(".vp-menu-item").forEach((it) => it.onclick = () => { insertVar("conn." + id + "." + it.dataset.field); closeConnMenu(true); });
+  // Escape closes and returns focus to the chip; keyboard users land on the first item.
+  connMenuEl.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeConnMenu(true); } });
+  const first = connMenuEl.querySelector(".vp-menu-item"); if (first) first.focus();
+  // Add the outside-click listener synchronously: this is invoked from the chip's
+  // *click*, whose mousedown already fired, so a mousedown listener won't re-trigger
+  // on the opening interaction — and there is no setTimeout that could fire after a
+  // navigation and leak.
+  document.addEventListener("mousedown", onDocConnMenu, true);
+}
 function renderTaskPage() {
+  closeConnMenu(); // tear down any open conn menu before the page re-renders
   if (!D) { loadDags(); return; }
   const tk = D.tasks.find((x) => x.id === D.activeTaskId);
   if (!tk) { showDag(D.dag.dag_id); return; }
