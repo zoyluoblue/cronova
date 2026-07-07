@@ -24,6 +24,7 @@ func (s *GRPCServer) Launch(_ context.Context, req *pb.LaunchRequest) (*pb.Launc
 		Env:       req.GetEnv(),
 		Timeout:   time.Duration(req.GetTimeoutSeconds()) * time.Second,
 		LogPath:   req.GetLogPath(),
+		Dir:       req.GetDir(),
 	})
 	if err != nil {
 		return nil, err

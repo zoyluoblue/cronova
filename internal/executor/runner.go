@@ -68,6 +68,7 @@ func (r *Runner) Launch(spec Spec) (string, error) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = buildEnv(spec.Env)
+	cmd.Dir = spec.Dir // "" keeps the executor's cwd; else run in the staged project dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {

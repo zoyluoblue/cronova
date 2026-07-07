@@ -166,14 +166,48 @@ Console + API: `http://<server>:8090`.
 (systemd) and macOS (launchd) — no need to remember `systemctl`/`launchctl`:
 
 ```bash
-sudo cronova start      # start (and enable auto-start where applicable)
-sudo cronova stop       # stop
-sudo cronova restart    # restart (after editing config)
-cronova status          # show status (sudo on macOS)
+cronova start           # start (and enable auto-start where applicable)
+cronova stop            # stop
+cronova restart         # restart (after editing config)
+cronova status          # show status
+cronova update          # upgrade to the latest release, then restart
+cronova uninstall       # remove the service + binary
 ```
 
-They shell out to `systemctl <action> cronova` / `launchctl` under the hood, so
-the native commands (below) still work if you prefer them.
+Mutating commands need root; they **auto-elevate via `sudo`** (prompting for a
+password if needed), so you can drop the `sudo` prefix. Set `CRONOVA_NO_SUDO=1`
+to disable that and manage privileges yourself. `status` is read-only and never
+escalates.
+
+`start`/`stop`/`restart` shell out to `systemctl <action> cronova` / `launchctl`
+under the hood, so the native commands (below) still work if you prefer them.
+
+### Updating
+
+```bash
+cronova update          # latest release for this OS/arch, verified + swapped atomically
+cronova update v0.2.0   # a specific tag (re-install or downgrade)
+```
+
+`update` downloads the prebuilt release from GitHub (same asset + `SHA256SUMS`
+verification as the bootstrap installer), atomically replaces the installed
+binary (backing the old one up, so a failed restart — verified by confirming the
+service actually stays running — rolls back automatically), and restarts the
+service. `CRONOVA_BASE_URL=<origin>` points it at a private mirror; it **must be
+`https://`** (plain `http://` is allowed only for `localhost`), and downgrade
+redirects are refused. `update` does **not** touch your config, DB or DAGs.
+
+### Uninstalling
+
+```bash
+cronova uninstall           # stop + remove the service and binary; KEEP data
+cronova uninstall --purge   # also delete config, DB, DAGs, logs (+ the cronova user on Linux)
+cronova uninstall -yes      # skip the confirmation prompt (for scripts)
+```
+
+Data lives outside the binary (`/usr/local/{etc,var}/cronova` on macOS,
+`/etc/cronova` + `/var/lib/cronova` on Linux), so a plain `uninstall` is
+reversible by re-installing. Only `--purge` deletes it.
 
 ## macOS (launchd)
 
@@ -241,6 +275,25 @@ Same binary, same wizard; the service manager and paths differ:
 | service unit | `/etc/systemd/system/cronova.service` | `/Library/LaunchDaemons/com.cronova.plist` |
 | runs as | `cronova` system user | the `sudo` user |
 | control | `systemctl`, `journalctl` | `launchctl`, `service.log` |
+| uploaded projects | `~cronova/.cronova/projects/` | `~/.cronova/projects/` (sudo user) |
+
+## Uploaded projects
+
+The console can upload scripts / project folders / zips (task editor →
+**Project**); a shell task with `project: <name>` runs its command inside a
+fresh temp copy of that directory (deleted when the attempt ends; leftovers from
+crashes are garbage-collected). Constraints to know about:
+
+- **Same-host only.** The scheduler stages the copy on ITS filesystem, so the
+  executor must share it: the default in-process executor, or a gRPC executor on
+  the same host / shared mount. A remote executor on another machine will not
+  see the files.
+- **Linux + standalone executor:** the workspace copies live under the temp dir.
+  If you run `cronova-executor` as its own systemd unit with `PrivateTmp=true`,
+  scheduler and executor get DIFFERENT /tmp namespaces and staging breaks — keep
+  both in one unit, or disable PrivateTmp for the executor.
+- **Size limits:** 10 MiB per file, 50 MiB per project (small script projects,
+  not datasets). Re-uploads take effect on the NEXT run (live-latest).
 
 ## Sandbox
 
@@ -252,6 +305,16 @@ explicit `ReadWritePaths=` list for a locked-down box, or drop `PrivateTmp=true`
 if tasks must share `/tmp` with other processes.
 
 ## Upgrading
+
+The one-liner — downloads the latest release, verifies it, swaps the binary
+atomically (rolls back on a failed restart) and restarts the service:
+
+```bash
+cronova update            # or: cronova update v0.2.0 to pin a version
+```
+
+From source instead (needs Go 1.26; the installer is idempotent and keeps
+config/DAGs/DB):
 
 ```bash
 make release
@@ -273,11 +336,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow cross-compiles static `linux/amd64` and `linux/arm64` binaries,
+The workflow cross-compiles static binaries for **`linux` and `darwin`,
+`amd64` and `arm64`** (pure Go, CGO off, so darwin cross-builds from Linux),
 bundles each with `deploy/`, `cronova.yaml.example`, the example DAGs and
-`docs/DEPLOY.md` into `cronova_linux_<arch>.tar.gz`, generates `SHA256SUMS`, and
-attaches all three to the release. `bootstrap.sh` downloads from
-`releases/latest/download/` (or `releases/download/<tag>/` when pinned).
+`docs/DEPLOY.md` into `cronova_<os>_<arch>.tar.gz`, generates `SHA256SUMS`, and
+attaches all five files to the release. `bootstrap.sh` and `cronova update`
+download from `releases/latest/download/` (or `releases/download/<tag>/` when
+pinned).
 
 Build the same artifacts locally:
 

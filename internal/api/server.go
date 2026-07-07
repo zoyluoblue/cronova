@@ -47,13 +47,14 @@ type Info struct {
 
 // Server holds the API dependencies.
 type Server struct {
-	store   store.Store
-	eng     Engine
-	logDir  string
-	web     fs.FS
-	info    Info
-	auth    AuthConfig
-	started time.Time // for /metrics uptime
+	store       store.Store
+	eng         Engine
+	logDir      string
+	projectsDir string // uploaded project files ("" = uploads disabled)
+	web         fs.FS
+	info        Info
+	auth        AuthConfig
+	started     time.Time // for /metrics uptime
 }
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
@@ -71,6 +72,10 @@ func (s *Server) SetAuth(cfg AuthConfig) {
 	s.auth = cfg
 	s.info.AuthEnabled = cfg.Enabled
 }
+
+// SetProjectsDir points project uploads at dir. "" disables the endpoints. Must
+// be called before Handler(). It is the same dir the scheduler stages from.
+func (s *Server) SetProjectsDir(dir string) { s.projectsDir = dir }
 
 // Handler builds the HTTP routes (Go 1.22+ method+pattern mux).
 func (s *Server) Handler() http.Handler {
@@ -104,6 +109,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/connections", s.listConnections)
 	mux.HandleFunc("POST /api/connections/{id}", s.setConnection)
 	mux.HandleFunc("DELETE /api/connections/{id}", s.deleteConnection)
+	// uploaded projects (attach to shell tasks): writes are admin-gated by withAuth
+	mux.HandleFunc("GET /api/projects", s.listProjects)
+	mux.HandleFunc("GET /api/projects/{name}", s.getProject)
+	mux.HandleFunc("POST /api/projects/{name}", s.uploadProject)
+	mux.HandleFunc("DELETE /api/projects/{name}", s.deleteProject)
 	// auth + ops endpoints
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
@@ -295,6 +305,7 @@ type editTask struct {
 	TriggerRule string          `json:"trigger_rule"`
 	HTTP        *model.HTTPSpec `json:"http,omitempty"`
 	Conn        string          `json:"conn,omitempty"`
+	Project     string          `json:"project,omitempty"`
 }
 
 // dagDetail is the editor-facing DAG. The outer Tasks shadows model.DAG.Tasks in
@@ -335,7 +346,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn, Project: tk.Project}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -471,6 +482,7 @@ type taskSpec struct {
 	TriggerRule string          `json:"trigger_rule"`
 	HTTP        *model.HTTPSpec `json:"http,omitempty"`
 	Conn        string          `json:"conn,omitempty"`
+	Project     string          `json:"project,omitempty"`
 }
 
 type dagSpec struct {
@@ -540,6 +552,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		SLA         int      `yaml:"sla,omitempty"`
 		TriggerRule string   `yaml:"trigger_rule,omitempty"`
 		Conn        string   `yaml:"conn,omitempty"`
+		Project     string   `yaml:"project,omitempty"`
 		HTTP        *httpOut `yaml:"http,omitempty"`
 	}
 	type triggerOut struct {
@@ -582,7 +595,7 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		to := taskOut{
 			ID: t.ID, Type: t.Type, Command: t.Command, Deps: t.Deps, Pool: t.Pool,
 			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay, Timeout: t.Timeout,
-			SLA: t.SLA, TriggerRule: t.TriggerRule, Conn: t.Conn,
+			SLA: t.SLA, TriggerRule: t.TriggerRule, Conn: t.Conn, Project: t.Project,
 		}
 		if t.Type == "http" && t.HTTP != nil {
 			to.HTTP = &httpOut{

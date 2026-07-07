@@ -37,6 +37,8 @@ import (
 type Options struct {
 	DagDir       string        // directory of *.yaml DAG definitions ("" = none)
 	LogDir       string        // root directory for per-task log files
+	ProjectsDir  string        // directory of uploaded project dirs ("" = project attach disabled)
+	WorkspaceDir string        // per-attempt project workspaces ("" = <tmp>/cronova-workspaces)
 	Tick         time.Duration // scheduling loop interval
 	PollInterval time.Duration // how often a running task is Probed for completion
 	Logger       *slog.Logger
@@ -676,9 +678,16 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	if err := s.Recover(ctx); err != nil {
 		return err
 	}
+	// Sweep orphaned project workspaces now (recovery has claimed the live ones,
+	// and dispatch hasn't started, so no age guard is needed)…
+	s.gcWorkspaces(ctx, 0)
 	s.log.Info("scheduler started", "tick", s.opts.Tick.String(), "dags", len(s.allDAGs()))
 	t := time.NewTicker(s.opts.Tick)
 	defer t.Stop()
+	// …and periodically, for workspaces of recovered tasks that finalize outside
+	// runTask (whose defer would otherwise have cleaned them).
+	gc := time.NewTicker(30 * time.Minute)
+	defer gc.Stop()
 	for {
 		s.tickOnce(ctx)
 		select {
@@ -686,6 +695,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.log.Info("scheduler stopping; waiting for in-flight tasks")
 			s.inflight.Wait()
 			return ctx.Err()
+		case <-gc.C:
+			s.gcWorkspaces(ctx, time.Hour) // age guard: skip anything mid-launch
 		case <-t.C:
 		}
 	}
@@ -1189,6 +1200,39 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	resolve := s.templateResolver(ctx, base, run.Params)
 	env := taskEnv(base, run.Params)
 	command := renderCommand(t.Command, resolve)
+
+	// Project attach: stage a fresh copy of the uploaded project and run the
+	// command with cwd = that copy (so `python3 main.py` resolves). The workspace
+	// is removed when this attempt finalizes; on ctx cancellation (shutdown /
+	// recovery) it is kept so a re-attached task can still read it. Shell-only —
+	// python/sql/http rewrite Command to an absolute-path `run-op`, where a cwd is
+	// meaningless, so staging there would just copy files nothing reads.
+	var workspace string
+	keepWorkspace := false                                      // set when the process is launched but the row didn't flip to running
+	if (t.Type == "shell" || t.Type == "") && t.Project != "" { // "" == shell (parser's default)
+		ws, err := s.stageProject(t.Project, ti.ExecutorRef)
+		if err != nil {
+			s.log.Error("stage project", "run", run.RunID, "task", t.ID, "project", t.Project, "err", err)
+			now := time.Now().UTC()
+			ti.StartedAt = &now
+			s.recordFailure(ctx, &ti, "stage project: "+err.Error())
+			return
+		}
+		workspace = ws
+		env["CRONOVA_PROJECT_DIR"] = ws
+		// Remove the copy when this attempt finalizes — EXCEPT (a) on ctx
+		// cancellation (shutdown/recovery re-attaches and re-reads it) or (b) when
+		// the process launched but we couldn't mark the row running (keepWorkspace):
+		// the task is live on the executor with its row still queued, so recovery
+		// must find the workspace intact. Deleting it would pull the cwd out from
+		// under a running process.
+		defer func() {
+			if ctx.Err() == nil && !keepWorkspace {
+				_ = os.RemoveAll(workspace)
+			}
+		}()
+	}
+
 	// Typed operators (http/python/sql) run natively via `<binary> run-op <type>`,
 	// reusing the executor's normal launch/probe/cancel/log path. The spec (templates
 	// resolved) is passed by env, not interpolated into the shell string — no injection.
@@ -1217,6 +1261,7 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 		Env:       env,
 		Timeout:   time.Duration(t.Timeout) * time.Second,
 		LogPath:   ti.LogPath,
+		Dir:       workspace, // "" unless a project is attached
 	}
 	if s.taskCancelled(ctx, ti.ID) {
 		return // a CancelRun landed before we launched — don't start the process
@@ -1237,6 +1282,7 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	// just launched and bail, rather than resurrecting a cancelled task.
 	if applied, err := s.store.UpdateTaskInstanceGuarded(ctx, &ti, ti.ExecutorRef); err != nil {
 		s.log.Error("mark running", "ti", ti.ID, "err", err)
+		keepWorkspace = true // process is live but row stayed queued; recovery re-attaches and needs the cwd
 		return
 	} else if !applied {
 		_ = s.exec.Cancel(ctx, ti.ExecutorRef) // the process exists now; kill it

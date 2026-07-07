@@ -25,6 +25,11 @@ message LaunchRequest {
   map<string, string> env = 4;
   int64 timeout_seconds = 5; // 0 = no timeout
   string log_path = 6;       // file for combined stdout/stderr
+  // dir is the working directory the command runs in (cmd.Dir). Empty = inherit
+  // the executor's cwd. Used to run an uploaded project's `python3 main.py` from
+  // its staged directory. Assumes a filesystem shared with the scheduler that
+  // staged it (same-host / shared mount) — the same assumption log_path makes.
+  string dir = 7;
 }
 
 message LaunchResponse {

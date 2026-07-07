@@ -11,7 +11,9 @@ set -euo pipefail
 os="${1:?usage: package.sh <linux|darwin> <amd64|arm64>}"
 arch="${2:?usage: package.sh <linux|darwin> <amd64|arch64>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ver="$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo dev)"
+# CRONOVA_VERSION pins the baked/reported version (reproducible builds, local
+# mirror testing); otherwise derive it from the current tag.
+ver="${CRONOVA_VERSION:-$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
 case "$os" in linux|darwin) ;; *) echo "unsupported os: $os" >&2; exit 1 ;; esac
 case "$arch" in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac
@@ -21,8 +23,9 @@ trap 'rm -rf "$stage"' EXIT
 
 echo "==> building cronova $ver for $os/$arch"
 export CGO_ENABLED=0 GOOS="$os" GOARCH="$arch"
-go build -C "$root" -trimpath -ldflags "-s -w" -o "$stage/cronova"          ./cmd/cronova
-go build -C "$root" -trimpath -ldflags "-s -w" -o "$stage/cronova-executor" ./cmd/cronova-executor
+ldflags="-s -w -X main.version=$ver"
+go build -C "$root" -trimpath -ldflags "$ldflags" -o "$stage/cronova"          ./cmd/cronova
+go build -C "$root" -trimpath -ldflags "$ldflags" -o "$stage/cronova-executor" ./cmd/cronova-executor
 
 # assets the installer expects, at the same relative layout as the repo. Each
 # tarball carries only its platform's installer + service file.

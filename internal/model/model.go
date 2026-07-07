@@ -131,6 +131,11 @@ type Task struct {
 	// selects the driver and its host/port/login/password build the DSN. For
 	// python/sql tasks the Command field holds the code / query respectively.
 	Conn string `json:"conn,omitempty"`
+	// Project names an uploaded project directory (under the server's projects
+	// dir). When set on a shell task, the scheduler stages a fresh copy of that
+	// directory and runs Command with its cwd there (so `python3 main.py` resolves)
+	// and CRONOVA_PROJECT_DIR pointing at it. Empty = run with the executor's cwd.
+	Project string `json:"project,omitempty"`
 }
 
 // HTTPSpec configures an http-type task's request. ExpectedStatus lists the

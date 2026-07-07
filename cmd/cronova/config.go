@@ -16,6 +16,7 @@ type Config struct {
 	DB       string `yaml:"db"`
 	Dags     string `yaml:"dags"`
 	Logs     string `yaml:"logs"`
+	Projects string `yaml:"projects"` // dir of uploaded project files ("" = ~/.cronova/projects)
 	Tick     string `yaml:"tick"`
 	Executor string `yaml:"executor"`
 	HTTP     string `yaml:"http"`
@@ -60,6 +61,7 @@ func applyEnv(c *Config) {
 	env("CRONOVA_DB", &c.DB)
 	env("CRONOVA_DAGS", &c.Dags)
 	env("CRONOVA_LOGS", &c.Logs)
+	env("CRONOVA_PROJECTS", &c.Projects)
 	env("CRONOVA_TICK", &c.Tick)
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
@@ -116,6 +118,7 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	str("db", &c.DB)
 	str("dags", &c.Dags)
 	str("logs", &c.Logs)
+	str("projects", &c.Projects)
 	str("executor", &c.Executor)
 	str("http", &c.HTTP)
 	if set["tick"] {

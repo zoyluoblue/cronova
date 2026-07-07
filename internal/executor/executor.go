@@ -25,6 +25,7 @@ type Spec struct {
 	Env       map[string]string // injected env (CRONOVA_* vars)
 	Timeout   time.Duration     // 0 = no timeout
 	LogPath   string            // file to write combined stdout/stderr
+	Dir       string            // working directory (cmd.Dir); "" = inherit the executor's cwd
 }
 
 // Phase is a task's coarse execution state as reported by Probe.

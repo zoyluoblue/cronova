@@ -34,7 +34,8 @@ type taskYAML struct {
 	Timeout     int      `yaml:"timeout"`     // seconds
 	SLA         int      `yaml:"sla"`         // seconds from run start (soft alert)
 	TriggerRule string   `yaml:"trigger_rule"`
-	Conn        string   `yaml:"conn"` // connection id for type: sql
+	Conn        string   `yaml:"conn"`    // connection id for type: sql
+	Project     string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
 	HTTP        *struct {
 		Method         string            `yaml:"method"`
 		URL            string            `yaml:"url"`
@@ -170,6 +171,7 @@ func Parse(raw []byte) (*model.DAG, error) {
 			Timeout:     t.Timeout,
 			SLA:         t.SLA,
 			Conn:        strings.TrimSpace(t.Conn),
+			Project:     strings.TrimSpace(t.Project),
 			TriggerRule: orDefault(t.TriggerRule, model.RuleAllSuccess),
 		}
 		if !model.ValidTriggerRule(task.TriggerRule) {

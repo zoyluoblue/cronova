@@ -126,7 +126,7 @@ async function showDag(id, tab) {
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
       httpMethod: h.method || "GET", httpUrl: h.url || "", httpHeaders: h.headers ? Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "", httpBody: h.body || "", httpStatus: (h.expected_status || []).join(", ") }; }),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
@@ -689,6 +689,7 @@ function renderTaskPage() {
         <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar", "http"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
       </div>
       ${commandFieldHtml(tk)}
+      ${tk.type === "shell" ? projectSectionHtml(tk) : ""}
       <div class="section-h">${t("t_deps")}</div>
       <div class="b-deps">${siblings.length ? siblings.map((id) => `<span class="chip dep ${tk.deps.includes(id) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${tk.deps.includes(id)}" data-dep="${esc(id)}">${esc(id)}</span>`).join("") : `<span class="chip empty-hint">${t("t_nodeps")}</span>`}</div>
       <div class="tc-grid" style="margin-top:14px">
@@ -740,8 +741,153 @@ function renderTaskPage() {
     c.setAttribute("aria-checked", c.classList.contains("on"));
     saveDag();
   });
+  if (tk.type === "shell") hydrateProjectSection(tk);
   reflectSaveState();
 }
+// ---- project attach (shell tasks) ----------------------------------------
+// A shell task can name an uploaded project directory; the scheduler stages a
+// clean copy and runs the command there. This section lets the user pick an
+// existing project or upload files/folder/zip/inline without leaving the editor.
+let PROJECTS = null; // cache: [{name, files, size}] or null (unloaded)
+async function loadProjects(force) {
+  if (PROJECTS && !force) return PROJECTS;
+  try { PROJECTS = await api("/api/projects"); } catch (_) { PROJECTS = []; }
+  return PROJECTS;
+}
+function projectSectionHtml(tk) {
+  return `<div class="b-field full proj-sec">
+    <label>${t("t_project")} <span class="opt">${t("t_optional")}</span></label>
+    <div class="proj-row">
+      <select class="tf proj-select" data-k="project" aria-label="${t("t_project")}"><option value="">${t("proj_none")}</option></select>
+      <button type="button" class="proj-toggle" id="proj-toggle" aria-expanded="false">${t("proj_upload")}</button>
+    </div>
+    <div class="field-hint">${t("proj_hint")}</div>
+    <div class="proj-panel" id="proj-panel" hidden>
+      <div class="b-field"><label>${t("proj_name")}</label><input class="proj-name" id="proj-name" placeholder="my_project" autocomplete="off"></div>
+      <div class="proj-modes" role="tablist">
+        <button type="button" class="seg on" data-mode="files" role="tab" aria-selected="true">${t("proj_mode_files")}</button>
+        <button type="button" class="seg" data-mode="inline" role="tab" aria-selected="false">${t("proj_mode_inline")}</button>
+      </div>
+      <div id="pm-files">
+        <div class="proj-drop" id="proj-drop" tabindex="0">
+          <div class="pd-text">${t("proj_drop")}</div>
+          <div class="pd-actions"><button type="button" id="pd-files">${t("proj_pick_files")}</button><button type="button" id="pd-folder">${t("proj_pick_folder")}</button></div>
+          <div class="pd-zip">${t("proj_ziphint")}</div>
+          <div class="pd-selected" id="pd-selected" hidden></div>
+        </div>
+        <input type="file" id="pd-input-files" multiple hidden>
+        <input type="file" id="pd-input-folder" webkitdirectory hidden>
+      </div>
+      <div id="pm-inline" hidden>
+        <div class="b-field"><label>${t("proj_filename")}</label><input class="proj-iname" id="pi-name" placeholder="main.py" autocomplete="off"></div>
+        <div class="b-field full"><label>${t("proj_content")}</label><textarea class="cmd" id="pi-content" rows="6" spellcheck="false" placeholder="print('hello')"></textarea></div>
+      </div>
+      <div class="proj-foot"><button type="button" class="primary" id="proj-do">${t("proj_do_upload")}</button><button type="button" id="proj-cancel">${t("cancel_word")}</button></div>
+    </div>
+  </div>`;
+}
+// stripTop drops the leading folder segment of a webkitRelativePath so a selected
+// folder's CONTENTS land at the project root (…/myproj/main.py -> main.py).
+function stripTop(p) { const i = p.indexOf("/"); return i < 0 ? p : p.slice(i + 1); }
+// walkEntry recurses a dropped directory entry, pushing {file, path} with paths
+// relative to the dropped root (top folder name excluded).
+function walkEntry(entry, prefix, out) {
+  return new Promise((resolve) => {
+    if (entry.isFile) { entry.file((f) => { out.push({ file: f, path: prefix + entry.name }); resolve(); }, () => resolve()); return; }
+    // directory: its children live under prefix + this dir's name (so nested
+    // structure like src/main.py is preserved, not flattened to main.py).
+    const childPrefix = prefix + entry.name + "/";
+    const rd = entry.createReader(), kids = [];
+    const batch = () => rd.readEntries((ents) => {
+      if (!ents.length) { Promise.all(kids.map((e) => walkEntry(e, childPrefix, out))).then(() => resolve()); return; }
+      kids.push(...ents); batch();
+    }, () => resolve());
+    batch();
+  });
+}
+function hydrateProjectSection(tk) {
+  const sel = $("proj-select") || main.querySelector(".proj-select");
+  if (!sel) return;
+  let picked = []; // [{file, path}] staged for upload
+  // populate the existing-projects dropdown
+  const fill = () => {
+    const cur = tk.project || "";
+    sel.innerHTML = `<option value="">${t("proj_none")}</option>` +
+      (PROJECTS || []).map((p) => `<option value="${esc(p.name)}" ${p.name === cur ? "selected" : ""}>${esc(p.name)} · ${p.files}${lang === "zh" ? "个文件" : " files"}</option>`).join("");
+    // keep a selected value even if the list hasn't loaded it yet
+    if (cur && !(PROJECTS || []).some((p) => p.name === cur)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}" selected>${esc(cur)}</option>`);
+    }
+    sel.value = cur;
+  };
+  fill();
+  loadProjects().then(fill);
+  sel.onchange = () => { tk.project = sel.value || undefined; saveDag(); };
+
+  const panel = $("proj-panel"), toggle = $("proj-toggle");
+  toggle.onclick = () => {
+    const open = panel.hidden;
+    panel.hidden = !open; toggle.setAttribute("aria-expanded", String(open)); toggle.classList.toggle("on", open);
+    if (open && !$("proj-name").value) $("proj-name").value = tk.project || "";
+  };
+  // segmented mode switch
+  main.querySelectorAll(".proj-modes .seg").forEach((b) => b.onclick = () => {
+    main.querySelectorAll(".proj-modes .seg").forEach((x) => { const on = x === b; x.classList.toggle("on", on); x.setAttribute("aria-selected", String(on)); });
+    $("pm-files").hidden = b.dataset.mode !== "files";
+    $("pm-inline").hidden = b.dataset.mode !== "inline";
+  });
+
+  const drop = $("proj-drop"), selInfo = $("pd-selected");
+  const showPicked = () => { if (!picked.length) { selInfo.hidden = true; return; } selInfo.hidden = false; selInfo.textContent = t("proj_selected", picked.length) + ": " + picked.slice(0, 6).map((x) => x.path).join(", ") + (picked.length > 6 ? " …" : ""); };
+  const addFiles = (fileList, fromFolder) => {
+    for (const f of fileList) picked.push({ file: f, path: fromFolder && f.webkitRelativePath ? stripTop(f.webkitRelativePath) : f.name });
+    showPicked();
+  };
+  $("pd-files").onclick = () => $("pd-input-files").click();
+  $("pd-folder").onclick = () => $("pd-input-folder").click();
+  $("pd-input-files").onchange = (e) => addFiles(e.target.files, false);
+  $("pd-input-folder").onchange = (e) => addFiles(e.target.files, true);
+  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); if (ev === "dragleave" && drop.contains(e.relatedTarget)) return; drop.classList.remove("over"); }));
+  drop.addEventListener("drop", async (e) => {
+    const dt = e.dataTransfer;
+    const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+    if (entries.some((en) => en.isDirectory)) {
+      for (const en of entries) {
+        if (en.isFile) { await walkEntry(en, "", picked); }
+        else if (en.isDirectory) { // read children with empty prefix so contents land at project root
+          await new Promise((res) => { const rd = en.createReader(); const step = () => rd.readEntries((ents) => { if (!ents.length) return res(); Promise.all(ents.map((c) => walkEntry(c, "", picked))).then(step); }, res); step(); });
+        }
+      }
+      showPicked();
+    } else if (dt.files && dt.files.length) { addFiles(dt.files, false); }
+  });
+
+  $("proj-cancel").onclick = () => { panel.hidden = true; toggle.setAttribute("aria-expanded", "false"); toggle.classList.remove("on"); };
+  $("proj-do").onclick = async () => {
+    const name = $("proj-name").value.trim();
+    if (!name) { toast(t("proj_need_name"), "warn"); return; }
+    if (name === "." || name === ".." || !/^[A-Za-z0-9._-]+$/.test(name)) { toast(t("proj_name_bad"), "warn"); return; }
+    const inlineMode = !$("pm-inline").hidden;
+    const fd = new FormData();
+    if (inlineMode) {
+      const fn = $("pi-name").value.trim(), content = $("pi-content").value;
+      if (!fn) { toast(t("proj_need_files"), "warn"); return; }
+      fd.append("filename", fn); fd.append("content", content);
+    } else {
+      if (!picked.length) { toast(t("proj_need_files"), "warn"); return; }
+      for (const it of picked) { fd.append("file", it.file, it.file.name); fd.append("path", it.path); } // parallel path field
+    }
+    try {
+      await api(`/api/projects/${encodeURIComponent(name)}`, { method: "POST", body: fd });
+      await loadProjects(true);
+      tk.project = name; saveDag();
+      picked = []; renderTaskPage(); // re-render: select now shows the new project
+      toast(t("proj_uploaded"), "ok");
+    } catch (err) { toast(t("proj_upload_fail") + ": " + err.message, "err"); }
+  };
+}
+
 // rename the task and rewrite sibling deps that referenced the old id
 function renameActiveTask(tk, newId) {
   const oldId = tk.id;
@@ -805,6 +951,7 @@ function dagSpecFrom(st) {
       } else {
         o.command = tk.command;
         if (tk.type === "sql") o.conn = (tk.conn || "").trim();
+        if (tk.type === "shell" && tk.project) o.project = tk.project; // attached project dir
       }
       return o;
     }),

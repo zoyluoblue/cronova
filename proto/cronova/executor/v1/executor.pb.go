@@ -81,8 +81,13 @@ type LaunchRequest struct {
 	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	TimeoutSeconds int64                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"` // 0 = no timeout
 	LogPath        string                 `protobuf:"bytes,6,opt,name=log_path,json=logPath,proto3" json:"log_path,omitempty"`                       // file for combined stdout/stderr
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// dir is the working directory the command runs in (cmd.Dir). Empty = inherit
+	// the executor's cwd. Used to run an uploaded project's `python3 main.py` from
+	// its staged directory. Assumes a filesystem shared with the scheduler that
+	// staged it (same-host / shared mount) — the same assumption log_path makes.
+	Dir           string `protobuf:"bytes,7,opt,name=dir,proto3" json:"dir,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LaunchRequest) Reset() {
@@ -153,6 +158,13 @@ func (x *LaunchRequest) GetTimeoutSeconds() int64 {
 func (x *LaunchRequest) GetLogPath() string {
 	if x != nil {
 		return x.LogPath
+	}
+	return ""
+}
+
+func (x *LaunchRequest) GetDir() string {
+	if x != nil {
+		return x.Dir
 	}
 	return ""
 }
@@ -389,14 +401,15 @@ var File_cronova_executor_v1_executor_proto protoreflect.FileDescriptor
 
 const file_cronova_executor_v1_executor_proto_rawDesc = "" +
 	"\n" +
-	"\"cronova/executor/v1/executor.proto\x12\x13cronova.executor.v1\"\x98\x02\n" +
+	"\"cronova/executor/v1/executor.proto\x12\x13cronova.executor.v1\"\xaa\x02\n" +
 	"\rLaunchRequest\x12\x1e\n" +
 	"\vtask_run_id\x18\x01 \x01(\tR\ttaskRunId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
 	"\acommand\x18\x03 \x01(\tR\acommand\x12=\n" +
 	"\x03env\x18\x04 \x03(\v2+.cronova.executor.v1.LaunchRequest.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x03R\x0etimeoutSeconds\x12\x19\n" +
-	"\blog_path\x18\x06 \x01(\tR\alogPath\x1a6\n" +
+	"\blog_path\x18\x06 \x01(\tR\alogPath\x12\x10\n" +
+	"\x03dir\x18\a \x01(\tR\x03dir\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +

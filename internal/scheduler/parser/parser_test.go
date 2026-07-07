@@ -51,6 +51,16 @@ tasks:
 	}
 }
 
+func TestParseProjectField(t *testing.T) {
+	d, err := Parse([]byte("dag_id: p\ntasks:\n  - id: run\n    type: shell\n    command: \"python3 main.py\"\n    project: my_app\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(d.Tasks) != 1 || d.Tasks[0].Project != "my_app" {
+		t.Fatalf("project not parsed: %+v", d.Tasks)
+	}
+}
+
 func TestParseRejectsCycle(t *testing.T) {
 	raw := []byte(`
 dag_id: cyclic

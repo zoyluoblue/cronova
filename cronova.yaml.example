@@ -32,3 +32,9 @@ auth:
 # db:   data/cronova.db     # SQLite metadata database
 # dags: dags                # directory of DAG YAML definitions
 # logs: logs                # directory for per-task log files
+
+# Uploaded project files (console: task editor → 工程/Project). Each project is
+# a directory here; a shell task with `project: <name>` runs its command inside
+# a fresh temp copy of it. Default: ~/.cronova/projects (of the service user).
+# Requires the scheduler and executor to share a filesystem (same host).
+# projects: ~/.cronova/projects

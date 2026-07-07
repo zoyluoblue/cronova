@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,7 +18,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,6 +37,11 @@ import (
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 	"github.com/zoyluo/cronova/internal/web"
 )
+
+// version is the build's release version, injected at link time via
+// -ldflags "-X main.version=…" by the Makefile / scripts/package.sh. It is "dev"
+// for a plain `go build`. `cronova update` compares against it and reports it.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -60,6 +68,12 @@ func main() {
 		err = cmdInit(args)
 	case "start", "stop", "restart", "status":
 		err = cmdService(cmd)
+	case "update":
+		err = cmdUpdate(args)
+	case "uninstall":
+		err = cmdUninstall(args)
+	case "version", "--version", "-v":
+		err = cmdVersion()
 	case "healthcheck":
 		err = cmdHealthcheck(args)
 	case "run-op":
@@ -114,6 +128,13 @@ func cmdRunOp(args []string) error {
 	return nil
 }
 
+// cmdVersion prints the build version and platform (the release asset `update`
+// would fetch for this host).
+func cmdVersion() error {
+	fmt.Printf("cronova %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
+	return nil
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `cronova - a workflow scheduler
 
@@ -129,8 +150,11 @@ usage:
   cronova users passwd <name> -password ...   change a password
   cronova users delete <name>                 remove an account
   cronova init               interactive first-time setup (port/bind/admin/auth)
-  cronova start|stop|restart control the installed service (systemd/launchd; needs sudo)
+  cronova start|stop|restart control the installed service (auto-elevates via sudo)
   cronova status             show the installed service's status
+  cronova update [version]   download + install the latest (or given) release, then restart
+  cronova uninstall [--purge] remove the service + binary (--purge also deletes data)
+  cronova version            print the build version and platform
   cronova healthcheck        probe /readyz and exit non-zero if unhealthy
 
 run "cronova <command> -h" for command flags
@@ -172,12 +196,40 @@ func openStore(dbPath string) (*sqlite.Store, error) {
 	return st, nil
 }
 
+// workspaceDirFor derives a stable, per-deployment workspace root from the DB
+// path, so concurrent cronova instances on one host stay isolated (each GC only
+// sees its own workspaces). Same DB across restarts -> same dir, which is what
+// lets crash recovery re-attach to a still-staged workspace.
+func workspaceDirFor(dbPath string) string {
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		abs = dbPath
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("cronova-ws-%x", sum[:6]))
+}
+
+// defaultProjectsDir resolves ~/.cronova/projects for the service user. It tries
+// $HOME first, then the user record (launchd daemons may run without $HOME set),
+// and returns "" if no home can be determined (the projects feature is then off
+// unless -projects/CRONOVA_PROJECTS is given explicitly).
+func defaultProjectsDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".cronova", "projects")
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return filepath.Join(u.HomeDir, ".cronova", "projects")
+	}
+	return ""
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", "cronova.yaml", "path to YAML config file (optional)")
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
 	logDir := fs.String("logs", "logs", "directory for task log files")
+	projectsDir := fs.String("projects", "", "directory for uploaded project files (default ~/.cronova/projects)")
 	tick := fs.Duration("tick", 2*time.Second, "scheduling loop interval")
 	executorAddr := fs.String("executor", "", "gRPC executor target (e.g. unix:///tmp/cronova-executor.sock); empty = in-process executor")
 	httpAddr := fs.String("http", ":8090", "HTTP address for the console API + web UI (empty to disable)")
@@ -197,9 +249,12 @@ func cmdServe(args []string) error {
 	}
 	applyEnv(&cfg)
 	overlaySetFlags(&cfg, fs, map[string]any{
-		"db": dbPath, "dags": dagDir, "logs": logDir, "tick": tick,
+		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "tick": tick,
 		"executor": executorAddr, "http": httpAddr, "auth": authFlag,
 	})
+	if cfg.Projects == "" {
+		cfg.Projects = defaultProjectsDir() // ~/.cronova/projects (may be "" if no home)
+	}
 
 	tickDur, err := time.ParseDuration(cfg.Tick)
 	if err != nil || tickDur <= 0 {
@@ -243,10 +298,20 @@ func cmdServe(args []string) error {
 		log.Print("cronova: using in-process executor (tasks die on restart; use -executor for crash recovery)")
 	}
 
+	if cfg.Projects != "" {
+		if err := os.MkdirAll(cfg.Projects, 0o755); err != nil {
+			return fmt.Errorf("create projects dir %s: %w", cfg.Projects, err)
+		}
+	}
+
 	sch := scheduler.New(st, exec, scheduler.Options{
-		DagDir: cfg.Dags,
-		LogDir: cfg.Logs,
-		Tick:   tickDur,
+		DagDir:      cfg.Dags,
+		LogDir:      cfg.Logs,
+		ProjectsDir: cfg.Projects,
+		// Per-DB workspace dir: two cronova instances on one host (e.g. an
+		// installed service + a dev run) must not GC each other's workspaces.
+		WorkspaceDir: workspaceDirFor(cfg.DB),
+		Tick:         tickDur,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -258,6 +323,7 @@ func cmdServe(args []string) error {
 	if cfg.HTTP != "" {
 		apiSrv := api.New(st, sch, cfg.Logs, web.FS(), api.Info{Executor: executorLabel, Tick: tickDur.String()})
 		apiSrv.SetAuth(api.AuthConfig{Enabled: cfg.Auth.Enabled, SessionTTL: cfg.sessionTTL(), SecureCookie: cfg.Auth.SecureCookie})
+		apiSrv.SetProjectsDir(cfg.Projects)
 		httpSrv = &http.Server{Addr: cfg.HTTP, Handler: apiSrv.Handler()}
 		go func() {
 			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)

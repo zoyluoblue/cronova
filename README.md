@@ -94,10 +94,15 @@ make install              # build for the host + install the native service (nee
 # Linux:  systemd unit + `cronova` system user   ·   macOS: launchd LaunchDaemon
 ```
 
-Once installed, control it the same way on both platforms (wraps systemd/launchd):
+Once installed, `cronova` manages its own lifecycle the same way on both
+platforms (wraps systemd/launchd; mutating commands auto-elevate via `sudo`):
 
 ```bash
-sudo cronova start | stop | restart      # cronova status  to check
+cronova start | stop | restart     # control the service   ·   cronova status  to check
+cronova update                     # fetch + install the latest release, then restart
+cronova update v0.2.0              # pin a specific version (re-install / downgrade)
+cronova uninstall                  # remove the service + binary (keeps your data)
+cronova uninstall --purge          # ...and delete config / DB / DAGs / logs too
 ```
 
 `sql` and `http` tasks are self-contained in the binary; `shell` and `python`
@@ -134,6 +139,27 @@ trigger_after:               # optional: run after another DAG succeeds
 ```
 
 Template variables in `command`: `{{ logical_date }}`, `{{ logical_datetime }}`, `{{ run_id }}`, `{{ task_id }}`, `{{ try_number }}`. The same values are injected as `CRONOVA_*` environment variables.
+
+### Running your own scripts / projects
+
+Upload a script, a whole project folder, or a zip in the console (task editor →
+**Project**), or drop files under the projects dir (default `~/.cronova/projects/<name>/`).
+Then point a shell task at it:
+
+```yaml
+tasks:
+  - id: run_main
+    type: shell
+    command: python3 main.py        # runs with cwd = a clean copy of the project
+    project: my_app                 # a directory under the projects dir
+```
+
+Each attempt gets a **fresh temp copy** of the project as its working directory
+(`CRONOVA_PROJECT_DIR` points there too), so runs are isolated and re-uploads
+take effect on the next run. The copy is deleted when the attempt ends — write
+durable outputs to stdout (the task log) or an external system, not the cwd.
+Requires the scheduler and executor to share a filesystem (the default
+in-process executor, or a same-host gRPC executor).
 
 ## CLI
 

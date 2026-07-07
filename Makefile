@@ -3,7 +3,8 @@
 
 PKG        := ./cmd/cronova
 EXEC_PKG   := ./cmd/cronova-executor
-LDFLAGS    := -s -w
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS    := -s -w -X main.version=$(VERSION)
 
 .PHONY: build
 build: ## build ./cronova for the host OS/arch

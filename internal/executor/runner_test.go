@@ -44,6 +44,30 @@ func TestLocalSuccess(t *testing.T) {
 	}
 }
 
+func TestLocalDir(t *testing.T) {
+	e := NewLocal()
+	workdir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "dir.log")
+	// pwd resolves symlinks (/var -> /private/var on macOS); compare via -ef instead.
+	ref, err := e.Launch(context.Background(), Spec{
+		TaskRunID: "r/t",
+		Command:   `[ "$PWD" -ef "` + workdir + `" ] && echo CWD_OK`,
+		Dir:       workdir,
+		LogPath:   logPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := waitExited(t, e, ref, 3*time.Second); st.ExitCode != 0 {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("exit=%d, cmd did not run in Dir; log:\n%s", st.ExitCode, data)
+	}
+	data, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(data), "CWD_OK") {
+		t.Errorf("command did not run with cwd=%s; log:\n%s", workdir, data)
+	}
+}
+
 func TestLocalFailure(t *testing.T) {
 	e := NewLocal()
 	ref, err := e.Launch(context.Background(), Spec{TaskRunID: "r/t", Command: "exit 3", LogPath: filepath.Join(t.TempDir(), "f.log")})
