@@ -28,6 +28,54 @@ type apiParam struct {
 
 // apiEndpoint is one route in the catalog. Both the OpenAPI path item and the
 // four code samples are derived from these fields.
+// Endpoint is a public projection of one catalog entry, for external tooling
+// (the MCP server) that derives from the SAME single source of truth as the
+// OpenAPI spec and code samples — so an AI's tools can never drift from the API.
+type Endpoint struct {
+	Method       string
+	Path         string
+	Tag          string
+	Summary      string
+	Desc         string
+	Params       []Param
+	HasBody      bool
+	BodyExample  any    // example request body, nil if none
+	BodyType     string // "json" (default) or "yaml"
+	OptionalBody bool
+	NoAuth       bool
+}
+
+// Param is a public projection of apiParam.
+type Param struct {
+	Name     string
+	In       string // "path" or "query"
+	Required bool
+	Desc     string
+	Example  string
+}
+
+// Catalog returns the public API surface (the same catalog that drives OpenAPI).
+func Catalog() []Endpoint {
+	src := apiCatalog()
+	out := make([]Endpoint, 0, len(src))
+	for _, e := range src {
+		ep := Endpoint{
+			Method: e.Method, Path: e.Path, Tag: e.Tag,
+			Summary: e.Summary, Desc: e.Desc,
+			HasBody: e.Request != nil, BodyExample: e.Request,
+			BodyType: e.RequestType, OptionalBody: e.OptionalBody, NoAuth: e.NoAuth,
+		}
+		if ep.HasBody && ep.BodyType == "" {
+			ep.BodyType = "json"
+		}
+		for _, p := range e.Params {
+			ep.Params = append(ep.Params, Param{Name: p.Name, In: p.In, Required: p.Required, Desc: p.Desc, Example: p.Example})
+		}
+		out = append(out, ep)
+	}
+	return out
+}
+
 type apiEndpoint struct {
 	Method       string
 	Path         string
@@ -72,6 +120,9 @@ func apiCatalog() []apiEndpoint {
 		{Method: "POST", Path: "/api/dags/build", Tag: "DAGs",
 			Summary: "Create or update a DAG", Desc: "Upsert a DAG from a structured spec. The server renders it to canonical YAML and runs the same validation as file-loaded DAGs (cycle/dep/cron/id checks). Keyed by dag_id.",
 			Request: dagSpecExample, Response: map[string]any{"dag_id": "etl_daily"}},
+		{Method: "POST", Path: "/api/dags/validate", Tag: "DAGs",
+			Summary: "Validate a DAG (dry run)", Desc: "Render + validate a DAG spec WITHOUT persisting — same cycle/dep/cron/id checks as create. Returns {valid, error?, canonical_yaml}. Use it to check a generated DAG before creating it.",
+			Request: dagSpecExample, Response: map[string]any{"valid": true, "dag_id": "etl_daily", "tasks": 2}},
 		{Method: "POST", Path: "/api/dags", Tag: "DAGs",
 			Summary: "Create a DAG from YAML", Desc: "Create/update a DAG by POSTing its raw YAML definition (same format as an on-disk DAG file).",
 			RequestType: "yaml", RequestDesc: "Raw DAG YAML.",
@@ -187,6 +238,19 @@ func apiCatalog() []apiEndpoint {
 			Summary: "Delete a connection", Desc: "Remove a connection.",
 			Params:   []apiParam{{Name: "id", In: "path", Required: true, Desc: "Connection id.", Example: "warehouse"}},
 			Response: map[string]any{"deleted": true}},
+
+		// ---- Projects ----
+		{Method: "GET", Path: "/api/projects", Tag: "Projects",
+			Summary: "List uploaded projects", Desc: "Return uploaded project directories (name, file count, total size). A shell task's `project` field names one; the scheduler runs its command in a fresh copy of that directory. Upload is multipart (console/CLI), not part of this JSON API.",
+			Response: []any{map[string]any{"name": "my_app", "files": 3, "size": 4096}}},
+		{Method: "GET", Path: "/api/projects/{name}", Tag: "Projects",
+			Summary: "List a project's files", Desc: "Return the file paths and sizes inside one uploaded project.",
+			Params:   []apiParam{{Name: "name", In: "path", Required: true, Desc: "Project name.", Example: "my_app"}},
+			Response: map[string]any{"name": "my_app", "files": []any{map[string]any{"path": "main.py", "size": 120}}}},
+		{Method: "DELETE", Path: "/api/projects/{name}", Tag: "Projects",
+			Summary: "Delete a project", Desc: "Remove an uploaded project directory and all its files.",
+			Params:   []apiParam{{Name: "name", In: "path", Required: true, Desc: "Project name.", Example: "my_app"}},
+			Response: map[string]any{"ok": true}},
 
 		// ---- Tokens ----
 		{Method: "GET", Path: "/api/tokens", Tag: "Tokens",

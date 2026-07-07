@@ -29,6 +29,7 @@ import (
 
 	"github.com/zoyluo/cronova/internal/api"
 	"github.com/zoyluo/cronova/internal/auth"
+	"github.com/zoyluo/cronova/internal/client"
 	"github.com/zoyluo/cronova/internal/executor"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/operator"
@@ -62,6 +63,28 @@ func main() {
 		err = cmdRuns(args)
 	case "pools":
 		err = cmdPools(args)
+	case "api":
+		err = cmdAPI(args)
+	case "get":
+		err = cmdGet(args)
+	case "run":
+		err = cmdRun(args)
+	case "logs":
+		err = cmdLogs(args)
+	case "cancel":
+		err = cmdCancel(args)
+	case "retry":
+		err = cmdRetry(args)
+	case "mark":
+		err = cmdMark(args)
+	case "pause":
+		err = cmdPause(args)
+	case "overview":
+		err = cmdOverview(args)
+	case "tokens":
+		err = cmdTokens(args)
+	case "mcp":
+		err = cmdMCP(args)
 	case "users":
 		err = cmdUsers(args)
 	case "init":
@@ -150,6 +173,21 @@ usage:
   cronova users passwd <name> -password ...   change a password
   cronova users delete <name>                 remove an account
   cronova init               interactive first-time setup (port/bind/admin/auth)
+
+  --- agent / remote mode (set -server + -token, or CRONOVA_SERVER/CRONOVA_TOKEN; add -o json) ---
+  cronova api <METHOD> <path> [json-body]     raw call to any REST endpoint
+  cronova get <dag_id>                        show a DAG definition
+  cronova run <run_id>                        show a run + its task states
+  cronova logs <task_instance_id>             fetch a task's log
+  cronova cancel <run_id>                     cancel an active run
+  cronova retry <run_id> [task_id]            retry a run's failed tasks (or one task)
+  cronova mark <run_id> [task_id] <state>     operator override of a run/task state
+  cronova pause <dag_id> [-off]               pause or resume scheduling
+  cronova overview                            dashboard summary (DAGs/runs/pools)
+  cronova tokens create <name> [-role ...]    mint an API token for an agent (local)
+  cronova tokens list | delete <id>           manage API tokens (local)
+  cronova mcp [-read-only]                     run an MCP server (stdio) for AI clients
+
   cronova start|stop|restart control the installed service (auto-elevates via sudo)
   cronova status             show the installed service's status
   cronova update [version]   download + install the latest (or given) release, then restart
@@ -360,11 +398,38 @@ func cmdTrigger(args []string) error {
 	fs := flag.NewFlagSet("trigger", flag.ExitOnError)
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
+	paramsJSON := fs.String("params", "", `trigger params as a JSON object, e.g. '{"day":"2026-01-01"}'`)
+	resolve := addGlobalFlags(fs)
 	pos := parsePositionals(fs, args)
+	g := resolve()
 	if len(pos) == 0 {
-		return fmt.Errorf("usage: cronova trigger <dag_id>")
+		return fmt.Errorf("usage: cronova trigger <dag_id> [-params '{...}']")
 	}
 	dagID := pos[0]
+	ctx := context.Background()
+
+	var params map[string]string
+	if *paramsJSON != "" {
+		if err := json.Unmarshal([]byte(*paramsJSON), &params); err != nil {
+			return fmt.Errorf("-params must be a JSON object of string values: %w", err)
+		}
+	}
+
+	if g.remote() {
+		c, err := g.client()
+		if err != nil {
+			return err
+		}
+		runID, err := c.TriggerDAG(ctx, dagID, params)
+		if err != nil {
+			return err
+		}
+		if g.asJSON() {
+			return printJSON(map[string]string{"run_id": runID})
+		}
+		fmt.Printf("created run %s\n", runID)
+		return nil
+	}
 
 	st, err := openStore(*dbPath)
 	if err != nil {
@@ -373,13 +438,15 @@ func cmdTrigger(args []string) error {
 	defer st.Close()
 
 	sch := scheduler.New(st, executor.NewLocal(), scheduler.Options{DagDir: *dagDir})
-	ctx := context.Background()
 	if err := sch.LoadDAGs(ctx); err != nil {
 		return err
 	}
-	runID, err := sch.TriggerManual(ctx, dagID, nil)
+	runID, err := sch.TriggerManual(ctx, dagID, params)
 	if err != nil {
 		return err
+	}
+	if g.asJSON() {
+		return printJSON(map[string]string{"run_id": runID})
 	}
 	fmt.Printf("created run %s (a running `cronova serve` will execute it)\n", runID)
 	return nil
@@ -389,23 +456,46 @@ func cmdDags(args []string) error {
 	fs := flag.NewFlagSet("dags", flag.ExitOnError)
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
+	resolve := addGlobalFlags(fs)
 	_ = fs.Parse(args)
+	g := resolve()
+	ctx := context.Background()
 
-	st, err := openStore(*dbPath)
-	if err != nil {
-		return err
+	var dags []model.DAG
+	if g.remote() {
+		c, err := g.client()
+		if err != nil {
+			return err
+		}
+		if dags, err = c.ListDAGs(ctx); err != nil {
+			return err
+		}
+	} else {
+		st, err := openStore(*dbPath)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		// Load from disk so freshly-added DAGs show up even before serve runs.
+		sch := scheduler.New(st, executor.NewLocal(), scheduler.Options{DagDir: *dagDir})
+		if err := sch.LoadDAGs(ctx); err != nil {
+			return err
+		}
+		ptrs, err := st.ListDAGs(ctx)
+		if err != nil {
+			return err
+		}
+		for _, d := range ptrs {
+			d.DefinitionYAML = ""
+			dags = append(dags, *d)
+		}
 	}
-	defer st.Close()
 
-	// Load from disk so freshly-added DAGs show up even before serve runs.
-	sch := scheduler.New(st, executor.NewLocal(), scheduler.Options{DagDir: *dagDir})
-	if err := sch.LoadDAGs(context.Background()); err != nil {
-		return err
-	}
-
-	dags, err := st.ListDAGs(context.Background())
-	if err != nil {
-		return err
+	if g.asJSON() {
+		if dags == nil {
+			dags = []model.DAG{}
+		}
+		return printJSON(dags)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "DAG_ID\tSCHEDULE\tCATCHUP\tPAUSED\tMAX_ACTIVE")
@@ -422,19 +512,57 @@ func cmdDags(args []string) error {
 func cmdPools(args []string) error {
 	fs := flag.NewFlagSet("pools", flag.ExitOnError)
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
+	resolve := addGlobalFlags(fs)
 	pos := parsePositionals(fs, args)
+	g := resolve()
+	ctx := context.Background()
+
+	isSet := len(pos) > 0 && pos[0] == "set"
+	if isSet && len(pos) != 3 {
+		return fmt.Errorf("usage: cronova pools set <name> <slots>")
+	}
+
+	// Remote mode: list/set via the API.
+	if g.remote() {
+		c, err := g.client()
+		if err != nil {
+			return err
+		}
+		if isSet {
+			slots, err := strconv.Atoi(pos[2])
+			if err != nil || slots <= 0 {
+				return fmt.Errorf("slots must be a positive integer, got %q", pos[2])
+			}
+			// POST /api/pools/{name} takes slots as a QUERY param, not a body.
+			if _, err := c.Call(ctx, "POST", "/api/pools/{name}", client.Options{
+				Path:  map[string]string{"name": pos[1]},
+				Query: map[string]string{"slots": strconv.Itoa(slots)},
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("pool %q set to %d slots\n", pos[1], slots)
+			return nil
+		}
+		pools, err := c.ListPools(ctx)
+		if err != nil {
+			return err
+		}
+		if g.asJSON() {
+			if pools == nil {
+				pools = []model.Pool{}
+			}
+			return printJSON(pools)
+		}
+		return renderPools(pools)
+	}
 
 	st, err := openStore(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	ctx := context.Background()
 
-	if len(pos) > 0 && pos[0] == "set" {
-		if len(pos) != 3 {
-			return fmt.Errorf("usage: cronova pools set <name> <slots>")
-		}
+	if isSet {
 		slots, err := strconv.Atoi(pos[2])
 		if err != nil || slots <= 0 {
 			return fmt.Errorf("slots must be a positive integer, got %q", pos[2])
@@ -446,10 +574,21 @@ func cmdPools(args []string) error {
 		return nil
 	}
 
-	pools, err := st.ListPools(ctx)
+	ptrs, err := st.ListPools(ctx)
 	if err != nil {
 		return err
 	}
+	pools := make([]model.Pool, 0, len(ptrs))
+	for _, p := range ptrs {
+		pools = append(pools, *p)
+	}
+	if g.asJSON() {
+		return printJSON(pools)
+	}
+	return renderPools(pools)
+}
+
+func renderPools(pools []model.Pool) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tSLOTS")
 	for _, p := range pools {
@@ -462,11 +601,39 @@ func cmdRuns(args []string) error {
 	fs := flag.NewFlagSet("runs", flag.ExitOnError)
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	limit := fs.Int("n", 10, "number of recent runs to show")
+	resolve := addGlobalFlags(fs)
 	pos := parsePositionals(fs, args)
+	g := resolve()
 	if len(pos) == 0 {
 		return fmt.Errorf("usage: cronova runs <dag_id>")
 	}
 	dagID := pos[0]
+	ctx := context.Background()
+
+	// Remote: the runs endpoint returns runs only (no per-task states), so print
+	// them as JSON or a compact table without the tasks column.
+	if g.remote() {
+		c, err := g.client()
+		if err != nil {
+			return err
+		}
+		runs, err := c.ListRuns(ctx, dagID, *limit)
+		if err != nil {
+			return err
+		}
+		if g.asJSON() {
+			if runs == nil {
+				runs = []model.DagRun{}
+			}
+			return printJSON(runs)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "RUN_ID\tLOGICAL_DATE\tSTATE\tTRIGGER")
+		for _, r := range runs {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.RunID, r.LogicalDate.Format(time.RFC3339), r.State, r.TriggerType)
+		}
+		return w.Flush()
+	}
 
 	st, err := openStore(*dbPath)
 	if err != nil {
@@ -474,10 +641,24 @@ func cmdRuns(args []string) error {
 	}
 	defer st.Close()
 
-	ctx := context.Background()
 	runs, err := st.ListDagRuns(ctx, dagID, *limit)
 	if err != nil {
 		return err
+	}
+	if g.asJSON() {
+		type runOut struct {
+			*model.DagRun
+			Tasks []*model.TaskInstance `json:"tasks"`
+		}
+		out := []runOut{}
+		for _, r := range runs {
+			tis, err := st.ListTaskInstances(ctx, r.RunID)
+			if err != nil {
+				return err
+			}
+			out = append(out, runOut{DagRun: r, Tasks: tis})
+		}
+		return printJSON(out)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "RUN_ID\tLOGICAL_DATE\tSTATE\tTRIGGER\tTASKS")

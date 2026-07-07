@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/schedule/preview", s.schedulePreview)
 	mux.HandleFunc("POST /api/dags", s.createDAG)
 	mux.HandleFunc("POST /api/dags/build", s.buildDAG)
+	mux.HandleFunc("POST /api/dags/validate", s.validateDAG)
 	mux.HandleFunc("GET /api/dags/{id}", s.getDAG)
 	mux.HandleFunc("DELETE /api/dags/{id}", s.deleteDAG)
 	mux.HandleFunc("POST /api/dags/{id}/trigger", s.triggerDAG)
@@ -529,6 +530,29 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "create_dag", dagID, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
+}
+
+// validateDAG is a dry run of buildDAG: it renders + validates a spec (same
+// checks as create — cycle/dep/cron/id) but persists NOTHING. It always returns
+// 200 with {valid, ...} so an AI author gets structured feedback to iterate on
+// rather than an HTTP error to interpret.
+func (s *Server) validateDAG(w http.ResponseWriter, r *http.Request) {
+	var spec dagSpec
+	if err := decodeJSON(r, &spec); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": "invalid spec: " + err.Error()})
+		return
+	}
+	yml, err := specToYAML(spec)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": err.Error()})
+		return
+	}
+	d, err := parser.Parse(yml)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": err.Error(), "canonical_yaml": string(yml)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "dag_id": d.DagID, "tasks": len(d.Tasks), "canonical_yaml": string(yml)})
 }
 
 func specToYAML(spec dagSpec) ([]byte, error) {

@@ -186,6 +186,27 @@ in-process executor, or a same-host gRPC executor).
 | `GET` | `/api/tasks/{ti_id}/log/stream` | Live log tail (SSE) |
 | `GET` | `/api/pools` · `POST /api/pools/{name}?slots=N` | Pools |
 
+Full machine-readable spec at `GET /openapi.json`; human docs (Redoc) at `/docs`.
+
+## AI agents (MCP + remote CLI)
+
+Let an AI drive cronova through the **same token-authenticated, role-gated API** —
+either as native **MCP** tools or via the **remote CLI**:
+
+```bash
+cronova tokens create my-agent -role admin        # mint a token (local, once)
+cronova mcp                                        # MCP server over stdio (for Claude, etc.)
+
+export CRONOVA_SERVER=http://localhost:8090 CRONOVA_TOKEN=cnv_pat_…
+cronova dags -o json                               # remote CLI, JSON output
+cronova api POST /api/dags/validate '{"dag_id":"x","tasks":[…]}'   # dry-run validate
+```
+
+`cronova mcp` exposes ~30 catalog-derived tools (`list_dags`, `create_dag`,
+`validate_dag`, `trigger_dag`, `get_task_log`, `retry_task`, …); `-read-only`
+exposes just the reads. Full guide, MCP config snippet, and security notes:
+**[docs/AGENTS.md](docs/AGENTS.md)**.
+
 ## Project layout
 
 ```
@@ -195,7 +216,9 @@ internal/model         domain types + state machine
 internal/store         persistence interface + sqlite implementation
 internal/scheduler     scheduling loop, DAG parser, recovery
 internal/executor      subprocess runner, gRPC server/client, local executor
-internal/api           REST + SSE HTTP handlers
+internal/api           REST + SSE HTTP handlers (+ OpenAPI catalog)
+internal/client        typed REST client (shared by the remote CLI + MCP server)
+internal/mcp           MCP server: cronova operations as AI tools, derived from the API catalog
 internal/web           embedded web console (static assets)
 proto/                 gRPC service definitions (buf-generated)
 dags/                  example DAG definitions
