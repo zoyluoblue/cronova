@@ -11,7 +11,10 @@ let query = "";
 let overviewCache = null;
 let authUser = null; // {username, role, auth} when signed in; null before auth resolves
 let logES = null;
-let lang = localStorage.getItem("cnv_lang") || "zh";
+// language: a ?lang=en|zh query param (deep-linkable / shareable) wins, then the
+// saved preference, then Chinese.
+const _urlLang = new URLSearchParams(location.search).get("lang");
+let lang = (_urlLang === "en" || _urlLang === "zh") ? _urlLang : (localStorage.getItem("cnv_lang") || "zh");
 let theme = localStorage.getItem("cnv_theme") || "dark";
 
 // D: in-memory editable spec for the active DAG operation page (immediate-save).
