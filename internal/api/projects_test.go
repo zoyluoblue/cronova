@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +313,38 @@ func TestGetDAGCarriesProject(t *testing.T) {
 	tasks := body.(map[string]any)["tasks"].([]any)
 	if m := tasks[0].(map[string]any); m["project"] != "my_app" {
 		t.Fatalf("getDAG task project = %v, want my_app", m["project"])
+	}
+}
+
+// TestValidateFlagsMissingProject: a DAG that references an un-uploaded project
+// still parses (valid=true) but validate warns about it, so an author/AI knows
+// before the first run.
+func TestValidateFlagsMissingProject(t *testing.T) {
+	h, projDir := projectsServer(t)
+	if err := os.MkdirAll(filepath.Join(projDir, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"dag_id":"d","start_date":"2026-01-01","tasks":[
+		{"id":"a","type":"shell","command":"echo hi","project":"real"},
+		{"id":"b","type":"shell","command":"echo hi","project":"ghost"}]}`
+	req := httptest.NewRequest("POST", "/api/dags/validate", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("bad response: %v (%s)", err, rec.Body)
+	}
+	if m["valid"] != true {
+		t.Fatalf("valid = %v, want true (structure is fine): %s", m["valid"], rec.Body)
+	}
+	warns, _ := m["warnings"].([]any)
+	joined := fmt.Sprint(warns...)
+	if !strings.Contains(joined, "ghost") {
+		t.Errorf("expected a warning about the missing project 'ghost', got %v", warns)
+	}
+	if strings.Contains(joined, `"real"`) || strings.Contains(joined, "project \"real\"") {
+		t.Errorf("the existing project 'real' should not warn: %v", warns)
 	}
 }
 

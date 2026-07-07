@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/zoyluo/cronova/internal/model"
 )
 
 // Uploaded projects are plain directories under the server's projects dir; a
@@ -379,6 +381,30 @@ func withinDir(base, target string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// projectWarnings flags tasks whose `project` names something missing or
+// unconfigured — a DAG can parse fine yet fail at run time because the referenced
+// project was never uploaded. validate surfaces these so an author (esp. an AI)
+// gets the signal up front instead of at the first run.
+func (s *Server) projectWarnings(tasks []model.Task) []string {
+	var warns []string
+	for _, t := range tasks {
+		if t.Project == "" {
+			continue
+		}
+		switch {
+		case !validProjectName(t.Project):
+			warns = append(warns, fmt.Sprintf("task %q: invalid project name %q", t.ID, t.Project))
+		case s.projectsDir == "":
+			warns = append(warns, fmt.Sprintf("task %q references project %q, but this server has no projects dir configured", t.ID, t.Project))
+		default:
+			if fi, err := os.Stat(filepath.Join(s.projectsDir, t.Project)); err != nil || !fi.IsDir() {
+				warns = append(warns, fmt.Sprintf("task %q references project %q which is not uploaded yet", t.ID, t.Project))
+			}
+		}
+	}
+	return warns
 }
 
 // dirStats returns the file count and total byte size of a tree (regular files).

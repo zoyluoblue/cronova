@@ -552,7 +552,11 @@ func (s *Server) validateDAG(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": err.Error(), "canonical_yaml": string(yml)})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "dag_id": d.DagID, "tasks": len(d.Tasks), "canonical_yaml": string(yml)})
+	resp := map[string]any{"valid": true, "dag_id": d.DagID, "tasks": len(d.Tasks), "canonical_yaml": string(yml)}
+	if warns := s.projectWarnings(d.Tasks); len(warns) > 0 {
+		resp["warnings"] = warns // parses fine, but a referenced project isn't uploaded
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func specToYAML(spec dagSpec) ([]byte, error) {

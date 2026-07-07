@@ -68,6 +68,25 @@ func TestLocalDir(t *testing.T) {
 	}
 }
 
+// TestLocalMissingDir: a set working dir that doesn't exist (a project-attached
+// task on an executor that doesn't share the scheduler's filesystem) fails with a
+// clear, shared-filesystem message rather than a cryptic chdir error.
+func TestLocalMissingDir(t *testing.T) {
+	e := NewLocal()
+	_, err := e.Launch(context.Background(), Spec{
+		TaskRunID: "r/t",
+		Command:   "echo hi",
+		Dir:       filepath.Join(t.TempDir(), "does-not-exist"),
+		LogPath:   filepath.Join(t.TempDir(), "m.log"),
+	})
+	if err == nil {
+		t.Fatal("expected an error for a missing working directory")
+	}
+	if !strings.Contains(err.Error(), "filesystem") {
+		t.Errorf("error should explain the shared-filesystem requirement, got: %v", err)
+	}
+}
+
 func TestLocalFailure(t *testing.T) {
 	e := NewLocal()
 	ref, err := e.Launch(context.Background(), Spec{TaskRunID: "r/t", Command: "exit 3", LogPath: filepath.Join(t.TempDir(), "f.log")})

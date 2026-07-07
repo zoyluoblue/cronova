@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -92,6 +93,18 @@ func cmdUpdate(args []string) error {
 		}
 	}
 
+	// Refresh the service definition (plist/unit) from the release too, so a
+	// format change in a new version actually takes effect — a binary-only swap
+	// would pin the host to its bootstrap-era plist forever. Best-effort: a
+	// failure here warns but does not abort the (already-swapped) binary update.
+	if serviceInstalled() {
+		if r3, err := refreshServiceDef(bins); err != nil {
+			fmt.Fprintf(os.Stderr, "cronova: warning — could not refresh the service definition: %v\n", err)
+		} else if r3 != nil {
+			restores = append(restores, r3)
+		}
+	}
+
 	// Restart the service so the new binary actually runs. On failure, roll the
 	// binaries back and bring the previous version back up — never leave the box
 	// on a half-applied update.
@@ -110,6 +123,9 @@ func cmdUpdate(args []string) error {
 	// Success — drop the .bak backups.
 	commitSwap(binDst)
 	commitSwap(binExecutor)
+	if p := serviceDefPath(); p != "" {
+		commitSwap(p)
+	}
 
 	from := version
 	if from == "" || from == "dev" {
@@ -288,6 +304,12 @@ func extractReleaseBinaries(r io.Reader) (map[string][]byte, string, error) {
 				return nil, "", fmt.Errorf("extract %s: %w", path.Base(h.Name), err)
 			}
 			out[path.Base(h.Name)] = b
+		case "com.cronova.plist", "cronova.service": // service definition, refreshed on update
+			b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
+			if err != nil {
+				return nil, "", fmt.Errorf("extract %s: %w", path.Base(h.Name), err)
+			}
+			out[path.Base(h.Name)] = b
 		case "VERSION":
 			b, err := io.ReadAll(io.LimitReader(tr, 1<<10))
 			if err == nil {
@@ -344,5 +366,120 @@ func swapBinary(dst string, data []byte) (restore func() error, err error) {
 	}, nil
 }
 
-// commitSwap drops the backup left by swapBinary (best-effort).
+// commitSwap drops the backup left by swapBinary/swapFile (best-effort).
 func commitSwap(dst string) { _ = os.Remove(dst + ".bak") }
+
+// serviceDefPath is the installed service-definition file for this host, or "".
+func serviceDefPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return launchdPlist
+	case "linux":
+		return systemdUnitPath
+	}
+	return ""
+}
+
+// refreshServiceDef installs the service definition (launchd plist / systemd
+// unit) shipped in the release over the installed one, so a format change takes
+// effect on update rather than pinning the host to its bootstrap-era definition.
+// Returns a restore func for the rollback chain, or nil when the release ships no
+// definition / there's nothing installed to replace. The macOS plist is
+// re-templated with the CURRENT service user so the daemon keeps its account.
+func refreshServiceDef(bins map[string][]byte) (func() error, error) {
+	switch runtime.GOOS {
+	case "linux":
+		def, ok := bins["cronova.service"]
+		if !ok {
+			return nil, nil
+		}
+		return swapFile(systemdUnitPath, def, 0o644, func() error { return run("systemctl", "daemon-reload") })
+	case "darwin":
+		def, ok := bins["com.cronova.plist"]
+		if !ok {
+			return nil, nil
+		}
+		user, group, err := readPlistUserGroup(launchdPlist)
+		if err != nil {
+			return nil, err
+		}
+		rendered := []byte(strings.NewReplacer("__USER__", user, "__GROUP__", group).Replace(string(def)))
+		return swapFile(launchdPlist, rendered, 0o644, nil)
+	}
+	return nil, nil
+}
+
+// swapFile atomically replaces dst with data (backing dst up to dst.bak) and runs
+// after() on success. The returned restore puts the backup back and re-runs
+// after(). Mirrors swapBinary, for a config file.
+func swapFile(dst string, data []byte, mode os.FileMode, after func() error) (func() error, error) {
+	tmp := dst + ".new"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(tmp, mode)
+	bak := dst + ".bak"
+	hadOld := false
+	if _, err := os.Stat(dst); err == nil {
+		if err := os.Rename(dst, bak); err != nil {
+			os.Remove(tmp)
+			return nil, err
+		}
+		hadOld = true
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		if hadOld {
+			_ = os.Rename(bak, dst)
+		}
+		os.Remove(tmp)
+		return nil, err
+	}
+	// after() is the validation step (systemd daemon-reload). systemctl restart
+	// uses the IN-MEMORY unit, so a syntactically bad NEW unit would restart fine
+	// yet sit broken on disk until the next boot/reload — with the backup already
+	// committed away. So if after() fails, the new definition is bad: undo the
+	// swap, restore + reload the known-good one, and report, so the caller keeps it.
+	if after != nil {
+		if err := after(); err != nil {
+			if hadOld {
+				_ = os.Rename(bak, dst)
+			} else {
+				_ = os.Remove(dst)
+			}
+			_ = after() // reload the restored good definition
+			return nil, fmt.Errorf("service definition rejected on reload: %w", err)
+		}
+	}
+	return func() error {
+		var err error
+		if hadOld {
+			err = os.Rename(bak, dst)
+		} else {
+			err = os.Remove(dst)
+		}
+		if after != nil {
+			_ = after()
+		}
+		return err
+	}, nil
+}
+
+var (
+	plistUserRE  = regexp.MustCompile(`(?s)<key>UserName</key>\s*<string>([^<]*)</string>`)
+	plistGroupRE = regexp.MustCompile(`(?s)<key>GroupName</key>\s*<string>([^<]*)</string>`)
+)
+
+// readPlistUserGroup extracts UserName/GroupName from the installed plist so the
+// refreshed plist keeps the daemon running as the same (non-root) account.
+func readPlistUserGroup(path string) (user, group string, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	um := plistUserRE.FindSubmatch(b)
+	gm := plistGroupRE.FindSubmatch(b)
+	if um == nil || gm == nil {
+		return "", "", fmt.Errorf("could not read UserName/GroupName from %s", path)
+	}
+	return string(um[1]), string(gm[1]), nil
+}

@@ -227,6 +227,92 @@ func TestFetchRelease(t *testing.T) {
 	})
 }
 
+func TestExtractCapturesServiceDef(t *testing.T) {
+	tb := makeTarGz(t, map[string][]byte{
+		"cronova":                  []byte("BIN"),
+		"deploy/com.cronova.plist": []byte("<plist>__USER__</plist>"),
+		"deploy/cronova.service":   []byte("[Service]\nUser=cronova\n"),
+		"VERSION":                  []byte("v1"),
+	})
+	bins, _, err := extractReleaseBinaries(bytes.NewReader(tb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(bins["com.cronova.plist"]) != "<plist>__USER__</plist>" {
+		t.Errorf("plist not captured from the tarball: %q", bins["com.cronova.plist"])
+	}
+	if !bytes.Contains(bins["cronova.service"], []byte("User=cronova")) {
+		t.Errorf("unit not captured from the tarball: %q", bins["cronova.service"])
+	}
+}
+
+func TestSwapFileBackupRestoreAndAfter(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "svc.conf")
+	if err := os.WriteFile(dst, []byte("OLD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afters := 0
+	restore, err := swapFile(dst, []byte("NEW"), 0o644, func() error { afters++; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "NEW" {
+		t.Fatalf("after swap = %q, want NEW", b)
+	}
+	if b, _ := os.ReadFile(dst + ".bak"); string(b) != "OLD" {
+		t.Fatalf("backup = %q, want OLD", b)
+	}
+	if afters != 1 {
+		t.Errorf("after() should run once on swap, got %d", afters)
+	}
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "OLD" {
+		t.Fatalf("after restore = %q, want OLD", b)
+	}
+	if afters != 2 {
+		t.Errorf("after() should re-run on restore (daemon-reload), got %d", afters)
+	}
+}
+
+// TestSwapFileRejectsBadDefinition: if the validation step (daemon-reload) fails,
+// swapFile must undo the swap, restore the old file, and return an error — never
+// leave a rejected definition on disk with its backup gone.
+func TestSwapFileRejectsBadDefinition(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "unit.service")
+	if err := os.WriteFile(dst, []byte("GOOD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := swapFile(dst, []byte("BAD"), 0o644, func() error { return fmt.Errorf("daemon-reload: invalid unit") })
+	if err == nil {
+		t.Fatal("swapFile should return an error when validation fails")
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "GOOD" {
+		t.Fatalf("the good definition must be restored, got %q", b)
+	}
+	if _, statErr := os.Stat(dst + ".new"); !os.IsNotExist(statErr) {
+		t.Error("the .new temp file should be cleaned up")
+	}
+}
+
+func TestReadPlistUserGroup(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "com.cronova.plist")
+	os.WriteFile(p, []byte("<plist><dict>\n  <key>UserName</key>\n  <string>alice</string>\n  <key>GroupName</key>\n  <string>staff</string>\n</dict></plist>"), 0o644)
+	u, g, err := readPlistUserGroup(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != "alice" || g != "staff" {
+		t.Fatalf("user=%q group=%q, want alice/staff", u, g)
+	}
+	if _, _, err := readPlistUserGroup(filepath.Join(t.TempDir(), "missing.plist")); err == nil {
+		t.Error("reading a missing plist should error")
+	}
+}
+
 func TestSwapBinary(t *testing.T) {
 	t.Run("replace existing with backup + restore", func(t *testing.T) {
 		dir := t.TempDir()

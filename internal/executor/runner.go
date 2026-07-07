@@ -71,6 +71,21 @@ func (r *Runner) Launch(spec Spec) (string, error) {
 	cmd.Dir = spec.Dir // "" keeps the executor's cwd; else run in the staged project dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// A set working dir must exist ON THIS (the executor's) host. When it doesn't,
+	// the usual cause is a project-attached task dispatched to an executor that
+	// does NOT share the scheduler's filesystem (a remote gRPC executor) — the
+	// staged copy lives on the scheduler host only. Fail with that, not a cryptic
+	// "chdir: no such file or directory".
+	if spec.Dir != "" {
+		if fi, err := os.Stat(spec.Dir); err != nil || !fi.IsDir() {
+			msg := fmt.Sprintf("working directory %q not found on the executor host — project attach requires the executor to share the scheduler's filesystem (in-process, or a same-host/shared-mount executor)", spec.Dir)
+			fmt.Fprintf(logFile, "=== launch error: %s ===\n", msg)
+			_ = logFile.Close()
+			r.forget(ref)
+			return "", errors.New(msg)
+		}
+	}
+
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(logFile, "=== launch error: %v ===\n", err)
 		_ = logFile.Close()
