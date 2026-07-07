@@ -8,8 +8,11 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/zoyluoblue/cronova?logo=go)](go.mod)
 [![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20·%20amd64%20%7C%20arm64-informational)](docs/DEPLOY.md)
+[![GitHub stars](https://img.shields.io/github/stars/zoyluoblue/cronova?logo=github&color=1f6feb)](https://github.com/zoyluoblue/cronova/stargazers)
 
 **English** · [简体中文](README.zh-CN.md)
+
+<sub>⭐ <b><a href="https://github.com/zoyluoblue/cronova">Star cronova on GitHub</a></b> if it's useful — it helps other people find a lighter way to run their workflows.</sub>
 
 </div>
 
@@ -212,5 +215,11 @@ Contributions welcome — see the [docs/](docs/) for architecture and design not
 ---
 
 <div align="center">
+
+### ⭐ Found cronova useful?
+
+Give it a **[star on GitHub](https://github.com/zoyluoblue/cronova)** — it's the simplest way to support the project and helps others discover a lighter way to run workflows.
+
 <sub>cronova — self-hosted <b>workflow scheduler</b> · <b>Airflow alternative</b> · DAG orchestration · single Go binary · MCP-ready for AI agents.</sub>
+
 </div>

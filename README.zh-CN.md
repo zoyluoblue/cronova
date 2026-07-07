@@ -8,8 +8,11 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/zoyluoblue/cronova?logo=go)](go.mod)
 [![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20·%20amd64%20%7C%20arm64-informational)](docs/DEPLOY.md)
+[![GitHub stars](https://img.shields.io/github/stars/zoyluoblue/cronova?logo=github&color=1f6feb)](https://github.com/zoyluoblue/cronova/stargazers)
 
 [English](README.md) · **简体中文**
+
+<sub>⭐ 觉得有用?<b><a href="https://github.com/zoyluoblue/cronova">在 GitHub 上给 cronova 点个 Star</a></b> —— 帮更多人发现一种更轻的工作流运行方式。</sub>
 
 </div>
 
@@ -212,5 +215,11 @@ CRONOVA_WEB_DIR=internal/web/static go run ./cmd/cronova serve
 ---
 
 <div align="center">
+
+### ⭐ 觉得 cronova 有用?
+
+在 **[GitHub 上点个 Star](https://github.com/zoyluoblue/cronova)** —— 这是支持项目最简单的方式,也能帮更多人发现一种更轻的工作流运行方式。
+
 <sub>cronova —— 自托管<b>工作流调度器</b> · <b>Airflow 替代</b> · DAG 编排 · 单 Go 二进制 · 面向 AI 智能体的 MCP。</sub>
+
 </div>
