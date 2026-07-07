@@ -81,6 +81,7 @@ go build -o cronova ./cmd/cronova   # or grab a prebuilt release
 ## Learn more
 
 - **[Tutorial](tutorial/index.md)** — the step-by-step path: install → first DAG → scheduling → variables → projects → cross-DAG.
+- **[Console guide](console/index.md)** — every page of the web UI: dashboard, DAG editor, visual task editor, runs & live logs, pools, variables, audit, API tokens.
 - **[Quick start](GETTING_STARTED.md)** — the single-page fast path.
 - **[Deployment](DEPLOY.md)** — systemd / launchd services, updates, the crash-recoverable executor.
 - **[Comparison](COMPARISON.md)** — cronova vs. Airflow, Azkaban, Dagster, Prefect & cron.

@@ -116,6 +116,12 @@ plugins:
             Task types: 任务类型
             Retries, timeouts & pools: 重试、超时与资源池
             Cross-DAG triggers & notifications: 跨 DAG 触发与通知
+            Console: 控制台
+            Dashboard & creating DAGs: 仪表盘与新建 DAG
+            Working with a DAG: DAG 页面
+            The task editor: 任务编辑器
+            Runs, logs & recovery: 运行、日志与恢复
+            Graph, pools, variables, audit & API: 图、资源池、变量、审计与 API
             Advanced: 进阶
             Reference: 参考
             About: 关于
@@ -148,6 +154,13 @@ nav:
       - Task types: tutorial/task-types.md
       - Retries, timeouts & pools: tutorial/retries-timeouts-pools.md
       - Cross-DAG triggers & notifications: tutorial/cross-dag.md
+  - Console:
+      - console/index.md
+      - Dashboard & creating DAGs: console/dashboard.md
+      - Working with a DAG: console/dag.md
+      - The task editor: console/task-editor.md
+      - Runs, logs & recovery: console/runs-logs.md
+      - Graph, pools, variables, audit & API: console/admin.md
   - Advanced:
       - Deployment: DEPLOY.md
       - AI Agents (MCP): AGENTS.md

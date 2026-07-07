@@ -7,6 +7,7 @@ New to cronova? Read the [project overview](../README.md) first, then [Getting S
 ## Get started
 
 - **[Getting Started](GETTING_STARTED.md)** — install, run `cronova serve`, write your first DAG, template variables, and uploading your own scripts/projects.
+- **[Console Guide](console/index.md)** — every page of the web UI: dashboard, DAG editor, visual task editor, runs & live logs, pools, variables, audit, API tokens.
 - **[Deployment](DEPLOY.md)** — one-command install, systemd/launchd services, `cronova update`, and the crash-recoverable gRPC executor.
 
 ## Reference

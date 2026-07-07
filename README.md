@@ -163,6 +163,7 @@ The one-line installer runs an interactive setup wizard (port, bind scope, admin
 | Guide | What's inside |
 |---|---|
 | [Getting Started](docs/GETTING_STARTED.md) | Install, first DAG, projects, template variables |
+| [Console Guide](docs/console/index.md) | Every page of the web UI — dashboard, task editor, runs & live logs, pools, tokens |
 | [DAG Reference](docs/DAG_REFERENCE.md) | Every DAG/task field, task types, triggers, pools |
 | [CLI Reference](docs/CLI.md) | Every `cronova` command and flag |
 | [AI Agents (MCP)](docs/AGENTS.md) | MCP server, remote CLI, tokens, security |

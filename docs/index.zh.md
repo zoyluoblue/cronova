@@ -81,6 +81,7 @@ go build -o cronova ./cmd/cronova   # or grab a prebuilt release
 ## 进一步了解
 
 - **[教程](tutorial/index.md)** —— 循序渐进的路线：安装 → 第一个 DAG → 调度 → 变量 → 工程 → 跨 DAG。
+- **[控制台指南](console/index.md)** —— Web 控制台每个页面：仪表盘、DAG 编辑、可视化任务编辑器、运行与实时日志、资源池、变量、审计、API 令牌。
 - **[快速上手](GETTING_STARTED.md)** —— 单页速通路径。
 - **[部署](DEPLOY.md)** —— systemd / launchd 服务、更新、可从崩溃中恢复的执行器。
 - **[对比](COMPARISON.md)** —— cronova vs. Airflow、Azkaban、Dagster、Prefect 与 cron。
