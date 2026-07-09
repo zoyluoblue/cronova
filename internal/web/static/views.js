@@ -123,10 +123,10 @@ async function showDag(id, tab) {
       catchup: !!dag.catchup, paused: !!dag.paused,
       max_active_runs: dag.max_active_runs || 1, default_retries: dag.default_retries || 0,
       trigger_after: (dag.trigger_after || []).slice(),
-      notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(),
+      notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(), notify_format: dag.notify_format || "",
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", retry_backoff: tk.retry_backoff || "", retry_delay_max: tk.retry_delay_max || "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
       httpMethod: h.method || "GET", httpUrl: h.url || "", httpHeaders: h.headers ? Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "", httpBody: h.body || "", httpStatus: (h.expected_status || []).join(", ") }; }),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
@@ -192,6 +192,7 @@ function renderDagPage() {
         <div class="dh-actions">
           <button class="primary" id="trig" ${noTasks ? "disabled" : ""}>${t("btn_trigger")}</button>
           <button class="icon" id="trig-params" title="${t("trig_params")}" ${noTasks ? "disabled" : ""} aria-label="${t("trig_params")}">⋯</button>
+          ${d.schedule ? `<button id="backfill-btn" ${noTasks ? "disabled" : ""}>${t("btn_backfill")}</button>` : ""}
           <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
           <button class="icon" id="dup" title="${t("btn_duplicate")}">⧉ ${t("btn_duplicate")}</button>
           <button class="icon" id="yaml-btn">YAML</button>
@@ -211,6 +212,7 @@ function renderDagPage() {
   $("back").onclick = loadDags;
   $("trig").onclick = () => triggerActiveDag();
   const tp = $("trig-params"); if (tp) tp.onclick = () => triggerParamsDialog();
+  const bf = $("backfill-btn"); if (bf) bf.onclick = () => backfillDialog();
   $("pause").onclick = async () => { await api(`/api/dags/${d.dag_id}/pause?paused=${!d.paused}`, { method: "POST" }); d.paused = !d.paused; renderDagPage(); };
   $("dup").onclick = duplicateActiveDag;
   $("yaml-btn").onclick = openYamlDrawer;
@@ -243,7 +245,9 @@ function maybePollDagRuns() {
   const dagID = D.dag.dag_id;
   dagRunsPoll = setInterval(async () => {
     if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs" || D.editKey) { stopDagRunsPoll(); return; }
-    let runs; try { runs = await api(`/api/dags/${encodeURIComponent(dagID)}/runs?limit=25`); } catch (_) { return; }
+    // carry the user's state filter, or the poll would silently reset it 3s in
+    const fq = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
+    let runs; try { runs = await api(`/api/dags/${encodeURIComponent(dagID)}/runs?limit=25${fq}`); } catch (_) { return; }
     if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs") return;
     if (JSON.stringify(runs) === JSON.stringify(D.runs)) {
       if (!(runs || []).some((r) => runLive(r.state))) stopDagRunsPoll(); // settled
@@ -252,7 +256,8 @@ function maybePollDagRuns() {
     D.runs = runs || [];
     // patch in place (never main.innerHTML): keep the hero/tabs and — crucially —
     // don't tear down a run-row action button the user is focused on / pressing.
-    patchDagHero();
+    // Hero stats stay unfiltered: only refresh them when no filter is active.
+    if (!D.runFilter) patchDagHero();
     const runsBox = $("d-runs");
     // skip the table rebuild while the user is focused inside it (don't yank a
     // focused/pressed action button); the interval keeps ticking and catches up.
@@ -296,8 +301,10 @@ function settingsTabHtml() {
   const hasUrl = !!(d.notify_url || "").trim();
   // events require a URL; without one the chips are disabled (and never selectable),
   // so the editor, the collapsed summary, and the persisted state can't diverge.
+  const nFormats = [["", "raw"], ["slack", "Slack"], ["feishu", t("nf_feishu")], ["dingtalk", t("nf_dingtalk")]];
   const notifEditor = `<input id="d-nurl" type="url" placeholder="https://hooks.slack.com/services/…" value="${esc(d.notify_url)}" style="width:100%;margin-bottom:8px" aria-label="${esc(t("set_notify"))} URL">
     <div class="b-deps">${nEvents.map((e) => `<span class="chip non ${hasUrl && nOn.includes(e) ? "on" : ""} ${hasUrl ? "" : "dis"}" role="checkbox" tabindex="${hasUrl ? "0" : "-1"}" aria-checked="${hasUrl && nOn.includes(e)}" aria-disabled="${!hasUrl}" data-non="${e}">${t("notify_" + e)}</span>`).join("")}</div>
+    <div class="b-field" style="margin-top:8px"><label>${t("nf_label")}</label><select id="d-nfmt" style="width:220px">${nFormats.map(([v, l]) => `<option value="${v}" ${(d.notify_format || "") === v ? "selected" : ""}>${l}</option>`).join("")}</select><div class="field-hint">${t("nf_hint")}</div></div>
     <div class="field-hint" id="d-nhint" style="margin-top:6px"${hasUrl ? " hidden" : ""}>${esc(t("notify_need_url"))}</div>`;
   return `<div class="set-list">
     ${row("sched", t("set_sched"), esc(schedSummary(d)), schedSummary(d), `<div id="d-sched"></div>`)}
@@ -357,6 +364,7 @@ function wireSettingsTab() {
     i < 0 ? d.notify_on.push(x) : d.notify_on.splice(i, 1);
     c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag();
   });
+  const nfmt = $("d-nfmt"); if (nfmt) nfmt.onchange = () => { d.notify_format = nfmt.value; saveDag(); };
   const del = $("del"); if (del) del.onclick = deleteActiveDag;
 }
 
@@ -468,17 +476,72 @@ function triggerParamsDialog() {
   };
   render();
 }
+// backfillDialog asks for an inclusive date window and enqueues runs for every
+// schedule period in it (POST /api/dags/{id}/backfill). Existing periods are
+// skipped server-side; execution is throttled by max_active_runs.
+function backfillDialog() {
+  const root = $("modal-root");
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  const today = new Date().toISOString().slice(0, 10);
+  root.innerHTML = `<div class="overlay" id="bfovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${t("btn_backfill")}">
+    <h2>${t("btn_backfill")}</h2>
+    <div class="body">
+      <div class="field-hint" style="margin-bottom:12px">${esc(t("bf_hint"))}</div>
+      <div class="tc-grid">
+        <div class="b-field"><label>${t("bf_from")}</label><input id="bf-from" type="date" max="${today}"></div>
+        <div class="b-field"><label>${t("bf_to")}</label><input id="bf-to" type="date" max="${today}" value="${today}"></div>
+      </div>
+    </div>
+    <div class="foot"><button id="bf-cancel">${t("nd_cancel")}</button><button class="primary" id="bf-go">${t("bf_go")}</button></div>
+  </div></div>`;
+  $("bf-cancel").onclick = close;
+  $("bfovl").onclick = (e) => { if (e.target.id === "bfovl") close(); };
+  $("bf-go").onclick = async () => {
+    const from = $("bf-from").value, to = $("bf-to").value;
+    if (!from || !to) { toast(t("bf_need_dates"), "warn"); return; }
+    try {
+      const r = await api(`/api/dags/${D.dag.dag_id}/backfill`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from, to }),
+      });
+      close();
+      toast(t("bf_done", r.created, r.skipped), "ok");
+      setTimeout(refreshDagRuns, 500);
+    } catch (e) { toast(e.message, "fail"); }
+  };
+  $("bf-from").focus();
+}
 async function refreshDagRuns() {
   if (view !== "dag" || !D) return;
   // re-render the whole page so the hero facts (last run, success rate) refresh
   // alongside the runs table — unless a settings row is open (don't clobber the edit).
-  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25`)) || []; if (D.editKey) renderDagRuns(); else renderDagPage(); } catch (_) {}
+  const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
+  // With a filter active, D.runs is a filtered subset — rebuilding the whole
+  // page would compute hero stats from it; re-render only the runs table.
+  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25${q}`)) || []; if (D.editKey || D.runFilter) renderDagRuns(); else renderDagPage(); } catch (_) {}
 }
+// Runs-tab state filter chips: label key -> API state list ("" = no filter).
+const RUN_FILTERS = [["rf_all", ""], ["rf_running", "queued,running"], ["rf_failed", "failed,cancelled,timed_out"], ["rf_success", "success"]];
 function renderDagRuns() {
   const el = $("d-runs"); if (!el) return;
-  if (!D.runs.length) { el.innerHTML = `<div class="empty">${t("no_runs")}</div>`; return; }
+  const chips = `<div class="varchips" style="margin-bottom:8px">${RUN_FILTERS.map(([k, v]) =>
+    `<span class="chip varchip ${(D.runFilter || "") === v ? "on" : ""}" role="button" tabindex="0" data-rf="${v}">${t(k)}</span>`).join("")}</div>`;
   const canAct = document.body.dataset.role !== "viewer";
-  el.innerHTML = `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th><th style="width:56px"></th></tr></thead>
+  const wire = () => {
+    el.querySelectorAll("[data-rf]").forEach((c) => {
+      const go = async () => {
+        D.runFilter = c.dataset.rf;
+        const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
+        try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25${q}`)) || []; } catch (_) {}
+        renderDagRuns();
+      };
+      c.onclick = go; chipKeyActivate(c, go);
+    });
+  };
+  if (!D.runs.length) { el.innerHTML = chips + `<div class="empty">${t("no_runs")}</div>`; wire(); return; }
+  el.innerHTML = chips + `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th><th style="width:56px"></th></tr></thead>
     <tbody>${D.runs.map((r) => {
     const act = !canAct ? "" : runLive(r.state)
       ? `<button class="icon rr-act no-nav" data-rr-cancel="${esc(r.run_id)}" title="${t("run_cancel")}" aria-label="${t("run_cancel")}">✕</button>`
@@ -489,6 +552,7 @@ function renderDagRuns() {
   el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showRun(tr.dataset.run); });
   el.querySelectorAll("[data-rr-cancel]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineCancelRun(b.dataset.rrCancel); });
   el.querySelectorAll("[data-rr-retry]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); b.disabled = true; inlineRetryRun(b.dataset.rrRetry); }); // disable to swallow a double-click (2nd → 409)
+  wire();
 }
 // inline run ops from the history list — refresh the list in place (stay on the DAG page)
 async function inlineCancelRun(runID) {
@@ -1063,6 +1127,11 @@ function renderTaskPage() {
           <div class="b-field"><label>${t("t_priority")}</label><input class="tf" data-k="priority" type="number" value="${esc(tk.priority)}"></div>
           <div class="b-field"><label>${t("t_retries")}</label><input class="tf" data-k="retries" type="number" min="0" value="${esc(tk.retries)}"></div>
           <div class="b-field"><label>${t("t_retrydelay")}</label><input class="tf" data-k="retry_delay" type="number" min="0" value="${esc(tk.retry_delay)}"></div>
+          <div class="b-field"><label>${t("t_backoff")}</label><select class="tf" data-k="retry_backoff">
+            <option value="" ${!tk.retry_backoff ? "selected" : ""}>${t("bo_fixed")}</option>
+            <option value="exponential" ${tk.retry_backoff === "exponential" ? "selected" : ""}>${t("bo_exponential")}</option>
+          </select><div class="field-hint">${t("t_backoff_hint")}</div></div>
+          <div class="b-field"><label>${t("t_backoffmax")}</label><input class="tf" data-k="retry_delay_max" type="number" min="0" value="${esc(tk.retry_delay_max)}"><div class="field-hint">${t("t_backoffmax_hint")}</div></div>
           <div class="b-field"><label>${t("t_timeout")}</label><input class="tf" data-k="timeout" type="number" min="0" value="${esc(tk.timeout)}"><div class="field-hint">${t("t_timeout_hint")}</div></div>
           <div class="b-field"><label>${t("t_sla")}</label><input class="tf" data-k="sla" type="number" min="0" value="${esc(tk.sla)}"><div class="field-hint">${t("t_sla_hint")}</div></div>
         </div>
@@ -1298,6 +1367,7 @@ function dagSpecFrom(st) {
     trigger_after: (d.trigger_after || []).slice(),
     // events are meaningless without a URL — keep the persisted state consistent
     notify_url: (d.notify_url || "").trim(), notify_on: (d.notify_url || "").trim() ? (d.notify_on || []).slice() : [],
+    notify_format: d.notify_format || "",
     sla: Math.max(0, +d.sla || 0), dagrun_timeout: Math.max(0, +d.dagrun_timeout || 0),
     tasks: st.tasks.filter((tk) => tk.id).map((tk) => {
       const o = {
@@ -1306,6 +1376,8 @@ function dagSpecFrom(st) {
         timeout: Math.max(0, +tk.timeout || 0), sla: Math.max(0, +tk.sla || 0), trigger_rule: tk.trigger_rule || "all_success",
         retries: tk.retries === "" || tk.retries == null ? null : +tk.retries,
         retry_delay: tk.retry_delay === "" || tk.retry_delay == null ? null : +tk.retry_delay,
+        retry_backoff: tk.retry_backoff || "",
+        retry_delay_max: Math.max(0, +tk.retry_delay_max || 0),
       };
       if (tk.type === "http") {
         o.http = { method: tk.httpMethod || "GET", url: (tk.httpUrl || "").trim(), headers: parseHeaderLines(tk.httpHeaders), body: tk.httpBody || "", expected_status: parseStatusList(tk.httpStatus) };

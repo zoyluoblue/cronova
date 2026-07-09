@@ -41,7 +41,10 @@ type Options struct {
 	WorkspaceDir string        // per-attempt project workspaces ("" = <tmp>/cronova-workspaces)
 	Tick         time.Duration // scheduling loop interval
 	PollInterval time.Duration // how often a running task is Probed for completion
-	Logger       *slog.Logger
+	// Retention prunes finished runs (DB rows + their log directories) older
+	// than this age. 0 disables pruning entirely — nothing is ever deleted.
+	Retention time.Duration
+	Logger    *slog.Logger
 	// AllowPrivateNotifyTargets disables the SSRF guard on outbound notify
 	// webhooks (loopback/private/link-local IPs). Off in production; tests set it
 	// so an httptest server on 127.0.0.1 can receive deliveries.
@@ -336,6 +339,69 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 	}
 	s.log.Info("manual run created", "dag", dagID, "run", run.RunID)
 	return run.RunID, nil
+}
+
+// maxBackfillRuns bounds one backfill request; a wider window than this is
+// rejected so a typo'd date range cannot enqueue years of runs.
+const maxBackfillRuns = 500
+
+// Backfill creates one queued run per schedule point in [from, to], skipping
+// periods that already have a run (any state). `to` is clamped to now — a
+// backfill re-runs history; future periods belong to the scheduler. Execution
+// is throttled by the DAG's max_active_runs exactly like catchup, so enqueuing
+// hundreds of periods will not stampede.
+func (s *Scheduler) Backfill(ctx context.Context, dagID string, from, to time.Time) (created, skipped int, err error) {
+	d, _, ok := s.cachedDAG(dagID)
+	if !ok {
+		return 0, 0, fmt.Errorf("dag %q not found or not active: %w", dagID, store.ErrNotFound)
+	}
+	if len(d.Tasks) == 0 {
+		return 0, 0, fmt.Errorf("dag %q: %w; add a task before backfilling", dagID, model.ErrNoTasks)
+	}
+	if d.Schedule == "" {
+		return 0, 0, fmt.Errorf("dag %q has no schedule — backfill enumerates schedule periods", dagID)
+	}
+	sched, err := parser.ParseSchedule(d.Schedule)
+	if err != nil {
+		return 0, 0, fmt.Errorf("dag %q: bad schedule: %w", dagID, err)
+	}
+	now := time.Now().UTC()
+	if to.After(now) {
+		to = now
+	}
+	if !from.Before(to) {
+		return 0, 0, fmt.Errorf("backfill window is empty: from %s is not before to %s", from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	// Enumerate the whole window FIRST, before touching the store: an over-limit
+	// window is rejected with zero side effects (previously the cap fired after
+	// 500 runs were already committed, which the error then denied).
+	var periods []time.Time
+	for t := sched.Next(from.Add(-time.Second)); !t.IsZero() && !t.After(to); t = sched.Next(t) {
+		if len(periods) >= maxBackfillRuns {
+			return 0, 0, fmt.Errorf("window contains more than %d periods — narrow the range", maxBackfillRuns)
+		}
+		periods = append(periods, t)
+	}
+	for _, t := range periods {
+		run := &model.DagRun{
+			RunID:       fmt.Sprintf("%s__backfill_%d", dagID, t.Unix()),
+			DagID:       dagID,
+			LogicalDate: t,
+			State:       model.RunQueued,
+			TriggerType: model.TriggerBackfill,
+		}
+		switch err := s.store.CreateDagRun(ctx, run); {
+		case errors.Is(err, store.ErrAlreadyExists):
+			skipped++ // that period already ran (or is queued) — never double-run
+		case err != nil:
+			return created, skipped, err
+		default:
+			created++
+		}
+	}
+	s.log.Info("backfill enqueued", "dag", dagID, "created", created, "skipped", skipped,
+		"from", from.Format(time.RFC3339), "to", to.Format(time.RFC3339))
+	return created, skipped, nil
 }
 
 // CancelRun stops an active run: mark it cancelled first (so in-flight polling
@@ -646,6 +712,39 @@ func (s *Scheduler) clearAndReactivate(ctx context.Context, run *model.DagRun, t
 	return s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, &now, nil)
 }
 
+// retryDelay computes the wait before a task's next attempt. tries is the
+// number of attempts already made (TryNumber after a failure), so the first
+// retry of an exponential task waits the base delay, the second 2×, then 4×…
+// capped by retry_delay_max when set. Fixed (the default) always waits the base.
+func retryDelay(t model.Task, tries int) time.Duration {
+	base := time.Duration(t.RetryDelay) * time.Second
+	if t.RetryBackoff != model.BackoffExponential || base <= 0 {
+		return base
+	}
+	shift := tries - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 20 { // 2^20 × base: far past any real cap
+		shift = 20
+	}
+	d := base << shift
+	if d < base { // shift overflowed int64 (a huge retry_delay): saturate, don't go negative
+		d = time.Duration(1<<62 - 1)
+	}
+	if t.RetryDelayMax > 0 {
+		if max := time.Duration(t.RetryDelayMax) * time.Second; d > max {
+			return max
+		}
+	}
+	// No cap configured and the growth exceeded any sane wait: clamp to 24h so
+	// an overflow/extreme config can never turn into a negative (=hot) retry loop.
+	if const24h := 24 * time.Hour; d > const24h && t.RetryDelayMax <= 0 {
+		return const24h
+	}
+	return d
+}
+
 // downstreamClosure returns taskID plus every task transitively downstream of it.
 func downstreamClosure(tasks []model.Task, taskID string) map[string]bool {
 	dependents := map[string][]string{}
@@ -681,6 +780,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// Sweep orphaned project workspaces now (recovery has claimed the live ones,
 	// and dispatch hasn't started, so no age guard is needed)…
 	s.gcWorkspaces(ctx, 0)
+	s.pruneOldRuns(ctx)
 	s.log.Info("scheduler started", "tick", s.opts.Tick.String(), "dags", len(s.allDAGs()))
 	t := time.NewTicker(s.opts.Tick)
 	defer t.Stop()
@@ -697,6 +797,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-gc.C:
 			s.gcWorkspaces(ctx, time.Hour) // age guard: skip anything mid-launch
+			s.pruneOldRuns(ctx)
 		case <-t.C:
 		}
 	}
@@ -705,6 +806,33 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // WaitInflight blocks until all dispatched tasks have finished. Used by tests
 // to drive the loop deterministically.
 func (s *Scheduler) WaitInflight() { s.inflight.Wait() }
+
+// pruneOldRuns deletes finished runs older than the retention window — DB rows
+// first (transactional), then each run's log directory. A missing log dir is
+// fine; a failed dir removal is only logged, and the next sweep retries it.
+// No-op when Retention is 0 (disabled).
+func (s *Scheduler) pruneOldRuns(ctx context.Context) {
+	if s.opts.Retention <= 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-s.opts.Retention)
+	pruned, err := s.store.PruneRuns(ctx, cutoff)
+	if err != nil {
+		s.log.Error("retention prune failed", "err", err)
+		return
+	}
+	if len(pruned) == 0 {
+		return
+	}
+	var logErrs int
+	for _, r := range pruned {
+		if err := os.RemoveAll(RunLogDir(s.opts.LogDir, r.DagID, r.RunID)); err != nil {
+			logErrs++
+		}
+	}
+	s.log.Info("retention pruned finished runs",
+		"runs", len(pruned), "older_than", s.opts.Retention.String(), "log_dir_errors", logErrs)
+}
 
 func (s *Scheduler) tickOnce(ctx context.Context) {
 	now := time.Now().UTC()
@@ -764,13 +892,11 @@ func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
 // at boot time (so only future periods run — no backfill). max_active_runs +
 // one-run-per-tick throttle catchup so it never floods (see §20 catchup storm).
 func (s *Scheduler) scheduleAnchor(ctx context.Context, d *model.DAG) time.Time {
-	runs, err := s.store.ListDagRuns(ctx, d.DagID, 100) // ordered logical_date DESC
-	if err == nil {
-		for _, r := range runs {
-			if r.TriggerType == model.TriggerSchedule {
-				return r.LogicalDate
-			}
-		}
+	// A dedicated latest-scheduled-run lookup, NOT a windowed listing: a burst
+	// of manual/backfill runs must never crowd the anchor out of view, or a
+	// catchup DAG would fall back to start_date and replay history for real.
+	if r, err := s.store.LatestScheduledRun(ctx, d.DagID); err == nil {
+		return r.LogicalDate
 	}
 	if d.Catchup {
 		// Anchor just before start_date so Next() yields the first period at/after it.
@@ -780,16 +906,37 @@ func (s *Scheduler) scheduleAnchor(ctx context.Context, d *model.DAG) time.Time 
 }
 
 func (s *Scheduler) processActiveRuns(ctx context.Context) {
-	var active []*model.DagRun
-	for _, st := range []model.RunState{model.RunQueued, model.RunRunning} {
-		rs, err := s.store.ListDagRunsByState(ctx, st)
-		if err != nil {
-			s.log.Error("list runs by state", "state", st, "err", err)
-			continue
-		}
-		active = append(active, rs...)
+	queued, err := s.store.ListDagRunsByState(ctx, model.RunQueued)
+	if err != nil {
+		s.log.Error("list runs by state", "state", model.RunQueued, "err", err)
 	}
-	for _, run := range active {
+	running, err := s.store.ListDagRunsByState(ctx, model.RunRunning)
+	if err != nil {
+		s.log.Error("list runs by state", "state", model.RunRunning, "err", err)
+	}
+	for _, run := range running {
+		if err := s.processRun(ctx, run); err != nil {
+			s.log.Error("process run", "run", run.RunID, "err", err)
+		}
+	}
+	// Gate queued→running on max_active_runs. This is what makes a 500-period
+	// backfill (or a burst of manual triggers) execute max_active_runs at a
+	// time instead of stampeding — the run-level mutual exclusion the docs
+	// promise. Runs are listed logical_date ASC, so older periods start first;
+	// a run past its dagrun_timeout is still processed so it can time out.
+	runningBy := map[string]int{}
+	for _, r := range running {
+		runningBy[r.DagID]++
+	}
+	for _, run := range queued {
+		maxActive := 1
+		if d, _, ok := s.cachedDAG(run.DagID); ok && d.MaxActiveRuns > 0 {
+			maxActive = d.MaxActiveRuns
+		}
+		if runningBy[run.DagID] >= maxActive {
+			continue // stays queued; picked up on a later tick as slots free
+		}
+		runningBy[run.DagID]++
 		if err := s.processRun(ctx, run); err != nil {
 			s.log.Error("process run", "run", run.RunID, "err", err)
 		}
@@ -888,7 +1035,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		}
 		readyAt := now
 		if ti.FinishedAt != nil {
-			readyAt = ti.FinishedAt.Add(time.Duration(t.RetryDelay) * time.Second)
+			readyAt = ti.FinishedAt.Add(retryDelay(t, ti.TryNumber))
 		}
 		if now.Before(readyAt) {
 			continue
@@ -1631,7 +1778,7 @@ func connField(c *model.Connection, field string) (string, bool) {
 }
 
 func (s *Scheduler) logPath(dagID, runID, taskID string) string {
-	return filepath.Join(s.opts.LogDir, dagID, sanitize(runID), taskID+".log")
+	return filepath.Join(RunLogDir(s.opts.LogDir, dagID, runID), taskID+".log")
 }
 
 // --- pure helpers ---
@@ -1658,3 +1805,10 @@ func runID(dagID string, logical time.Time) string {
 }
 
 func sanitize(s string) string { return strings.ReplaceAll(s, ":", "_") }
+
+// RunLogDir returns the directory holding a run's per-task log files — the
+// same layout logPath writes to. Exported so operational tooling (`cronova
+// prune`) deletes exactly what the scheduler wrote.
+func RunLogDir(logDir, dagID, runID string) string {
+	return filepath.Join(logDir, dagID, sanitize(runID))
+}

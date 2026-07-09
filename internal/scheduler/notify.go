@@ -164,7 +164,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(d.NotifyURL, p)
+	s.postNotify(d.NotifyURL, d.NotifyFormat, p)
 }
 
 // notifyDeadline fires a soft SLA-miss alert mid-run (the run keeps going). kind
@@ -187,18 +187,38 @@ func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(d.NotifyURL, p)
+	s.postNotify(d.NotifyURL, d.NotifyFormat, p)
+}
+
+// notifyBody renders the webhook body for the DAG's notify.format. "raw" (or
+// empty) sends the full structured payload; the chat formats wrap the summary
+// text in each platform's incoming-webhook envelope so the message renders
+// without a relay service.
+func notifyBody(format string, p notifyPayload) []byte {
+	var v any
+	switch format {
+	case "slack":
+		v = map[string]string{"text": p.Text}
+	case "feishu":
+		v = map[string]any{"msg_type": "text", "content": map[string]string{"text": p.Text}}
+	case "dingtalk":
+		v = map[string]any{"msgtype": "text", "text": map[string]string{"content": p.Text}}
+	default: // "", "raw"
+		v = p
+	}
+	body, _ := json.Marshal(v)
+	return body
 }
 
 // postNotify delivers a payload to the webhook asynchronously (best-effort,
 // tracked by s.inflight for graceful shutdown). It snapshots everything the
 // goroutine needs and logs only the host — never the secret-bearing URL.
-func (s *Scheduler) postNotify(rawURL string, p notifyPayload) {
+func (s *Scheduler) postNotify(rawURL, format string, p notifyPayload) {
 	url, runID, host, state := rawURL, p.RunID, notifyHost(rawURL), p.State
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
-		body, _ := json.Marshal(p)
+		body := notifyBody(format, p)
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

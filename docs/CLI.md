@@ -12,7 +12,7 @@ Commands fall into four groups:
 |---|---|---|
 | [Scheduler](#scheduler) | `serve`, `cronova-executor` | This machine (long-running processes) |
 | [Service lifecycle](#service-lifecycle) | `start`/`stop`/`restart`/`status`, `init`, `update`, `uninstall`, `version`, `healthcheck` | The host service manager (systemd / launchd) |
-| [Local operations](#local-operations) | `trigger`, `dags`, `runs`, `pools`, `users` | The SQLite DB directly (`-db`) — or remote with `-server` |
+| [Local operations](#local-operations) | `trigger`, `dags`, `runs`, `backfill`, `prune`, `pools`, `users` | The SQLite DB directly (`-db`) — or remote with `-server` |
 | [Remote / agent mode](#remote--agent-mode) | `api`, `get`, `run`, `logs`, `cancel`, `retry`, `mark`, `pause`, `overview`, `tokens`, `mcp` | A running server's authenticated REST API |
 
 ## Scheduler
@@ -34,8 +34,10 @@ cronova serve -db data/cronova.db -dags dags -http :8090
 | `-projects` | `~/.cronova/projects` | Directory for uploaded [project files](tutorial/projects.md). |
 | `-executor` | *(in-process)* | gRPC executor target, e.g. `unix:///tmp/cronova-executor.sock`. Empty = in-process executor. |
 | `-tick` | `2s` | Scheduling-loop interval. |
+| `-retention` | `2160h` (90 days) | Delete finished runs **and their logs** older than this; `0` = keep forever. See [`cronova prune`](#cronova-prune) for one-off cleanups. |
 | `-auth` | off | Require login for the console/API (overrides config). |
 | `-config` | `cronova.yaml` | Path to a YAML config file (optional). |
+| `key_file` / `CRONOVA_KEY_FILE` | `cronova.key` | Config/env only (no flag): key file that encrypts connection passwords at rest. Auto-generated (`0600`) on first `serve` — back it up; losing it makes stored passwords unreadable. `none` disables encryption (plaintext, with a startup warning). |
 
 Settings resolve in order: built-in defaults ← config file ← `CRONOVA_*` environment ← explicit flags. `CRONOVA_WEB_DIR` (dev only) serves the console assets from disk instead of the embedded copies.
 
@@ -151,7 +153,7 @@ cronova healthcheck -http :8090 && echo healthy
 
 ## Local operations
 
-Run on the machine that holds the database; they act directly on the SQLite DB. All accept `-db` (default `data/cronova.db`) plus the [global `-server`/`-token`/`-o` flags](#global-flags-and-environment) — give `-server` and the same command goes over the REST API instead.
+Run on the machine that holds the database; they act directly on the SQLite DB. All accept `-db` (default `data/cronova.db`), and most also take the [global `-server`/`-token`/`-o` flags](#global-flags-and-environment) — give `-server` and the same command goes over the REST API instead (`backfill` and `prune` are local-only).
 
 ### `cronova trigger`
 
@@ -203,7 +205,39 @@ example_etl__manual_1783442199726456000  2026-07-07T16:36:39Z  success  manual  
 | `-n` | `10` | Number of recent runs to show. |
 | `-db` | `data/cronova.db` | SQLite database path. |
 
-In remote mode the table omits the `TASKS` column (the runs endpoint returns runs only); use `cronova run <run_id>` for one run's task states.
+In remote mode the table omits the `TASKS` column (the runs endpoint returns runs only); use `cronova run <run_id>` for one run's task states. The underlying `GET /api/dags/{id}/runs` endpoint also accepts `state=` (comma-separated, e.g. `state=failed,cancelled` — unknown names are rejected) and `offset=` for filtering and paging; reach them with [`cronova api`](#cronova-api).
+
+### `cronova backfill`
+
+Enqueue one queued run per schedule period in a date window — re-run history after a bug fix, or load past periods for a newly added DAG. Periods that already have a run (in **any** state) are skipped, so re-running a backfill never double-runs anything; `to` is clamped to now (future periods belong to the scheduler); a window covering more than 500 periods is rejected outright. Execution is throttled by the DAG's `max_active_runs`, exactly like catchup.
+
+```console
+$ cronova backfill daily_etl -from 2026-07-01 -to 2026-07-05
+backfill daily_etl: created 5 run(s), skipped 0 existing (a running `cronova serve` executes them)
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-from` / `-to` | *(required)* | Window start / end, `YYYY-MM-DD`, both inclusive. |
+| `-db` / `-dags` | `data/cronova.db` / `dags` | Local DB and DAG directory. |
+
+The DAG must have a `schedule` — backfill enumerates schedule periods. Local-only; against a remote server call the API, which also accepts RFC3339 timestamps: `cronova api POST /api/dags/daily_etl/backfill '{"from":"2026-07-01","to":"2026-07-05"}'`.
+
+### `cronova prune`
+
+Delete finished runs — DB rows plus their log directories — older than a retention window. The manual counterpart of [`serve -retention`](#cronova-serve), for one-off cleanups or deployments that run with retention disabled. Local-only; asks for confirmation unless `-yes`.
+
+```bash
+cronova prune                    # finished runs older than 90 days (asks first)
+cronova prune -older-than 720h   # custom window (30 days)
+cronova prune -yes               # no confirmation (scripts / cron)
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-older-than` | `2160h` (90 days) | Delete finished runs older than this (must be positive). |
+| `-yes` | | Skip the confirmation prompt. |
+| `-db` / `-logs` | `data/cronova.db` / `logs` | Local DB and log directory. |
 
 ### `cronova pools`
 
@@ -392,7 +426,7 @@ Full guide, MCP config snippet, and security notes: [AI Agents (MCP)](AGENTS.md)
 
 ## Common questions
 
-**Do local commands need the server running?** No — `trigger`, `dags`, `runs`, `pools`, `users`, and `tokens` act on the SQLite DB directly. A queued `trigger` executes once `serve` is running.
+**Do local commands need the server running?** No — `trigger`, `dags`, `runs`, `backfill`, `prune`, `pools`, `users`, and `tokens` act on the SQLite DB directly. Runs queued by `trigger` or `backfill` execute once `serve` is running.
 
 **How do I run the CLI from another machine?** Set `CRONOVA_SERVER` and `CRONOVA_TOKEN` (or `-server`/`-token`); every operational command then goes over the REST API. Token minting stays on the server host.
 

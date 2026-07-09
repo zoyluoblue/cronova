@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,16 +136,32 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
+	// Brute-force throttle: after repeated failures this username or client IP
+	// is locked out with exponential growth. Checked before touching the store
+	// so a locked-out attacker learns nothing about account existence.
+	now := time.Now()
+	limKeys := []string{"u:" + req.Username, "ip:" + clientIP(r.RemoteAddr)}
+	if wait := s.loginLim.retryAfter(now, limKeys...); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed logins — try again later"})
+		return
+	}
+	loginFailed := func() {
+		s.loginLim.fail(now, limKeys...)
+		s.audit(r, "login_failed", truncate(req.Username, 64), "from "+clientIP(r.RemoteAddr))
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+	}
 	user, err := s.store.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
 		auth.CheckPassword(dummyHash, req.Password) // equalize timing
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		loginFailed()
 		return
 	}
 	if !auth.CheckPassword(user.PasswordHash, req.Password) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		loginFailed()
 		return
 	}
+	s.loginLim.ok(limKeys...)
 	token, err := auth.NewSessionToken()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session error"})

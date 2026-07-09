@@ -83,6 +83,22 @@ State lives in an **embedded SQLite database** plus on-disk DAG YAML, task logs,
 
 Override any of these with the `-db` / `-dags` / `-logs` / `-projects` flags, the `CRONOVA_DB` / `CRONOVA_DAGS` / `CRONOVA_LOGS` / `CRONOVA_PROJECTS` env vars, or `cronova.yaml`. Full layout table: [Deployment → Platform layout](DEPLOY.md#platform-layout).
 
+## How long does cronova keep run history?
+
+**90 days by default.** The server automatically deletes finished runs — their database rows and their log directories — once they are older than the retention window (default `2160h`, i.e. 90 days). Change it with the `retention:` key in `cronova.yaml`, the `-retention` flag on `cronova serve`, or the `CRONOVA_RETENTION` env var; set it to `0` to keep everything forever. Only finished runs age out — in-flight runs are never touched.
+
+For a one-off cleanup (or a deployment that runs with retention disabled), use `cronova prune`:
+
+```bash
+cronova prune                    # delete finished runs older than 90 days (asks first)
+cronova prune -older-than 720h   # custom window
+cronova prune -yes               # skip the confirmation prompt (scripts / cron)
+```
+
+## Are connection passwords encrypted?
+
+Yes. Connection passwords are encrypted **at rest with AES-256-GCM**. On first start, `cronova serve` auto-generates an encryption key file — `cronova.key`, permissions `0600` — in its working directory (for service installs that is next to the DB, see [Deployment → Platform layout](DEPLOY.md#platform-layout)); point it elsewhere with the `key_file:` key in `cronova.yaml` or the `CRONOVA_KEY_FILE` env var. **Back this file up alongside the database** — without it, the stored connection passwords are unreadable and must be re-entered. Connections saved before encryption existed (legacy plaintext rows) are upgraded in place automatically on the next server startup. To opt out, set `key_file: none` — passwords are then stored in plaintext and the server logs a warning at startup.
+
 ## How do I run cronova behind a reverse proxy?
 
 Bind cronova to localhost and terminate TLS at your proxy (nginx, Caddy, Traefik, …). The one-click wizard offers a **"this machine only (127.0.0.1)"** bind option for exactly this, or set `CRONOVA_HTTP=127.0.0.1:8090` (or `-http 127.0.0.1:8090`). When serving over HTTPS, set `CRONOVA_SECURE_COOKIE=true` (default `false`) so the session cookie is marked `Secure`. The console, REST API, and live-log SSE stream all share the one HTTP listener, so a single upstream is enough. See [Deployment](DEPLOY.md).

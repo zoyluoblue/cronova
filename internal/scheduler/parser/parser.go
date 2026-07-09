@@ -23,20 +23,22 @@ import (
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 type taskYAML struct {
-	ID          string   `yaml:"id"`
-	Type        string   `yaml:"type"`
-	Command     string   `yaml:"command"`
-	Deps        []string `yaml:"deps"`
-	Pool        string   `yaml:"pool"`
-	Priority    int      `yaml:"priority"`
-	Retries     *int     `yaml:"retries"`     // pointer: distinguishes "unset" from 0
-	RetryDelay  *int     `yaml:"retry_delay"` // seconds
-	Timeout     int      `yaml:"timeout"`     // seconds
-	SLA         int      `yaml:"sla"`         // seconds from run start (soft alert)
-	TriggerRule string   `yaml:"trigger_rule"`
-	Conn        string   `yaml:"conn"`    // connection id for type: sql
-	Project     string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
-	HTTP        *struct {
+	ID            string   `yaml:"id"`
+	Type          string   `yaml:"type"`
+	Command       string   `yaml:"command"`
+	Deps          []string `yaml:"deps"`
+	Pool          string   `yaml:"pool"`
+	Priority      int      `yaml:"priority"`
+	Retries       *int     `yaml:"retries"`         // pointer: distinguishes "unset" from 0
+	RetryDelay    *int     `yaml:"retry_delay"`     // seconds
+	RetryBackoff  string   `yaml:"retry_backoff"`   // "" | fixed | exponential
+	RetryDelayMax int      `yaml:"retry_delay_max"` // seconds; caps exponential growth
+	Timeout       int      `yaml:"timeout"`         // seconds
+	SLA           int      `yaml:"sla"`             // seconds from run start (soft alert)
+	TriggerRule   string   `yaml:"trigger_rule"`
+	Conn          string   `yaml:"conn"`    // connection id for type: sql
+	Project       string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
+	HTTP          *struct {
 		Method         string            `yaml:"method"`
 		URL            string            `yaml:"url"`
 		Headers        map[string]string `yaml:"headers"`
@@ -60,8 +62,9 @@ type dagYAML struct {
 		DagID string `yaml:"dag_id"`
 	} `yaml:"trigger_after"`
 	Notify struct {
-		URL string   `yaml:"url"`
-		On  []string `yaml:"on"` // "failure", "success"
+		URL    string   `yaml:"url"`
+		On     []string `yaml:"on"`     // "failure", "success"
+		Format string   `yaml:"format"` // ""/raw | slack | feishu | dingtalk
 	} `yaml:"notify"`
 }
 
@@ -145,6 +148,12 @@ func Parse(raw []byte) (*model.DAG, error) {
 			return nil, fmt.Errorf("dag %q: notify.url must be http(s)", y.DagID)
 		}
 	}
+	switch y.Notify.Format {
+	case "", "raw", "slack", "feishu", "dingtalk":
+		d.NotifyFormat = y.Notify.Format
+	default:
+		return nil, fmt.Errorf("dag %q: invalid notify.format %q (raw, slack, feishu, or dingtalk)", y.DagID, y.Notify.Format)
+	}
 
 	seen := make(map[string]bool, len(y.Tasks))
 	for _, t := range y.Tasks {
@@ -180,6 +189,20 @@ func Parse(raw []byte) (*model.DAG, error) {
 		if t.Timeout < 0 || t.SLA < 0 {
 			return nil, fmt.Errorf("dag %q: task %q timeout/sla must be >= 0 seconds", y.DagID, t.ID)
 		}
+		if !model.ValidRetryBackoff(t.RetryBackoff) {
+			return nil, fmt.Errorf("dag %q: task %q has invalid retry_backoff %q (use fixed or exponential)", y.DagID, t.ID, t.RetryBackoff)
+		}
+		if t.RetryDelayMax < 0 {
+			return nil, fmt.Errorf("dag %q: task %q retry_delay_max must be >= 0 seconds", y.DagID, t.ID)
+		}
+		// 30 days caps both delays: far past any real-world retry, and keeps the
+		// exponential shift-math safely inside int64.
+		const maxDelaySec = 30 * 24 * 3600
+		if (t.RetryDelay != nil && *t.RetryDelay > maxDelaySec) || t.RetryDelayMax > maxDelaySec {
+			return nil, fmt.Errorf("dag %q: task %q retry_delay/retry_delay_max must be <= %d seconds (30 days)", y.DagID, t.ID, maxDelaySec)
+		}
+		task.RetryBackoff = t.RetryBackoff
+		task.RetryDelayMax = t.RetryDelayMax
 		if t.Retries != nil {
 			task.Retries = *t.Retries
 		}

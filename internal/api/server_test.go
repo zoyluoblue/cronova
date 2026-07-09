@@ -41,6 +41,14 @@ func (s *stubTrigger) TriggerManual(_ context.Context, dagID string, params map[
 	return dagID + "__run1", nil
 }
 
+func (s *stubTrigger) Backfill(_ context.Context, dagID string, from, to time.Time) (int, int, error) {
+	s.got = dagID
+	if s.triggerErr != nil {
+		return 0, 0, s.triggerErr
+	}
+	return 2, 1, nil
+}
+
 func (s *stubTrigger) CreateDAG(_ context.Context, yamlText string) (string, error) {
 	s.createdYML = yamlText
 	return "created_dag", nil

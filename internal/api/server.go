@@ -27,6 +27,7 @@ import (
 // Engine is the slice of the scheduler the API needs.
 type Engine interface {
 	TriggerManual(ctx context.Context, dagID string, params map[string]string) (string, error)
+	Backfill(ctx context.Context, dagID string, from, to time.Time) (created, skipped int, err error)
 	CreateDAG(ctx context.Context, yamlText string) (string, error)
 	DeleteDAG(ctx context.Context, dagID string) error
 	NextSchedule(ctx context.Context, d *model.DAG) (time.Time, bool)
@@ -54,7 +55,8 @@ type Server struct {
 	web         fs.FS
 	info        Info
 	auth        AuthConfig
-	started     time.Time // for /metrics uptime
+	loginLim    *loginLimiter // brute-force throttle for POST /api/login
+	started     time.Time     // for /metrics uptime
 }
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
@@ -64,7 +66,7 @@ func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Serve
 		// honest label for "what timezone do cron fields mean".
 		info.TZ = "UTC"
 	}
-	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info, started: time.Now()}
+	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info, loginLim: newLoginLimiter(), started: time.Now()}
 }
 
 // SetAuth enables/configures authentication. Must be called before Handler().
@@ -91,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dags/{id}", s.getDAG)
 	mux.HandleFunc("DELETE /api/dags/{id}", s.deleteDAG)
 	mux.HandleFunc("POST /api/dags/{id}/trigger", s.triggerDAG)
+	mux.HandleFunc("POST /api/dags/{id}/backfill", s.backfillDAG)
 	mux.HandleFunc("POST /api/dags/{id}/pause", s.pauseDAG)
 	mux.HandleFunc("GET /api/dags/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{runID}", s.getRun)
@@ -293,20 +296,22 @@ func (s *Server) dagGraph(w http.ResponseWriter, r *http.Request) {
 // pointers so an UNSET value (which inherits default_retries) round-trips as null
 // rather than being collapsed into — and then baked back as — the effective int.
 type editTask struct {
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Command     string          `json:"command"`
-	Deps        []string        `json:"deps,omitempty"`
-	Pool        string          `json:"pool"`
-	Priority    int             `json:"priority"`
-	Retries     *int            `json:"retries"`     // null => inherit default_retries
-	RetryDelay  *int            `json:"retry_delay"` // null => inherit default
-	Timeout     int             `json:"timeout"`
-	SLA         int             `json:"sla"`
-	TriggerRule string          `json:"trigger_rule"`
-	HTTP        *model.HTTPSpec `json:"http,omitempty"`
-	Conn        string          `json:"conn,omitempty"`
-	Project     string          `json:"project,omitempty"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	Command       string          `json:"command"`
+	Deps          []string        `json:"deps,omitempty"`
+	Pool          string          `json:"pool"`
+	Priority      int             `json:"priority"`
+	Retries       *int            `json:"retries"`     // null => inherit default_retries
+	RetryDelay    *int            `json:"retry_delay"` // null => inherit default
+	RetryBackoff  string          `json:"retry_backoff,omitempty"`
+	RetryDelayMax int             `json:"retry_delay_max,omitempty"`
+	Timeout       int             `json:"timeout"`
+	SLA           int             `json:"sla"`
+	TriggerRule   string          `json:"trigger_rule"`
+	HTTP          *model.HTTPSpec `json:"http,omitempty"`
+	Conn          string          `json:"conn,omitempty"`
+	Project       string          `json:"project,omitempty"`
 }
 
 // dagDetail is the editor-facing DAG. The outer Tasks shadows model.DAG.Tasks in
@@ -330,6 +335,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 		d.DefaultRetries = parsed.DefaultRetries
 		d.NotifyURL = parsed.NotifyURL
 		d.NotifyOn = parsed.NotifyOn
+		d.NotifyFormat = parsed.NotifyFormat
 		d.SLA = parsed.SLA
 		d.DagrunTimeout = parsed.DagrunTimeout
 		// Pull the RAW per-task retry pointers so "unset" stays null for the editor.
@@ -347,7 +353,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn, Project: tk.Project}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, RetryBackoff: tk.RetryBackoff, RetryDelayMax: tk.RetryDelayMax, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn, Project: tk.Project}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -382,6 +388,46 @@ func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "trigger", r.PathValue("id"), runID)
 	writeJSON(w, http.StatusOK, map[string]string{"run_id": runID})
+}
+
+// backfillDAG enqueues runs for every schedule period in [from, to].
+// Dates accept "2006-01-02" (midnight UTC) or full RFC3339.
+func (s *Server) backfillDAG(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpErr(w, http.StatusBadRequest, "body must be JSON {from, to}")
+		return
+	}
+	parseWhen := func(s string, endOfDay bool) (time.Time, error) {
+		if t, err := time.Parse("2006-01-02", s); err == nil {
+			if endOfDay {
+				t = t.Add(24*time.Hour - time.Second) // inclusive date range
+			}
+			return t.UTC(), nil
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		return t.UTC(), err
+	}
+	from, err := parseWhen(req.From, false)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid from (use YYYY-MM-DD or RFC3339)")
+		return
+	}
+	to, err := parseWhen(req.To, true)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid to (use YYYY-MM-DD or RFC3339)")
+		return
+	}
+	created, skipped, err := s.eng.Backfill(r.Context(), r.PathValue("id"), from, to)
+	if err != nil {
+		mapErr(w, err)
+		return
+	}
+	s.audit(r, "backfill", r.PathValue("id"), fmt.Sprintf("%s..%s created=%d skipped=%d", req.From, req.To, created, skipped))
+	writeJSON(w, http.StatusOK, map[string]int{"created": created, "skipped": skipped})
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
@@ -470,20 +516,22 @@ func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {
 // --- structured DAG builder (UI form -> YAML -> create/update) ---
 
 type taskSpec struct {
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Command     string          `json:"command"`
-	Deps        []string        `json:"deps"`
-	Pool        string          `json:"pool"`
-	Priority    int             `json:"priority"`
-	Retries     *int            `json:"retries"`
-	RetryDelay  *int            `json:"retry_delay"`
-	Timeout     int             `json:"timeout"`
-	SLA         int             `json:"sla"`
-	TriggerRule string          `json:"trigger_rule"`
-	HTTP        *model.HTTPSpec `json:"http,omitempty"`
-	Conn        string          `json:"conn,omitempty"`
-	Project     string          `json:"project,omitempty"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	Command       string          `json:"command"`
+	Deps          []string        `json:"deps"`
+	Pool          string          `json:"pool"`
+	Priority      int             `json:"priority"`
+	Retries       *int            `json:"retries"`
+	RetryDelay    *int            `json:"retry_delay"`
+	RetryBackoff  string          `json:"retry_backoff,omitempty"`   // "" | fixed | exponential
+	RetryDelayMax int             `json:"retry_delay_max,omitempty"` // seconds; caps exponential growth
+	Timeout       int             `json:"timeout"`
+	SLA           int             `json:"sla"`
+	TriggerRule   string          `json:"trigger_rule"`
+	HTTP          *model.HTTPSpec `json:"http,omitempty"`
+	Conn          string          `json:"conn,omitempty"`
+	Project       string          `json:"project,omitempty"`
 }
 
 type dagSpec struct {
@@ -496,7 +544,8 @@ type dagSpec struct {
 	Tasks          []taskSpec `json:"tasks"`
 	TriggerAfter   []string   `json:"trigger_after"`
 	NotifyURL      string     `json:"notify_url"`
-	NotifyOn       []string   `json:"notify_on"` // "failure", "success"
+	NotifyOn       []string   `json:"notify_on"`     // "failure", "success"
+	NotifyFormat   string     `json:"notify_format"` // ""/raw | slack | feishu | dingtalk
 	SLA            int        `json:"sla"`
 	DagrunTimeout  int        `json:"dagrun_timeout"`
 }
@@ -568,27 +617,30 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		ExpectedStatus []int             `yaml:"expected_status,omitempty"`
 	}
 	type taskOut struct {
-		ID          string   `yaml:"id"`
-		Type        string   `yaml:"type,omitempty"`
-		Command     string   `yaml:"command,omitempty"`
-		Deps        []string `yaml:"deps,omitempty"`
-		Pool        string   `yaml:"pool,omitempty"`
-		Priority    int      `yaml:"priority,omitempty"`
-		Retries     *int     `yaml:"retries,omitempty"`
-		RetryDelay  *int     `yaml:"retry_delay,omitempty"`
-		Timeout     int      `yaml:"timeout,omitempty"`
-		SLA         int      `yaml:"sla,omitempty"`
-		TriggerRule string   `yaml:"trigger_rule,omitempty"`
-		Conn        string   `yaml:"conn,omitempty"`
-		Project     string   `yaml:"project,omitempty"`
-		HTTP        *httpOut `yaml:"http,omitempty"`
+		ID            string   `yaml:"id"`
+		Type          string   `yaml:"type,omitempty"`
+		Command       string   `yaml:"command,omitempty"`
+		Deps          []string `yaml:"deps,omitempty"`
+		Pool          string   `yaml:"pool,omitempty"`
+		Priority      int      `yaml:"priority,omitempty"`
+		Retries       *int     `yaml:"retries,omitempty"`
+		RetryDelay    *int     `yaml:"retry_delay,omitempty"`
+		RetryBackoff  string   `yaml:"retry_backoff,omitempty"`
+		RetryDelayMax int      `yaml:"retry_delay_max,omitempty"`
+		Timeout       int      `yaml:"timeout,omitempty"`
+		SLA           int      `yaml:"sla,omitempty"`
+		TriggerRule   string   `yaml:"trigger_rule,omitempty"`
+		Conn          string   `yaml:"conn,omitempty"`
+		Project       string   `yaml:"project,omitempty"`
+		HTTP          *httpOut `yaml:"http,omitempty"`
 	}
 	type triggerOut struct {
 		DagID string `yaml:"dag_id"`
 	}
 	type notifyOut struct {
-		URL string   `yaml:"url"`
-		On  []string `yaml:"on"`
+		URL    string   `yaml:"url"`
+		On     []string `yaml:"on"`
+		Format string   `yaml:"format,omitempty"`
 	}
 	type dagOut struct {
 		DagID          string       `yaml:"dag_id"`
@@ -617,12 +669,13 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		}
 		// Persist the URL even with no events yet (a "configured but idle" state
 		// that round-trips), rather than silently dropping what the user typed.
-		out.Notify = &notifyOut{URL: url, On: on}
+		out.Notify = &notifyOut{URL: url, On: on, Format: spec.NotifyFormat}
 	}
 	for _, t := range spec.Tasks {
 		to := taskOut{
 			ID: t.ID, Type: t.Type, Command: t.Command, Deps: t.Deps, Pool: t.Pool,
-			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay, Timeout: t.Timeout,
+			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay,
+			RetryBackoff: t.RetryBackoff, RetryDelayMax: t.RetryDelayMax, Timeout: t.Timeout,
 			SLA: t.SLA, TriggerRule: t.TriggerRule, Conn: t.Conn, Project: t.Project,
 		}
 		if t.Type == "http" && t.HTTP != nil {
@@ -825,8 +878,25 @@ func (s *Server) pauseDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	runs, err := s.store.ListDagRuns(r.Context(), r.PathValue("id"), limit)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	// state=failed or state=failed,cancelled — unknown names are rejected so a
+	// typo returns an error instead of silently matching nothing.
+	var states []model.RunState
+	if raw := strings.TrimSpace(q.Get("state")); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			st := model.RunState(strings.TrimSpace(p))
+			switch st {
+			case model.RunQueued, model.RunRunning, model.RunSuccess, model.RunFailed, model.RunCancelled, model.RunTimedOut:
+				states = append(states, st)
+			default:
+				httpErr(w, http.StatusBadRequest, "unknown state "+string(st))
+				return
+			}
+		}
+	}
+	runs, err := s.store.ListDagRunsPage(r.Context(), r.PathValue("id"), states, limit, offset)
 	if err != nil {
 		mapErr(w, err)
 		return

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/secrets"
 	"github.com/zoyluo/cronova/internal/store"
 	sqlitelib "modernc.org/sqlite"
 )
@@ -36,7 +37,15 @@ const timeLayout = time.RFC3339Nano
 // Store is a SQLite-backed store.Store.
 type Store struct {
 	db *sql.DB
+	// cipher seals/opens connection passwords at rest; nil = plaintext
+	// (encryption not configured). Set via SetSecretCipher before serving.
+	cipher *secrets.Cipher
 }
+
+// SetSecretCipher enables at-rest encryption of connection passwords: writes
+// seal the password, reads open it (legacy plaintext rows pass through). Call
+// once at startup, before the store is shared.
+func (s *Store) SetSecretCipher(c *secrets.Cipher) { s.cipher = c }
 
 var _ store.Store = (*Store)(nil)
 
@@ -332,12 +341,45 @@ func (s *Store) GetDagRunByLogicalDate(ctx context.Context, dagID string, logica
 }
 
 func (s *Store) ListDagRuns(ctx context.Context, dagID string, limit int) ([]*model.DagRun, error) {
+	return s.ListDagRunsPage(ctx, dagID, nil, limit, 0)
+}
+
+// LatestScheduledRun returns the newest schedule-triggered run (by logical
+// date) regardless of how many manual/backfill runs exist — the scheduler's
+// catchup anchor must never be crowded out of a windowed listing.
+func (s *Store) LatestScheduledRun(ctx context.Context, dagID string) (*model.DagRun, error) {
+	r, err := scanRun(s.db.QueryRowContext(ctx,
+		`SELECT `+runCols+` FROM dag_runs WHERE dag_id=? AND trigger_type=?
+		 ORDER BY logical_date DESC LIMIT 1`, dagID, string(model.TriggerSchedule)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return r, err
+}
+
+// ListDagRunsPage lists a DAG's runs newest-first, optionally filtered to the
+// given states, with limit/offset paging (offset enables the console's
+// "load more" over long histories).
+func (s *Store) ListDagRunsPage(ctx context.Context, dagID string, states []model.RunState, limit, offset int) ([]*model.DagRun, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+runCols+` FROM dag_runs WHERE dag_id=? ORDER BY logical_date DESC LIMIT ?`,
-		dagID, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	q := `SELECT ` + runCols + ` FROM dag_runs WHERE dag_id=?`
+	args := []any{dagID}
+	if len(states) > 0 {
+		ph := make([]string, len(states))
+		for i, st := range states {
+			ph[i] = "?"
+			args = append(args, string(st))
+		}
+		q += ` AND state IN (` + strings.Join(ph, ",") + `)`
+	}
+	q += ` ORDER BY logical_date DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -845,6 +887,9 @@ func (s *Store) ListConnections(ctx context.Context) ([]*model.Connection, error
 		if err != nil {
 			return nil, err
 		}
+		if err := s.openConnSecret(c); err != nil {
+			return nil, err
+		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -855,17 +900,84 @@ func (s *Store) GetConnection(ctx context.Context, id string) (*model.Connection
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	if err := s.openConnSecret(c); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (s *Store) UpsertConnection(ctx context.Context, c *model.Connection) error {
+	password := c.Password
+	if s.cipher != nil {
+		sealed, err := s.cipher.Encrypt(password)
+		if err != nil {
+			return fmt.Errorf("encrypt connection password: %w", err)
+		}
+		password = sealed
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO connections (id, type, host, port, login, password, extra, updated_at)
 		 VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 		 ON CONFLICT(id) DO UPDATE SET type=excluded.type, host=excluded.host, port=excluded.port,
 		   login=excluded.login, password=excluded.password, extra=excluded.extra, updated_at=CURRENT_TIMESTAMP`,
-		c.ID, c.Type, c.Host, c.Port, c.Login, c.Password, c.Extra)
+		c.ID, c.Type, c.Host, c.Port, c.Login, password, c.Extra)
 	return err
+}
+
+// openConnSecret decrypts a connection's password in place (no-op without a
+// cipher; legacy plaintext passes through the cipher unchanged).
+func (s *Store) openConnSecret(c *model.Connection) error {
+	if s.cipher == nil || c == nil {
+		return nil
+	}
+	plain, err := s.cipher.Decrypt(c.Password)
+	if err != nil {
+		return fmt.Errorf("connection %q: %w", c.ID, err)
+	}
+	c.Password = plain
+	return nil
+}
+
+// MigrateConnectionSecrets seals any legacy plaintext passwords in place — a
+// one-time upgrade run at startup once encryption is enabled. Idempotent:
+// already sealed rows are skipped.
+func (s *Store) MigrateConnectionSecrets(ctx context.Context) (int, error) {
+	if s.cipher == nil {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, password FROM connections WHERE password != ''`)
+	if err != nil {
+		return 0, err
+	}
+	type row struct{ id, password string }
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.password); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !secrets.IsEncrypted(r.password) {
+			todo = append(todo, r)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, r := range todo {
+		sealed, err := s.cipher.Encrypt(r.password)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE connections SET password=? WHERE id=?`, sealed, r.id); err != nil {
+			return 0, err
+		}
+	}
+	return len(todo), nil
 }
 
 func (s *Store) DeleteConnection(ctx context.Context, id string) error {
@@ -896,6 +1008,79 @@ func (s *Store) CountRunsByState(ctx context.Context) (map[model.RunState]int, e
 		out[model.RunState(st)] = n
 	}
 	return out, rows.Err()
+}
+
+// PruneRuns deletes finished runs older than cutoff plus their task instances,
+// in one transaction, and returns the (dag_id, run_id) pairs it removed so the
+// caller can delete the runs' log directories. Only terminal states with a
+// recorded finished_at qualify — an in-flight or still-queued run is never pruned.
+func (s *Store) PruneRuns(ctx context.Context, cutoff time.Time) ([]*model.DagRun, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Each DAG's newest schedule-triggered run is exempt no matter how old: it
+	// is the catchup anchor (see scheduler.scheduleAnchor). Pruning it would
+	// reset a sparse-schedule catchup DAG to start_date and re-execute history.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT run_id, dag_id FROM dag_runs
+		 WHERE finished_at IS NOT NULL AND finished_at < ?
+		   AND state IN (?,?,?,?)
+		   AND run_id NOT IN (
+		     SELECT r2.run_id FROM dag_runs r2
+		     WHERE r2.trigger_type = ?
+		       AND r2.logical_date = (
+		         SELECT MAX(r3.logical_date) FROM dag_runs r3
+		         WHERE r3.dag_id = r2.dag_id AND r3.trigger_type = ?))`,
+		fmtTime(cutoff.UTC()),
+		string(model.RunSuccess), string(model.RunFailed),
+		string(model.RunCancelled), string(model.RunTimedOut),
+		string(model.TriggerSchedule), string(model.TriggerSchedule))
+	if err != nil {
+		return nil, err
+	}
+	var pruned []*model.DagRun
+	for rows.Next() {
+		r := &model.DagRun{}
+		if err := rows.Scan(&r.RunID, &r.DagID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		pruned = append(pruned, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(pruned) == 0 {
+		return nil, tx.Commit()
+	}
+
+	// Delete in chunks so a huge backlog never exceeds SQLite's bind-var limit.
+	const chunk = 500
+	for i := 0; i < len(pruned); i += chunk {
+		end := i + chunk
+		if end > len(pruned) {
+			end = len(pruned)
+		}
+		ids := make([]any, 0, end-i)
+		ph := make([]string, 0, end-i)
+		for _, r := range pruned[i:end] {
+			ids = append(ids, r.RunID)
+			ph = append(ph, "?")
+		}
+		in := strings.Join(ph, ",")
+		if _, err := tx.ExecContext(ctx, `DELETE FROM task_instances WHERE run_id IN (`+in+`)`, ids...); err != nil {
+			return nil, fmt.Errorf("prune task_instances: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dag_runs WHERE run_id IN (`+in+`)`, ids...); err != nil {
+			return nil, fmt.Errorf("prune dag_runs: %w", err)
+		}
+	}
+	return pruned, tx.Commit()
 }
 
 // RecordAudit appends one entry to the operations audit trail.

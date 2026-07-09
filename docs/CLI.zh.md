@@ -12,7 +12,7 @@ cronova <command> [args] [flags]
 |---|---|---|
 | [调度器](#scheduler) | `serve`、`cronova-executor` | 本机（长期运行的进程） |
 | [服务生命周期](#service-lifecycle) | `start`/`stop`/`restart`/`status`、`init`、`update`、`uninstall`、`version`、`healthcheck` | 宿主机服务管理器（systemd / launchd） |
-| [本地操作](#local-operations) | `trigger`、`dags`、`runs`、`pools`、`users` | 直接操作 SQLite 数据库（`-db`）——加 `-server` 也可走远程 |
+| [本地操作](#local-operations) | `trigger`、`dags`、`runs`、`backfill`、`prune`、`pools`、`users` | 直接操作 SQLite 数据库（`-db`）——加 `-server` 也可走远程 |
 | [远程 / 智能体模式](#remote--agent-mode) | `api`、`get`、`run`、`logs`、`cancel`、`retry`、`mark`、`pause`、`overview`、`tokens`、`mcp` | 运行中服务器的带认证 REST API |
 
 ## 调度器
@@ -34,8 +34,10 @@ cronova serve -db data/cronova.db -dags dags -http :8090
 | `-projects` | `~/.cronova/projects` | 已上传[项目文件](tutorial/projects.md)的存放目录。 |
 | `-executor` | *（进程内）* | gRPC executor 目标地址，例如 `unix:///tmp/cronova-executor.sock`。留空 = 进程内执行器。 |
 | `-tick` | `2s` | 调度循环间隔。 |
+| `-retention` | `2160h`（90 天） | 删除早于该窗口的已结束运行**及其日志**；`0` = 永久保留。一次性清理见 [`cronova prune`](#cronova-prune)。 |
 | `-auth` | 关闭 | 要求登录才能访问控制台/API（覆盖配置文件）。 |
 | `-config` | `cronova.yaml` | YAML 配置文件路径（可选）。 |
+| `key_file` / `CRONOVA_KEY_FILE` | `cronova.key` | 仅限配置文件/环境变量（无命令行标志）：用于连接密码 at-rest 加密的密钥文件。首次 `serve` 时自动生成（`0600`）——务必备份；丢失后已存储的密码将无法解读。设为 `none` 可禁用加密（明文存储，启动时会告警）。 |
 
 配置的解析顺序为：内置默认值 ← 配置文件 ← `CRONOVA_*` 环境变量 ← 显式标志。`CRONOVA_WEB_DIR`（仅限开发）会从磁盘加载控制台静态资源，而不是使用内嵌副本。
 
@@ -151,7 +153,7 @@ cronova healthcheck -http :8090 && echo healthy
 
 ## 本地操作
 
-在持有数据库的机器上运行；它们直接作用于 SQLite 数据库。所有命令都接受 `-db`（默认 `data/cronova.db`）以及[全局 `-server`/`-token`/`-o` 标志](#global-flags-and-environment)——给出 `-server` 后，同一命令就会改走 REST API。
+在持有数据库的机器上运行；它们直接作用于 SQLite 数据库。所有命令都接受 `-db`（默认 `data/cronova.db`），大多数还接受[全局 `-server`/`-token`/`-o` 标志](#global-flags-and-environment)——给出 `-server` 后，同一命令就会改走 REST API（`backfill` 和 `prune` 仅限本地）。
 
 ### `cronova trigger`
 
@@ -203,7 +205,39 @@ example_etl__manual_1783442199726456000  2026-07-07T16:36:39Z  success  manual  
 | `-n` | `10` | 显示的最近运行数量。 |
 | `-db` | `data/cronova.db` | SQLite 数据库路径。 |
 
-远程模式下表格不包含 `TASKS` 列（runs 端点只返回运行本身）；用 `cronova run <run_id>` 查看单次运行的任务状态。
+远程模式下表格不包含 `TASKS` 列（runs 端点只返回运行本身）；用 `cronova run <run_id>` 查看单次运行的任务状态。底层的 `GET /api/dags/{id}/runs` 端点还接受 `state=`（逗号分隔，例如 `state=failed,cancelled`——未知状态名会被拒绝）与 `offset=` 用于筛选和分页；可通过 [`cronova api`](#cronova-api) 使用。
+
+### `cronova backfill`
+
+为日期窗口内的每个调度周期各排入一次运行——在修复 bug 后重跑历史，或为新添加的 DAG 补齐过去的周期。已存在运行（**任意**状态）的周期会被跳过，因此重复执行回填绝不会重复运行任何东西；`to` 会被收敛到当前时刻（未来的周期属于调度器）；覆盖超过 500 个周期的窗口会被直接拒绝。执行受 DAG 的 `max_active_runs` 节流，与补跑（catchup）完全一致。
+
+```console
+$ cronova backfill daily_etl -from 2026-07-01 -to 2026-07-05
+backfill daily_etl: created 5 run(s), skipped 0 existing (a running `cronova serve` executes them)
+```
+
+| 标志 | 默认值 | 说明 |
+|---|---|---|
+| `-from` / `-to` | *（必填）* | 窗口起点/终点，`YYYY-MM-DD`，两端均含。 |
+| `-db` / `-dags` | `data/cronova.db` / `dags` | 本地数据库与 DAG 目录。 |
+
+DAG 必须带有 `schedule`——回填按调度周期枚举。仅限本地；面向远程服务器请调用 API，它还接受 RFC3339 时间戳：`cronova api POST /api/dags/daily_etl/backfill '{"from":"2026-07-01","to":"2026-07-05"}'`。
+
+### `cronova prune`
+
+删除早于保留窗口的已结束运行——数据库行加上它们的日志目录。它是 [`serve -retention`](#cronova-serve) 的手动对应命令，用于一次性清理，或用于禁用了 retention 的部署。仅限本地；除非给出 `-yes`，否则会先要求确认。
+
+```bash
+cronova prune                    # finished runs older than 90 days (asks first)
+cronova prune -older-than 720h   # custom window (30 days)
+cronova prune -yes               # no confirmation (scripts / cron)
+```
+
+| 标志 | 默认值 | 说明 |
+|---|---|---|
+| `-older-than` | `2160h`（90 天） | 删除早于该窗口的已结束运行（必须为正值）。 |
+| `-yes` | | 跳过确认提示。 |
+| `-db` / `-logs` | `data/cronova.db` / `logs` | 本地数据库与日志目录。 |
 
 ### `cronova pools`
 
@@ -392,7 +426,7 @@ CRONOVA_TOKEN=cnv_pat_… cronova mcp -read-only
 
 ## 常见问题
 
-**本地命令需要服务器在运行吗？** 不需要——`trigger`、`dags`、`runs`、`pools`、`users` 和 `tokens` 直接作用于 SQLite 数据库。排队的 `trigger` 会在 `serve` 运行后被执行。
+**本地命令需要服务器在运行吗？** 不需要——`trigger`、`dags`、`runs`、`backfill`、`prune`、`pools`、`users` 和 `tokens` 直接作用于 SQLite 数据库。由 `trigger` 或 `backfill` 排入队列的运行会在 `serve` 运行后被执行。
 
 **如何在另一台机器上运行 CLI？** 设置 `CRONOVA_SERVER` 和 `CRONOVA_TOKEN`（或 `-server`/`-token`）；此后每个操作类命令都走 REST API。令牌签发仍须在服务器主机上进行。
 

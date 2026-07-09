@@ -284,6 +284,14 @@ Same binary, same wizard; the service manager and paths differ:
 | control | `systemctl`, `journalctl` | `launchctl`, `service.log` |
 | uploaded projects | `~cronova/.cronova/projects/` | `~/.cronova/projects/` (sudo user) |
 
+**Back up `cronova.key` alongside the DB.** Connection passwords are encrypted
+at rest (AES-256-GCM) with a key that `cronova serve` auto-generates on first
+start as `cronova.key` (permissions `0600`) in its working directory —
+`/var/lib/cronova/cronova.key` on Linux, `/usr/local/var/cronova/cronova.key`
+on macOS (override with `key_file:` in `cronova.yaml` or `CRONOVA_KEY_FILE`).
+Include it in the same backup as the SQLite DB: a database restored without its
+key file has unreadable connection passwords, and they must be re-entered.
+
 ## Uploaded projects
 
 The console can upload scripts / project folders / zips (task editor →

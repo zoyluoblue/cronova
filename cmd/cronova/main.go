@@ -34,6 +34,7 @@ import (
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/operator"
 	"github.com/zoyluo/cronova/internal/scheduler"
+	"github.com/zoyluo/cronova/internal/secrets"
 	"github.com/zoyluo/cronova/internal/store"
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 	"github.com/zoyluo/cronova/internal/web"
@@ -63,6 +64,10 @@ func main() {
 		err = cmdRuns(args)
 	case "pools":
 		err = cmdPools(args)
+	case "prune":
+		err = cmdPrune(args)
+	case "backfill":
+		err = cmdBackfill(args)
 	case "api":
 		err = cmdAPI(args)
 	case "get":
@@ -166,6 +171,7 @@ usage:
   cronova trigger <dag_id>   create a manual run
   cronova dags               list registered DAGs
   cronova runs <dag_id>      show recent runs and task states
+  cronova backfill <dag_id> -from YYYY-MM-DD -to YYYY-MM-DD   enqueue runs for missed periods
   cronova pools              list resource pools
   cronova pools set <name> <slots>   create or resize a pool
   cronova users              list console accounts
@@ -187,6 +193,7 @@ usage:
   cronova tokens create <name> [-role ...]    mint an API token for an agent (local)
   cronova tokens list | delete <id>           manage API tokens (local)
   cronova mcp [-read-only]                     run an MCP server (stdio) for AI clients
+  cronova prune [-older-than 2160h] [-yes]    delete finished runs + logs older than the window
 
   cronova start|stop|restart control the installed service (auto-elevates via sudo)
   cronova status             show the installed service's status
@@ -272,6 +279,7 @@ func cmdServe(args []string) error {
 	executorAddr := fs.String("executor", "", "gRPC executor target (e.g. unix:///tmp/cronova-executor.sock); empty = in-process executor")
 	httpAddr := fs.String("http", ":8090", "HTTP address for the console API + web UI (empty to disable)")
 	authFlag := fs.Bool("auth", false, "require login for the console/API (overrides config)")
+	retention := fs.Duration("retention", 90*24*time.Hour, "delete finished runs + their logs older than this (0 = keep forever)")
 	_ = fs.Parse(args)
 
 	// resolve settings: defaults <- config file <- CRONOVA_* env <- explicit flags
@@ -288,7 +296,7 @@ func cmdServe(args []string) error {
 	applyEnv(&cfg)
 	overlaySetFlags(&cfg, fs, map[string]any{
 		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "tick": tick,
-		"executor": executorAddr, "http": httpAddr, "auth": authFlag,
+		"executor": executorAddr, "http": httpAddr, "auth": authFlag, "retention": retention,
 	})
 	if cfg.Projects == "" {
 		cfg.Projects = defaultProjectsDir() // ~/.cronova/projects (may be "" if no home)
@@ -298,12 +306,40 @@ func cmdServe(args []string) error {
 	if err != nil || tickDur <= 0 {
 		return fmt.Errorf("invalid tick %q: %v", cfg.Tick, err)
 	}
+	retentionDur, err := parseRetention(cfg.Retention)
+	if err != nil {
+		return err
+	}
 
 	st, err := openStore(cfg.DB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+
+	// At-rest encryption for connection passwords: load (or mint) the key file
+	// and seal any legacy plaintext rows. "none" opts out explicitly.
+	if cfg.KeyFile != "" && cfg.KeyFile != "none" {
+		key, created, err := secrets.LoadOrCreateKeyFile(cfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("encryption key: %w", err)
+		}
+		cip, err := secrets.NewCipher(key)
+		if err != nil {
+			return err
+		}
+		st.SetSecretCipher(cip)
+		if created {
+			log.Printf("cronova: generated connection-encryption key %s — back this file up; losing it makes stored connection passwords unreadable", cfg.KeyFile)
+		}
+		if n, err := st.MigrateConnectionSecrets(context.Background()); err != nil {
+			return fmt.Errorf("encrypt existing connections: %w", err)
+		} else if n > 0 {
+			log.Printf("cronova: encrypted %d existing connection password(s) at rest", n)
+		}
+	} else {
+		log.Print("cronova: WARNING connection-password encryption disabled (key_file: none) — passwords are stored in plaintext")
+	}
 
 	// seed the initial admin (idempotent) before enabling auth, so a fresh
 	// deployment isn't locked out.
@@ -350,6 +386,7 @@ func cmdServe(args []string) error {
 		// installed service + a dev run) must not GC each other's workspaces.
 		WorkspaceDir: workspaceDirFor(cfg.DB),
 		Tick:         tickDur,
+		Retention:    retentionDur,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

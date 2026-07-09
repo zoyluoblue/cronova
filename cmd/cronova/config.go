@@ -20,7 +20,13 @@ type Config struct {
 	Tick     string `yaml:"tick"`
 	Executor string `yaml:"executor"`
 	HTTP     string `yaml:"http"`
-	Auth     struct {
+	// Retention deletes finished runs (DB rows + log dirs) older than this
+	// duration, e.g. "2160h" for 90 days. "0" keeps everything forever.
+	Retention string `yaml:"retention"`
+	// KeyFile holds the hex key that encrypts connection passwords at rest.
+	// Auto-generated (0600) on first serve. "none" disables encryption.
+	KeyFile string `yaml:"key_file"`
+	Auth    struct {
 		Enabled       bool   `yaml:"enabled"`
 		SessionTTL    string `yaml:"session_ttl"`
 		SecureCookie  bool   `yaml:"secure_cookie"`
@@ -30,9 +36,24 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	c := Config{DB: "data/cronova.db", Dags: "dags", Logs: "logs", Tick: "2s", HTTP: ":8090"}
+	c := Config{DB: "data/cronova.db", Dags: "dags", Logs: "logs", Tick: "2s", HTTP: ":8090",
+		Retention: "2160h", // 90 days; "0" = keep forever
+		KeyFile:   "cronova.key"}
 	c.Auth.SessionTTL = "24h"
 	return c
+}
+
+// parseRetention parses the retention setting: a Go duration ("720h"), or "0"
+// to disable pruning. Negative values are rejected.
+func parseRetention(s string) (time.Duration, error) {
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid retention %q (use a duration like 2160h, or 0 to disable): %v", s, err)
+	}
+	return d, nil
 }
 
 // loadConfigFile overlays a YAML file onto c (only if the file exists). A given
@@ -65,6 +86,8 @@ func applyEnv(c *Config) {
 	env("CRONOVA_TICK", &c.Tick)
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
+	env("CRONOVA_RETENTION", &c.Retention)
+	env("CRONOVA_KEY_FILE", &c.KeyFile)
 	if v, ok := os.LookupEnv("CRONOVA_AUTH"); ok {
 		// Only a RECOGNIZED value flips the control; an unknown/blank value keeps
 		// the current setting rather than failing open (auth defaults on for a
@@ -123,6 +146,9 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	str("http", &c.HTTP)
 	if set["tick"] {
 		c.Tick = vals["tick"].(*time.Duration).String()
+	}
+	if set["retention"] {
+		c.Retention = vals["retention"].(*time.Duration).String()
 	}
 	if set["auth"] {
 		c.Auth.Enabled = *vals["auth"].(*bool)

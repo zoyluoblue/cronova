@@ -1,6 +1,8 @@
 .DS_Store
 # local secrets / env files (never commit)
 .env
+cronova.key
+cronova.env
 *.db
 *.db-wal
 *.db-shm
@@ -18,3 +20,5 @@ node_modules/
 # mkdocs build output + docs venv
 /site/
 /.venv-docs/
+# local publishing/marketing playbook — CONTAINS SECRETS (dev.to API key). Never commit.
+/publish/

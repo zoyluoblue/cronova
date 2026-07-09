@@ -63,6 +63,17 @@ var validTriggerRules = map[string]bool{
 // ValidTriggerRule reports whether r is a known trigger rule.
 func ValidTriggerRule(r string) bool { return validTriggerRules[r] }
 
+// Retry backoff strategies: how the wait between attempts grows.
+const (
+	BackoffFixed       = "fixed"       // constant retry_delay between attempts (default)
+	BackoffExponential = "exponential" // retry_delay·2^(n-1) before the n-th retry
+)
+
+// ValidRetryBackoff reports whether b is a known backoff strategy ("" = fixed).
+func ValidRetryBackoff(b string) bool {
+	return b == "" || b == BackoffFixed || b == BackoffExponential
+}
+
 // EvalTriggerRule decides, given a task's dependency states and its trigger
 // rule, whether the task is ready to dispatch and/or blocked (its branch can
 // never satisfy the rule, so it should be marked upstream_failed). ready and

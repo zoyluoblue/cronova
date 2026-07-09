@@ -42,6 +42,13 @@ type Store interface {
 	GetDagRun(ctx context.Context, runID string) (*model.DagRun, error)
 	GetDagRunByLogicalDate(ctx context.Context, dagID string, logicalDate time.Time) (*model.DagRun, error)
 	ListDagRuns(ctx context.Context, dagID string, limit int) ([]*model.DagRun, error)
+	// ListDagRunsPage is ListDagRuns with optional state filtering and offset
+	// paging (states nil/empty = all states).
+	ListDagRunsPage(ctx context.Context, dagID string, states []model.RunState, limit, offset int) ([]*model.DagRun, error)
+	// LatestScheduledRun returns the schedule-triggered run with the greatest
+	// logical_date, or ErrNotFound. It is the scheduler's catchup anchor, so it
+	// must be immune to how many manual/backfill runs exist.
+	LatestScheduledRun(ctx context.Context, dagID string) (*model.DagRun, error)
 	ListDagRunsByState(ctx context.Context, state model.RunState) ([]*model.DagRun, error)
 	// RecentRuns returns the most recent runs across all live DAGs, newest first.
 	RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, error)
@@ -49,6 +56,11 @@ type Store interface {
 	CountActiveRuns(ctx context.Context, dagID string) (int, error)
 	// CountRunsByState returns the all-time run count grouped by state (for /metrics).
 	CountRunsByState(ctx context.Context) (map[model.RunState]int, error)
+	// PruneRuns deletes finished runs (and their task instances) whose
+	// finished_at is before cutoff, returning the deleted runs (dag_id + run_id
+	// populated) so callers can remove the runs' log directories. Runs that are
+	// still queued/running — or finished runs with no finished_at — are never touched.
+	PruneRuns(ctx context.Context, cutoff time.Time) ([]*model.DagRun, error)
 
 	// --- audit log ---
 	RecordAudit(ctx context.Context, e *model.AuditEntry) error

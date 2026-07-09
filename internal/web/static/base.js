@@ -56,6 +56,12 @@ const DICT = {
     set_done: "完成", set_edit: "编辑", set_none: "无", set_sched: "调度", set_max: "最大并发", set_retries: "默认重试", set_deps: "上游依赖",
     set_deps_hint: "上游 DAG 成功后自动触发本 DAG", set_no_deps_avail: "暂无其他 DAG 可选",
     set_notify: "通知", set_notify_hint: "运行结束后向 Webhook 发送 JSON（兼容 Slack/飞书/Discord）", notify_failure: "失败", notify_success: "成功", notify_off: "未选择事件", notify_need_url: "先填写 Webhook URL，再选择触发事件", err_notify_url: "通知 URL 必须以 http:// 或 https:// 开头",
+    nf_label: "消息格式", nf_hint: "raw = 完整 JSON 载荷;其余按平台的入群机器人格式包装摘要文本", nf_feishu: "飞书", nf_dingtalk: "钉钉",
+    btn_backfill: "回填", bf_hint: "为区间内每个调度周期补建一次运行(含首尾;已存在的周期自动跳过,执行受最大并发限制)", bf_from: "开始日期", bf_to: "结束日期", bf_go: "开始回填", bf_need_dates: "请选择起止日期",
+    bf_done: (c, s) => `回填已入队:新建 ${c} 个运行,跳过 ${s} 个已存在`,
+    rf_all: "全部", rf_running: "进行中", rf_failed: "失败", rf_success: "成功",
+    t_backoff: "重试退避", bo_fixed: "固定间隔", bo_exponential: "指数退避", t_backoff_hint: "指数退避:第 n 次重试等待 重试间隔×2ⁿ⁻¹",
+    t_backoffmax: "退避上限(秒)", t_backoffmax_hint: "指数退避的最长等待;0 = 不封顶",
     set_sla: "SLA（软）", set_sla_hint: "从 run 开始算，超时未完成即告警（继续运行）。0=关闭。需配置通知 Webhook。", set_timeout: "运行超时（硬）", set_timeout_hint: "从 run 开始算，超时则强制失败并杀掉运行中任务 → timed_out。0=关闭。", secs: "秒", set_off: "关闭",
     t_sla: "任务 SLA（秒）", t_sla_hint: "从 run 开始算，此任务超时未完成即告警。0=关闭。", t_timeout_hint: "单次执行超时即杀（秒）。0=不限。",
     danger_title: "危险操作", danger_del_hint: "归档此 DAG：不再调度，历史保留。",
@@ -182,6 +188,12 @@ const DICT = {
     set_done: "Done", set_edit: "Edit", set_none: "None", set_sched: "Schedule", set_max: "Max active runs", set_retries: "Default retries", set_deps: "Upstream DAGs",
     set_deps_hint: "Triggered automatically after these DAGs succeed", set_no_deps_avail: "No other DAGs available",
     set_notify: "Notifications", set_notify_hint: "POST a JSON webhook when a run finishes (Slack/Feishu/Discord compatible)", notify_failure: "Failure", notify_success: "Success", notify_off: "No events selected", notify_need_url: "Enter a webhook URL first, then pick events", err_notify_url: "Notify URL must start with http:// or https://",
+    nf_label: "Message format", nf_hint: "raw = full JSON payload; the others wrap the summary text in that platform's incoming-webhook envelope", nf_feishu: "Feishu", nf_dingtalk: "DingTalk",
+    btn_backfill: "Backfill", bf_hint: "Enqueue one run per schedule period in the window (inclusive; existing periods are skipped, execution obeys max active runs)", bf_from: "From", bf_to: "To", bf_go: "Backfill", bf_need_dates: "Pick both dates",
+    bf_done: (c, s) => `Backfill enqueued: ${c} run(s) created, ${s} skipped`,
+    rf_all: "All", rf_running: "Active", rf_failed: "Failed", rf_success: "Success",
+    t_backoff: "Retry backoff", bo_fixed: "Fixed", bo_exponential: "Exponential", t_backoff_hint: "Exponential: the n-th retry waits retry delay × 2ⁿ⁻¹",
+    t_backoffmax: "Backoff cap (s)", t_backoffmax_hint: "Longest exponential wait; 0 = uncapped",
     set_sla: "SLA (soft)", set_sla_hint: "From run start; alert if not finished in time (run keeps going). 0 = off. Needs a notify webhook.", set_timeout: "Run timeout (hard)", set_timeout_hint: "From run start; on breach the run is force-failed and running tasks killed → timed_out. 0 = off.", secs: "sec", set_off: "off",
     t_sla: "Task SLA (sec)", t_sla_hint: "From run start; alert if this task hasn't finished in time. 0 = off.", t_timeout_hint: "Kill a single execution after this many seconds. 0 = none.",
     danger_title: "Danger zone", danger_del_hint: "Archive this DAG: no more scheduling; history is kept.",
@@ -287,8 +299,8 @@ const STATE = {
   en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", cancelled: "cancelled", timed_out: "timed out", "": "no runs", none: "no runs" },
 };
 const TYPEL = {
-  zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件" },
-  en: { schedule: "scheduled", manual: "manual", dependency: "dependency", event: "event" },
+  zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件", backfill: "回填" },
+  en: { schedule: "scheduled", manual: "manual", dependency: "dependency", event: "event", backfill: "backfill" },
 };
 function t(k, ...a) { const v = (DICT[lang][k] ?? DICT.zh[k] ?? k); return typeof v === "function" ? v(...a) : v; }
 const stateLabel = (s) => STATE[lang][s] ?? STATE.zh[s] ?? s;

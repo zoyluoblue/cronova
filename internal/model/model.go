@@ -84,6 +84,7 @@ const (
 	TriggerManual     TriggerType = "manual"
 	TriggerDependency TriggerType = "dependency"
 	TriggerEvent      TriggerType = "event"
+	TriggerBackfill   TriggerType = "backfill" // operator-requested historical re-run
 )
 
 // DAG is a workflow definition. Persisted fields live in the dags table; Tasks
@@ -103,6 +104,7 @@ type DAG struct {
 	TriggerAfter   []string   `json:"trigger_after,omitempty"`  // upstream dag_ids
 	NotifyURL      string     `json:"notify_url,omitempty"`     // webhook POSTed on a notify_on state
 	NotifyOn       []string   `json:"notify_on,omitempty"`      // run states to notify on: "failure", "success"
+	NotifyFormat   string     `json:"notify_format,omitempty"`  // webhook body shape: ""/raw | slack | feishu | dingtalk
 	SLA            int        `json:"sla,omitempty"`            // soft deadline (seconds from run start); breach alerts, run keeps going
 	DagrunTimeout  int        `json:"dagrun_timeout,omitempty"` // hard deadline (seconds from run start); breach kills the run → timed_out
 	CreatedAt      time.Time  `json:"created_at"`
@@ -112,17 +114,22 @@ type DAG struct {
 
 // Task is a single node in a DAG.
 type Task struct {
-	ID          string   `json:"id"`
-	Type        string   `json:"type"` // shell/python/sql/jar/...
-	Command     string   `json:"command"`
-	Deps        []string `json:"deps,omitempty"`
-	Pool        string   `json:"pool"`
-	Priority    int      `json:"priority"`
-	Retries     int      `json:"retries"`
-	RetryDelay  int      `json:"retry_delay"`   // seconds
-	Timeout     int      `json:"timeout"`       // execution timeout seconds; 0 = none (kills the attempt)
-	SLA         int      `json:"sla,omitempty"` // soft deadline (seconds from run start); breach alerts only
-	TriggerRule string   `json:"trigger_rule"`  // when to run vs. upstream states (default all_success)
+	ID         string   `json:"id"`
+	Type       string   `json:"type"` // shell/python/sql/jar/...
+	Command    string   `json:"command"`
+	Deps       []string `json:"deps,omitempty"`
+	Pool       string   `json:"pool"`
+	Priority   int      `json:"priority"`
+	Retries    int      `json:"retries"`
+	RetryDelay int      `json:"retry_delay"` // seconds (the base delay under exponential backoff)
+	// RetryBackoff selects how the wait grows between attempts: "" or "fixed"
+	// waits RetryDelay every time; "exponential" waits RetryDelay·2^(n-1) before
+	// the n-th retry, capped by RetryDelayMax when set.
+	RetryBackoff  string `json:"retry_backoff,omitempty"`
+	RetryDelayMax int    `json:"retry_delay_max,omitempty"` // seconds; caps exponential growth (0 = uncapped)
+	Timeout       int    `json:"timeout"`                   // execution timeout seconds; 0 = none (kills the attempt)
+	SLA           int    `json:"sla,omitempty"`             // soft deadline (seconds from run start); breach alerts only
+	TriggerRule   string `json:"trigger_rule"`              // when to run vs. upstream states (default all_success)
 	// HTTP is set when Type == "http": a native HTTP request run via `cronova run-op`
 	// instead of a shell Command. URL/Headers/Body may contain {{ var. }}/{{ conn. }}
 	// templates, resolved server-side at dispatch.

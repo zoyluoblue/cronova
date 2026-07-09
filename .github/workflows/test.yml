@@ -1,0 +1,25 @@
+# Run the full test suite on every push and pull request, so regressions are
+# caught before they land — release.yml only builds tagged releases and never
+# runs tests.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race)
+        run: go test -race ./...

@@ -27,8 +27,8 @@ tasks:
 trigger_after:
   - dag_id: upstream_ingest
 notify:
-  - url: https://hooks.example.com/cronova
-    on: [failure]
+  url: https://hooks.example.com/cronova
+  on: [failure]
 ```
 
 ## DAG-level fields
@@ -46,7 +46,14 @@ notify:
 | `dagrun_timeout` | int (seconds) | `0` | Run-level hard deadline, measured from run start. `0` = no limit. |
 | `tasks` | list | — (required) | The task list (see below). |
 | `trigger_after` | list of `{dag_id}` | — | Run this DAG after another DAG **succeeds** (cross-DAG dependency). Visualized in the console's DAG Graph. |
-| `notify` | list of `{url, on}` | — | Webhook notifications. `on` is a list of `"failure"` and/or `"success"`. |
+| `notify` | `{url, on, format}` | — | Webhook notification. `on` is a list of `"failure"` and/or `"success"`. |
+| `notify.format` | string | `raw` | One of `raw`, `slack`, `feishu`, `dingtalk`. `raw` posts the full JSON payload; the chat formats wrap the summary text in the platform's incoming-webhook envelope, so the message renders in Slack/Feishu/DingTalk without a relay service. |
+
+Cron schedules are evaluated in **UTC** by default; prefix the expression with `CRON_TZ=<zone>` to evaluate it in a specific timezone:
+
+```yaml
+schedule: "CRON_TZ=Asia/Shanghai 0 2 * * *"   # 02:00 Shanghai time, every day
+```
 
 > `paused` is **not** a YAML field. Pausing is operational state managed from the console, CLI (`cronova pause <dag_id>`), or API, and is preserved across DAG reloads.
 
@@ -64,6 +71,8 @@ Each entry under `tasks:` describes one task.
 | `priority` | int | `0` | Higher runs first when tasks contend for the same pool. |
 | `retries` | int | inherits `default_retries` | Times to retry on failure. |
 | `retry_delay` | int (seconds) | inherits `default_retry_delay` | Delay between retries. |
+| `retry_backoff` | string | `fixed` | How the wait between retries grows: `fixed` (constant `retry_delay`) or `exponential` (waits `retry_delay·2^(n-1)` before the n-th retry). |
+| `retry_delay_max` | int (seconds) | `0` | Caps the exponential wait. `0` = no explicit cap (a built-in 24h safety ceiling still applies). |
 | `timeout` | int (seconds) | `0` | Per-attempt execution timeout; on breach the whole process group is killed. `0` = none. |
 | `sla` | int (seconds) | `0` | Task soft deadline from run start; breach alerts only. |
 | `trigger_rule` | string | `all_success` | When to run relative to upstream states. See [Trigger rules](#trigger-rules). |
