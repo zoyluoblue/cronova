@@ -89,7 +89,12 @@ func EvalTriggerRule(rule string, deps []TaskState) (ready, blocked bool) {
 		switch s {
 		case TaskSuccess:
 			succ++
-		case TaskFailed, TaskUpstreamFailed:
+		// timed_out and cancelled are terminal non-successes: they must block an
+		// all_success downstream (and satisfy one_failed/all_failed) exactly like a
+		// plain failure. Omitting them left a downstream neither ready nor blocked —
+		// a run could wedge in `running` forever after a partial retry of a timed-out
+		// or cancelled task.
+		case TaskFailed, TaskUpstreamFailed, TaskTimedOut, TaskCancelled:
 			fail++
 		case TaskSkipped:
 			skip++

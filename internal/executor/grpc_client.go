@@ -42,6 +42,7 @@ func (c *GRPCClient) Launch(ctx context.Context, spec Spec) (string, error) {
 		TimeoutSeconds: int64(spec.Timeout / time.Second),
 		LogPath:        spec.LogPath,
 		Dir:            spec.Dir,
+		Redact:         spec.Redact,
 	})
 	if err != nil {
 		return "", err

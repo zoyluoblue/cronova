@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,15 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// CSRF defense-in-depth: reject cross-origin state-changing requests. The
+		// session cookie is SameSite=Lax (which already blocks most cross-site
+		// POSTs), but an Origin/Referer check closes the residual gap and covers
+		// login CSRF too. Machine clients (Authorization: Bearer) are exempt — they
+		// are legitimately cross-origin and carry no ambient cookie to abuse.
+		if isUnsafeMethod(r.Method) && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") && !sameOrigin(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
+			return
+		}
 		p := r.URL.Path
 		if public[p] || !strings.HasPrefix(p, "/api/") {
 			next.ServeHTTP(w, r)
@@ -107,6 +117,55 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// isUnsafeMethod reports whether the HTTP method mutates state (so it warrants a
+// CSRF origin check). GET/HEAD/OPTIONS are safe/idempotent reads.
+func isUnsafeMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// sameOrigin reports whether a browser request originated from this same host. It
+// prefers the Origin header and falls back to Referer. A request with NEITHER
+// (curl, server-to-server) is treated as same-origin — browsers always send one
+// on a cross-origin unsafe request, so their absence means it is not a
+// browser-driven cross-site attack.
+//
+// The comparison is against the PUBLIC host: behind a TLS-terminating reverse
+// proxy the browser Origin carries the external hostname while r.Host is the
+// internal upstream address, so we honor X-Forwarded-Host first (the standard
+// header proxies set). Otherwise a proxy that does not rewrite Host would make
+// every state-changing console request fail the check.
+func sameOrigin(r *http.Request) bool {
+	src := r.Header.Get("Origin")
+	if src == "" {
+		src = r.Header.Get("Referer")
+	}
+	if src == "" {
+		return true // no browser origin to compare — not a cross-site form post
+	}
+	u, err := url.Parse(src)
+	if err != nil {
+		return false
+	}
+	return u.Host == effectiveHost(r)
+}
+
+// effectiveHost is the host the browser addressed: the first X-Forwarded-Host
+// value if a proxy set one, else the request's own Host.
+func effectiveHost(r *http.Request) string {
+	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+		// A proxy may append a comma-separated chain; the client-facing host is first.
+		if i := strings.IndexByte(xfh, ','); i >= 0 {
+			xfh = xfh[:i]
+		}
+		return strings.TrimSpace(xfh)
+	}
+	return r.Host
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, ttl time.Duration) {

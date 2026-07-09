@@ -30,6 +30,12 @@ message LaunchRequest {
   // its staged directory. Assumes a filesystem shared with the scheduler that
   // staged it (same-host / shared mount) — the same assumption log_path makes.
   string dir = 7;
+  // redact holds resolved secret values (connection passwords) substituted into
+  // this task. The executor masks every occurrence of them in EVERYTHING it writes
+  // to the task log — the "$ ..." command echo and the child process's own
+  // stdout/stderr — so a secret never lands in the log even via a traceback or a
+  // driver error. Empty => no redaction.
+  repeated string redact = 8;
 }
 
 message LaunchResponse {

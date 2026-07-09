@@ -30,6 +30,7 @@ type Engine interface {
 	Backfill(ctx context.Context, dagID string, from, to time.Time) (created, skipped int, err error)
 	CreateDAG(ctx context.Context, yamlText string) (string, error)
 	DeleteDAG(ctx context.Context, dagID string) error
+	SetPaused(ctx context.Context, dagID string, paused bool) error
 	NextSchedule(ctx context.Context, d *model.DAG) (time.Time, bool)
 	CancelRun(ctx context.Context, runID string) error
 	RetryRun(ctx context.Context, runID string) error
@@ -865,7 +866,9 @@ func (s *Server) nextScheduleLabel(ctx context.Context, d *model.DAG) string {
 
 func (s *Server) pauseDAG(w http.ResponseWriter, r *http.Request) {
 	paused := r.URL.Query().Get("paused") != "false" // default true
-	if err := s.store.SetDAGPaused(r.Context(), r.PathValue("id"), paused); err != nil {
+	// Route through the engine (not the store directly) so the scheduler's DAG
+	// cache is refreshed too — otherwise the next tick still schedules the DAG.
+	if err := s.eng.SetPaused(r.Context(), r.PathValue("id"), paused); err != nil {
 		mapErr(w, err)
 		return
 	}

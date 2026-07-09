@@ -177,6 +177,16 @@ func (s *Scheduler) registerDAG(ctx context.Context, d *model.DAG) error {
 		sched = sc
 	}
 	s.mu.Lock()
+	// Reconcile the operational `paused` flag from the store, UNDER the same lock as
+	// the cache publish. UpsertDAG preserves the existing paused column (it is not
+	// part of the YAML) but never writes it back into d, and the parser always
+	// leaves d.Paused=false — so without this read-back a restart (LoadDAGs) or an
+	// editor save would cache Paused=false and silently resume a store-paused DAG.
+	// Doing the read + publish atomically also serializes with SetPaused's locked
+	// swap, so a pause that lands concurrently is never clobbered by a stale publish.
+	if sd, err := s.store.GetDAG(ctx, d.DagID); err == nil {
+		d.Paused = sd.Paused
+	}
 	s.dags[d.DagID] = d
 	if sched != nil {
 		s.schedules[d.DagID] = sched
@@ -241,6 +251,29 @@ func (s *Scheduler) DeleteDAG(ctx context.Context, dagID string) error {
 		}
 	}
 	s.log.Info("dag archived (soft-deleted)", "dag", dagID)
+	return nil
+}
+
+// SetPaused toggles a DAG's scheduling. It persists the change (source of truth)
+// AND refreshes the live cache, so the very next tick honors it — the API used to
+// write only the store row, leaving createDueRuns reading a stale cached
+// d.Paused=false and scheduling a "paused" DAG until the next reload.
+//
+// The cache is refreshed by SWAPPING in a shallow copy rather than mutating the
+// existing *model.DAG in place: createDueRuns reads d.Paused from a pointer it
+// snapshotted outside s.mu, so an in-place write would be a data race. The old
+// pointer stays immutable; the swap is race-free.
+func (s *Scheduler) SetPaused(ctx context.Context, dagID string, paused bool) error {
+	if err := s.store.SetDAGPaused(ctx, dagID, paused); err != nil {
+		return err // ErrNotFound if the DAG is absent or soft-deleted
+	}
+	s.mu.Lock()
+	if d, ok := s.dags[dagID]; ok {
+		cp := *d // shallow copy; the shared Tasks slice is never mutated in place
+		cp.Paused = paused
+		s.dags[dagID] = &cp
+	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -847,11 +880,14 @@ func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
 	for _, d := range s.allDAGs() {
 		// d comes from the cache (allDAGs), so d.Tasks is the parsed task set; a
 		// 0-task shell is never scheduled.
-		if d.Paused || d.Schedule == "" || len(d.Tasks) == 0 {
+		if d.Schedule == "" || len(d.Tasks) == 0 {
 			continue
 		}
-		_, sched, ok := s.cachedDAG(d.DagID)
-		if !ok || sched == nil {
+		// Re-read the DAG under the lock and gate on THAT Paused, not the pointer
+		// snapshotted by allDAGs(): SetPaused swaps in a fresh pointer, so a pause
+		// that landed after the snapshot is still honored on this same tick.
+		cd, sched, ok := s.cachedDAG(d.DagID)
+		if !ok || sched == nil || cd.Paused {
 			continue
 		}
 		next := sched.Next(s.scheduleAnchor(ctx, d))
@@ -1098,8 +1134,8 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			allTerminal = false
 		}
 		switch ti.State {
-		case model.TaskFailed, model.TaskUpstreamFailed:
-			anyFailed = true
+		case model.TaskFailed, model.TaskUpstreamFailed, model.TaskTimedOut:
+			anyFailed = true // a leftover timed_out task must fail the run, not pass as success
 		case model.TaskCancelled:
 			anyCancelled = true
 		}
@@ -1346,7 +1382,12 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	base := templateVars(run, t, ti.TryNumber)
 	resolve := s.templateResolver(ctx, base, run.Params)
 	env := taskEnv(base, run.Params)
-	command := renderCommand(t.Command, resolve)
+	// secrets accumulates every connection-password value substituted into this
+	// task, so we can mask them from anything echoed to the log (the "$ ..." line
+	// and, for http tasks, the request URL). The command still runs with the real
+	// values — only the log echo is redacted.
+	var secrets []string
+	command := renderCommand(t.Command, collectSecrets(resolve, &secrets))
 
 	// Project attach: stage a fresh copy of the uploaded project and run the
 	// command with cwd = that copy (so `python3 main.py` resolves). The workspace
@@ -1386,18 +1427,24 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	switch t.Type {
 	case "http":
 		if t.HTTP != nil {
-			blob, _ := json.Marshal(resolveHTTPSpec(*t.HTTP, resolve))
+			// The secrets substituted into url/headers/body are collected so the
+			// executor masks them in run-op's echoed request line (child output).
+			hspec := resolveHTTPSpec(*t.HTTP, collectSecrets(resolve, &secrets))
+			blob, _ := json.Marshal(hspec)
 			env["CRONOVA_OP_SPEC"] = string(blob)
 			command = shellQuote(s.opBinary) + " run-op http"
 		}
 	case "python":
-		// `command` already holds the templated Python code.
+		// `command` already holds the templated Python code (its secrets are in
+		// `secrets`); the executor masks them in the interpreter's traceback output.
 		blob, _ := json.Marshal(map[string]string{"code": command})
 		env["CRONOVA_OP_SPEC"] = string(blob)
 		command = shellQuote(s.opBinary) + " run-op python"
 	case "sql":
 		// `command` already holds the templated query; build driver+DSN from the conn.
-		blob, _ := json.Marshal(s.sqlOpSpec(ctx, t.Conn, command))
+		// The DSN password bypasses template resolution, so collect it explicitly so
+		// a driver error that echoes the DSN is redacted from the log.
+		blob, _ := json.Marshal(s.sqlOpSpec(ctx, t.Conn, command, &secrets))
 		env["CRONOVA_OP_SPEC"] = string(blob)
 		command = shellQuote(s.opBinary) + " run-op sql"
 	}
@@ -1409,6 +1456,7 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 		Timeout:   time.Duration(t.Timeout) * time.Second,
 		LogPath:   ti.LogPath,
 		Dir:       workspace, // "" unless a project is attached
+		Redact:    secrets,   // executor masks these in the echo AND child output
 	}
 	if s.taskCancelled(ctx, ti.ID) {
 		return // a CancelRun landed before we launched — don't start the process
@@ -1567,22 +1615,43 @@ func (s *Scheduler) Recover(ctx context.Context) error {
 				now := time.Now().UTC()
 				ti.StartedAt = &now
 			}
-			if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			// Guarded CAS (ref match + non-terminal), NOT a blind write: the console
+			// is already live during recovery, so a CancelRun could have marked this
+			// task terminal between our Probe and this write. A blind UPDATE would
+			// resurrect the cancelled task; the CAS just fails and we skip reattach.
+			applied, err := s.store.UpdateTaskInstanceGuarded(ctx, ti, ref)
+			if err != nil {
 				s.log.Error("recover mark running", "ti", ti.ID, "err", err)
+				continue
+			}
+			if !applied {
+				// A CancelRun made the row terminal while its process is still live on
+				// the executor. Kill it (mirrors the launch-race path) so we don't leave
+				// an orphan running under a cancelled task, then skip reattach.
+				_ = s.exec.Cancel(ctx, ref)
+				s.log.Info("recover: task cancelled concurrently, killed orphan", "ti", ti.ID, "ref", ref)
 				continue
 			}
 			s.reattach(ctx, ti)
 			reattached++
 		case executor.PhaseUnknown:
 			// Never launched (crashed between queued-write and Launch): undo this
-			// attempt's try increment and re-run it.
+			// attempt's try increment and re-run it. Guarded on the OLD ref so a
+			// concurrent cancel/retry (which makes the row terminal or rewrites the
+			// ref) wins instead of being clobbered by this reset.
+			oldRef := ref
 			ti.State = model.TaskScheduled
 			ti.ExecutorRef = ""
 			if ti.TryNumber > 0 {
 				ti.TryNumber--
 			}
-			if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+			applied, err := s.store.UpdateTaskInstanceGuarded(ctx, ti, oldRef)
+			if err != nil {
 				s.log.Error("recover reset queued", "ti", ti.ID, "err", err)
+				continue
+			}
+			if !applied {
+				s.log.Info("recover: task changed concurrently, skip reset", "ti", ti.ID, "ref", oldRef)
 				continue
 			}
 			reset++
@@ -1661,6 +1730,27 @@ func taskEnv(base, params map[string]string) map[string]string {
 // dotted names too (var.X, conn.ID.field, params.KEY), but never partial words.
 var templateRe = regexp.MustCompile(`\{\{\s*([\w.]+)\s*\}\}`)
 
+// isSecretKey reports whether a template key names a value that must never be
+// echoed to a task log — currently any connection password ({{ conn.ID.password }}
+// or a nested {{ conn.ID.extra.password }}).
+func isSecretKey(key string) bool {
+	return strings.HasPrefix(key, "conn.") && strings.HasSuffix(key, ".password")
+}
+
+// collectSecrets wraps a resolver so that every secret value it hands back (see
+// isSecretKey) is appended to *out. The caller uses *out to redact those exact
+// substrings from anything it writes to the log, while the task still executes
+// with the real resolved values.
+func collectSecrets(resolve func(string) (string, bool), out *[]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := resolve(key)
+		if ok && v != "" && isSecretKey(key) {
+			*out = append(*out, v)
+		}
+		return v, ok
+	}
+}
+
 // renderCommand substitutes {{ name }} placeholders via resolve. Unknown names
 // are left as-is so unrelated shell braces are not mangled.
 func renderCommand(cmd string, resolve func(string) (string, bool)) string {
@@ -1698,10 +1788,16 @@ func shellQuote(s string) string {
 // sqlOpSpec resolves a sql task's connection into a driver+DSN. A resolution
 // failure is carried in the spec's Err (run-op logs it and fails the task) rather
 // than aborting dispatch, so the failure shows up in the task log like any other.
-func (s *Scheduler) sqlOpSpec(ctx context.Context, connID, query string) operator.SQLSpec {
+// The connection password is appended to *secrets (it is embedded in the DSN,
+// bypassing template resolution) so the executor can redact it from any driver
+// error the operator echoes.
+func (s *Scheduler) sqlOpSpec(ctx context.Context, connID, query string, secrets *[]string) operator.SQLSpec {
 	c, err := s.store.GetConnection(ctx, connID)
 	if err != nil {
 		return operator.SQLSpec{Query: query, Err: fmt.Sprintf("connection %q not found: %v", connID, err)}
+	}
+	if secrets != nil && c.Password != "" {
+		*secrets = append(*secrets, c.Password)
 	}
 	driver, dsn, err := operator.BuildDSN(c)
 	if err != nil {

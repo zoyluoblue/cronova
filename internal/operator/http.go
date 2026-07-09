@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func RunHTTP(ctx context.Context, spec model.HTTPSpec, out io.Writer) int {
 	for k, v := range spec.Headers {
 		req.Header.Set(k, v)
 	}
-	fmt.Fprintf(out, "> %s %s\n", method, url)
+	fmt.Fprintf(out, "> %s %s\n", method, redactURL(url))
 
 	start := time.Now()
 	// No SSRF guard here (unlike notify webhooks): an http task is a deliberate
@@ -71,6 +72,22 @@ func RunHTTP(ctx context.Context, spec model.HTTPSpec, out io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// redactURL masks any password embedded in a URL's userinfo before it is echoed
+// to the task log. Connection-password substitutions are redacted separately (and
+// more broadly) by the executor's log sink; this guards a password typed directly
+// into the URL, which never passes through the scheduler's secret collection.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if _, hasPw := u.User.Password(); hasPw {
+		u.User = url.UserPassword(u.User.Username(), "****")
+		return u.String()
+	}
+	return raw
 }
 
 // statusAccepted reports whether code is a success. With no expected list, any

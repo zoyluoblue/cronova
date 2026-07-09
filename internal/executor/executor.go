@@ -26,6 +26,11 @@ type Spec struct {
 	Timeout   time.Duration     // 0 = no timeout
 	LogPath   string            // file to write combined stdout/stderr
 	Dir       string            // working directory (cmd.Dir); "" = inherit the executor's cwd
+	// Redact holds resolved secret values (connection passwords) substituted into
+	// this task. The executor masks every occurrence in EVERYTHING it writes to the
+	// log — the "$ ..." echo and the child's own stdout/stderr — so a secret never
+	// reaches the log even via a traceback or driver error.
+	Redact []string
 }
 
 // Phase is a task's coarse execution state as reported by Probe.

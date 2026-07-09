@@ -21,15 +21,16 @@ type stubTrigger struct {
 	got         string
 	gotParams   map[string]string
 	createdYML  string
-	triggerErr  error  // if set, TriggerManual returns it (e.g. model.ErrNoTasks)
-	deleted     string // last dagID passed to DeleteDAG
-	deleteErr   error  // if set, DeleteDAG returns it (e.g. model.ErrActiveRuns)
-	cancelled   string // last runID passed to CancelRun
-	retriedRun  string // last runID passed to RetryRun
-	retriedTask string // last "runID/taskID" passed to RetryTask
-	markedTask  string // last "runID/taskID=state" passed to MarkTask
-	markedRun   string // last "runID=state" passed to MarkRun
-	opErr       error  // if set, cancel/retry/mark return it
+	triggerErr  error         // if set, TriggerManual returns it (e.g. model.ErrNoTasks)
+	deleted     string        // last dagID passed to DeleteDAG
+	deleteErr   error         // if set, DeleteDAG returns it (e.g. model.ErrActiveRuns)
+	cancelled   string        // last runID passed to CancelRun
+	retriedRun  string        // last runID passed to RetryRun
+	retriedTask string        // last "runID/taskID" passed to RetryTask
+	markedTask  string        // last "runID/taskID=state" passed to MarkTask
+	markedRun   string        // last "runID=state" passed to MarkRun
+	opErr       error         // if set, cancel/retry/mark return it
+	st          *sqlite.Store // real store, so SetPaused writes through like the scheduler does
 }
 
 func (s *stubTrigger) TriggerManual(_ context.Context, dagID string, params map[string]string) (string, error) {
@@ -57,6 +58,13 @@ func (s *stubTrigger) CreateDAG(_ context.Context, yamlText string) (string, err
 func (s *stubTrigger) DeleteDAG(_ context.Context, dagID string) error {
 	s.deleted = dagID
 	return s.deleteErr
+}
+
+func (s *stubTrigger) SetPaused(ctx context.Context, dagID string, paused bool) error {
+	if s.st == nil {
+		return nil
+	}
+	return s.st.SetDAGPaused(ctx, dagID, paused)
 }
 
 func (s *stubTrigger) NextSchedule(_ context.Context, _ *model.DAG) (time.Time, bool) {
@@ -109,7 +117,7 @@ func setup(t *testing.T) (http.Handler, *sqlite.Store, *stubTrigger, string) {
 	if err := st.CreateTaskInstance(ctx, ti); err != nil {
 		t.Fatal(err)
 	}
-	trig := &stubTrigger{}
+	trig := &stubTrigger{st: st}
 	return New(st, trig, dir, nil, Info{Executor: "in-process", Tick: "2s"}).Handler(), st, trig, logPath
 }
 

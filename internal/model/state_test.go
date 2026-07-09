@@ -53,6 +53,7 @@ func TestTaskStateIsTerminal(t *testing.T) {
 
 func TestEvalTriggerRule(t *testing.T) {
 	S, F, R, K, U := TaskSuccess, TaskFailed, TaskRunning, TaskSkipped, TaskUpstreamFailed
+	TO, C := TaskTimedOut, TaskCancelled
 	cases := []struct {
 		rule           string
 		deps           []TaskState
@@ -62,6 +63,14 @@ func TestEvalTriggerRule(t *testing.T) {
 		{RuleAllSuccess, []TaskState{S, F}, false, true},
 		{RuleAllSuccess, []TaskState{S, R}, false, false}, // wait
 		{RuleAllSuccess, []TaskState{S, K}, false, true},  // skipped breaks all_success
+		// timed_out and cancelled are terminal non-successes: they must count as a
+		// failure so a downstream is decisively blocked (never left waiting forever).
+		{RuleAllSuccess, []TaskState{S, TO}, false, true}, // timed_out blocks all_success
+		{RuleAllSuccess, []TaskState{S, C}, false, true},  // cancelled blocks all_success
+		{RuleOneFailed, []TaskState{S, TO}, true, false},  // timed_out satisfies one_failed
+		{RuleOneFailed, []TaskState{S, C}, true, false},   // cancelled satisfies one_failed
+		{RuleAllFailed, []TaskState{TO, C}, true, false},  // both count as failed
+		{RuleNoneFailed, []TaskState{S, TO}, false, true}, // timed_out is a failure
 		{RuleAllDone, []TaskState{S, F}, true, false},     // runs despite a failure
 		{RuleAllDone, []TaskState{S, R}, false, false},    // wait for all terminal
 		{RuleAllDone, []TaskState{U, F}, true, false},

@@ -101,6 +101,74 @@ func TestAuthProtectsAPIAndPublicPaths(t *testing.T) {
 	}
 }
 
+func TestCSRFOriginCheck(t *testing.T) {
+	h := authServer(t, model.RoleAdmin)
+	cookie := loginCookie(t, h, "u", "pw")
+
+	post := func(origin, authz string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/pools/p", strings.NewReader(`{"slots":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		} else {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// httptest.NewRequest sets Host = example.com. A cross-origin cookie write is blocked.
+	if rec := post("http://evil.example", ""); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "cross-origin") {
+		t.Fatalf("cross-origin write = %d %s, want 403 cross-origin", rec.Code, rec.Body.String())
+	}
+	// Same-origin write passes the CSRF gate (not a 403 cross-origin).
+	if rec := post("http://example.com", ""); rec.Code == http.StatusForbidden {
+		t.Fatalf("same-origin write blocked: %d %s", rec.Code, rec.Body.String())
+	}
+	// A request with no Origin/Referer (curl) is allowed — browsers always send one cross-origin.
+	if rec := post("", ""); rec.Code == http.StatusForbidden {
+		t.Fatalf("origin-less write blocked: %d %s", rec.Code, rec.Body.String())
+	}
+	// Bearer clients are exempt: a cross-origin token request skips the CSRF gate and
+	// fails as 401 (bad token), never 403 cross-origin.
+	if rec := post("http://evil.example", "Bearer nope"); rec.Code == http.StatusForbidden {
+		t.Fatalf("bearer client should bypass CSRF gate, got 403: %s", rec.Body.String())
+	}
+}
+
+func TestSameOrigin(t *testing.T) {
+	mk := func(origin, referer, host string) *http.Request {
+		r := httptest.NewRequest("POST", "/x", nil)
+		r.Host = host
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
+	if !sameOrigin(mk("http://h:8090", "", "h:8090")) {
+		t.Error("matching Origin should be same-origin")
+	}
+	if sameOrigin(mk("http://evil", "", "h:8090")) {
+		t.Error("mismatched Origin should not be same-origin")
+	}
+	if !sameOrigin(mk("", "http://h:8090/page", "h:8090")) {
+		t.Error("matching Referer should be same-origin")
+	}
+	if !sameOrigin(mk("", "", "h:8090")) {
+		t.Error("no Origin/Referer should default to same-origin (non-browser)")
+	}
+	if isUnsafeMethod(http.MethodGet) || !isUnsafeMethod(http.MethodPost) {
+		t.Error("GET safe, POST unsafe")
+	}
+}
+
 func TestViewerCannotWrite(t *testing.T) {
 	h := authServer(t, model.RoleViewer)
 	cookie := loginCookie(t, h, "u", "pw")

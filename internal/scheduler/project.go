@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -68,7 +70,27 @@ func (s *Scheduler) stageProject(name, ref string) (string, error) {
 }
 
 // sanitizeRef turns a task ref ("run_id/task_id") into a single safe dir name.
+//
+// The character map is many-to-one ("data.load" and "data-load" both fold to
+// "data-load"), so two distinct refs could otherwise share one workspace dir and
+// clobber or GC each other. To keep the name INJECTIVE we append a short hash of
+// the ORIGINAL ref whenever folding actually changed something. gcWorkspaces
+// derives its keep-set through this same function, so the suffix stays consistent
+// on both sides.
 func sanitizeRef(ref string) string {
+	safe := legacySanitizeRef(ref)
+	if safe == ref {
+		return safe // no folding: already unambiguous
+	}
+	sum := sha256.Sum256([]byte(ref))
+	return safe + "-" + hex.EncodeToString(sum[:4])
+}
+
+// legacySanitizeRef is the pre-injective-fix mapping (no hash suffix). It exists
+// ONLY so gcWorkspaces can also keep workspaces staged by an older binary: after
+// an in-place upgrade, a recovered still-running task's workspace carries this old
+// name and must not be swept as an orphan (which would delete a live task's cwd).
+func legacySanitizeRef(ref string) string {
 	return strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 			return r
@@ -136,6 +158,10 @@ func (s *Scheduler) gcWorkspaces(ctx context.Context, minAge time.Duration) {
 		for _, ti := range tis {
 			if ti.ExecutorRef != "" {
 				keep[sanitizeRef(ti.ExecutorRef)] = true
+				// Also keep the pre-upgrade (un-hashed) name so a task reattached across
+				// a binary upgrade — whose workspace still carries the old name and is
+				// NOT re-staged by recovery — is never swept out from under itself.
+				keep[legacySanitizeRef(ti.ExecutorRef)] = true
 			}
 		}
 	}

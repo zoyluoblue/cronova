@@ -85,7 +85,13 @@ type LaunchRequest struct {
 	// the executor's cwd. Used to run an uploaded project's `python3 main.py` from
 	// its staged directory. Assumes a filesystem shared with the scheduler that
 	// staged it (same-host / shared mount) — the same assumption log_path makes.
-	Dir           string `protobuf:"bytes,7,opt,name=dir,proto3" json:"dir,omitempty"`
+	Dir string `protobuf:"bytes,7,opt,name=dir,proto3" json:"dir,omitempty"`
+	// redact holds resolved secret values (connection passwords) substituted into
+	// this task. The executor masks every occurrence of them in EVERYTHING it writes
+	// to the task log — the "$ ..." command echo and the child process's own
+	// stdout/stderr — so a secret never lands in the log even via a traceback or a
+	// driver error. Empty => no redaction.
+	Redact        []string `protobuf:"bytes,8,rep,name=redact,proto3" json:"redact,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -167,6 +173,13 @@ func (x *LaunchRequest) GetDir() string {
 		return x.Dir
 	}
 	return ""
+}
+
+func (x *LaunchRequest) GetRedact() []string {
+	if x != nil {
+		return x.Redact
+	}
+	return nil
 }
 
 type LaunchResponse struct {
@@ -401,7 +414,7 @@ var File_cronova_executor_v1_executor_proto protoreflect.FileDescriptor
 
 const file_cronova_executor_v1_executor_proto_rawDesc = "" +
 	"\n" +
-	"\"cronova/executor/v1/executor.proto\x12\x13cronova.executor.v1\"\xaa\x02\n" +
+	"\"cronova/executor/v1/executor.proto\x12\x13cronova.executor.v1\"\xc2\x02\n" +
 	"\rLaunchRequest\x12\x1e\n" +
 	"\vtask_run_id\x18\x01 \x01(\tR\ttaskRunId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
@@ -409,7 +422,8 @@ const file_cronova_executor_v1_executor_proto_rawDesc = "" +
 	"\x03env\x18\x04 \x03(\v2+.cronova.executor.v1.LaunchRequest.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x03R\x0etimeoutSeconds\x12\x19\n" +
 	"\blog_path\x18\x06 \x01(\tR\alogPath\x12\x10\n" +
-	"\x03dir\x18\a \x01(\tR\x03dir\x1a6\n" +
+	"\x03dir\x18\a \x01(\tR\x03dir\x12\x16\n" +
+	"\x06redact\x18\b \x03(\tR\x06redact\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +

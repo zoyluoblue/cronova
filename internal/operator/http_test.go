@@ -40,6 +40,22 @@ func TestRunHTTPSuccess(t *testing.T) {
 	}
 }
 
+func TestRedactURLUserinfo(t *testing.T) {
+	// A password in the URL userinfo is masked in the echoed request line.
+	// (Connection-password substitutions are redacted separately by the executor.)
+	got := redactURL("https://admin:hunter2@example.com/api")
+	if strings.Contains(got, "hunter2") {
+		t.Fatalf("userinfo password leaked: %q", got)
+	}
+	if !strings.Contains(got, "admin") {
+		t.Fatalf("username should be preserved: %q", got)
+	}
+	// A URL without userinfo is returned unchanged.
+	if got := redactURL("https://example.com/hook?x=1"); got != "https://example.com/hook?x=1" {
+		t.Fatalf("plain URL altered: %q", got)
+	}
+}
+
 func TestRunHTTPUnexpectedStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

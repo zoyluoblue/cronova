@@ -129,6 +129,163 @@ func TestLocalIdempotentLaunch(t *testing.T) {
 	waitExited(t, e, r1, 3*time.Second)
 }
 
+func TestRunnerRedactsSecretsInLog(t *testing.T) {
+	r := NewRunner()
+	logPath := filepath.Join(t.TempDir(), "red.log")
+	secret := "S3cr3tP@ss"
+	// The command embeds the secret (echoed on the "$ " line) AND prints it with NO
+	// trailing newline (so it flushes only on Close) — both must be masked.
+	ref, err := r.Launch(Spec{
+		TaskRunID: "r/red/1",
+		Command:   "printf 'pw=%s' " + secret,
+		LogPath:   logPath,
+		Redact:    []string{secret},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for r.Probe(ref).Phase != PhaseExited {
+		if time.Now().After(deadline) {
+			t.Fatal("task never exited")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	if strings.Contains(log, secret) {
+		t.Fatalf("secret leaked into task log:\n%s", log)
+	}
+	if !strings.Contains(log, "****") {
+		t.Fatalf("expected masked marker in log:\n%s", log)
+	}
+}
+
+func TestRedactWriterCappedBuffer(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "capped.log")
+	f, err := os.Create(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "TOPSECRET"
+	rw := newLogSink(f, []string{secret}).(*redactWriter)
+
+	// A newline-less stream larger than the cap forces a mid-stream flush; secrets
+	// on BOTH sides of the flush (well clear of the cut) must still be masked, and
+	// no bytes are lost.
+	rw.Write([]byte(secret))                                 // before the forced flush
+	rw.Write([]byte(strings.Repeat("x", redactBufCap+4096))) // trips the cap
+	rw.Write([]byte(secret))                                 // after the forced flush
+	rw.Write([]byte("\n"))
+	if err := rw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatal("secret leaked past the capped buffer")
+	}
+	if !strings.Contains(string(data), "****") {
+		t.Fatal("expected mask marker in capped output")
+	}
+	// buffer never exceeded cap + one write + overlap — a rough bound check that the
+	// stream was actually flushed in pieces rather than all held in memory.
+	if len(data) < redactBufCap {
+		t.Fatalf("expected the large stream to be written out, got %d bytes", len(data))
+	}
+}
+
+// TestRedactWriterStraddleNoLeak drives a secret across the cap flush boundary so
+// a naive cut would land inside it and emit its prefix in cleartext (the value
+// then reassembles in the log). The flush must never split a complete secret —
+// including the hard case where a secret's tail byte is also the start of ANOTHER
+// secret (or the secret's own border), which fooled an earlier prefix-only cut.
+func TestRedactWriterStraddleNoLeak(t *testing.T) {
+	cases := []struct {
+		name    string
+		secrets []string
+		leak    string // the value that must never appear whole in the log
+		payload string // written right after the filler, in one write
+	}{
+		{"single", []string{"PASSWORD12"}, "PASSWORD12", "PASSWORD12yyyyyy"},
+		{"cross-overlap", []string{"AB", "BXY"}, "AB", "ABqqqqqq"},        // "AB" ends in "B", a prefix of "BXY"
+		{"self-border", []string{"aba"}, "aba", "abaqqqqqq"},              // "aba" border "a"
+		{"nested", []string{"pass", "password"}, "password", "password!"}, // one secret prefixes another
+	}
+	for _, c := range cases {
+		for fill := redactBufCap - len(c.payload); fill <= redactBufCap+1; fill++ {
+			tmp := filepath.Join(t.TempDir(), "straddle.log")
+			f, err := os.Create(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rw := newLogSink(f, c.secrets).(*redactWriter)
+			rw.Write([]byte(strings.Repeat("x", fill)))
+			rw.Write([]byte(c.payload))
+			rw.Write([]byte("\n"))
+			if err := rw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), c.leak) {
+				t.Fatalf("%s fill=%d: secret %q leaked whole across the cap flush", c.name, fill, c.leak)
+			}
+		}
+	}
+}
+
+func TestRunnerSweepFinished(t *testing.T) {
+	r := NewRunner()
+	dir := t.TempDir()
+
+	done, err := r.Launch(Spec{TaskRunID: "r/done/1", Command: "true", LogPath: filepath.Join(dir, "d.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := r.Launch(Spec{TaskRunID: "r/live/1", Command: "sleep 30", LogPath: filepath.Join(dir, "l.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Cancel(live) })
+
+	// wait for the short task to finish
+	deadline := time.Now().Add(3 * time.Second)
+	for r.Probe(done).Phase != PhaseExited {
+		if time.Now().After(deadline) {
+			t.Fatal("done task never exited")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Age the finished entry past the TTL and sweep: it evicts, the running one stays.
+	r.mu.Lock()
+	r.tasks[done].finishedAt = time.Now().Add(-2 * finishedTaskTTL)
+	r.sweepFinishedLocked(time.Now())
+	_, doneKept := r.tasks[done]
+	_, liveKept := r.tasks[live]
+	r.mu.Unlock()
+
+	if doneKept {
+		t.Error("aged finished task should be evicted")
+	}
+	if !liveKept {
+		t.Error("still-running task must never be swept")
+	}
+	// A re-Probe of the evicted ref reports Unknown (registry no longer holds it).
+	if p := r.Probe(done).Phase; p != PhaseUnknown {
+		t.Errorf("evicted ref phase = %v, want PhaseUnknown", p)
+	}
+}
+
 func TestLocalProbeUnknown(t *testing.T) {
 	e := NewLocal()
 	st, err := e.Probe(context.Background(), "never-launched")

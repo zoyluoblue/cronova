@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,15 +281,34 @@ func TestGCWorkspaces(t *testing.T) {
 }
 
 func TestSanitizeRef(t *testing.T) {
-	cases := map[string]string{
-		"run_1/task_1":    "run_1-task_1",
-		"a/b/c":           "a-b-c",
-		"weird:ref name!": "weird-ref-name-",
-		"keep_-azAZ09":    "keep_-azAZ09",
+	// A ref with no unsafe rune passes through untouched (no hash suffix).
+	if got := sanitizeRef("keep_-azAZ09"); got != "keep_-azAZ09" {
+		t.Errorf("sanitizeRef(clean) = %q, want unchanged", got)
 	}
-	for in, want := range cases {
-		if got := sanitizeRef(in); got != want {
-			t.Errorf("sanitizeRef(%q) = %q, want %q", in, got, want)
+
+	// Folded refs keep a readable, path-safe prefix…
+	for in, prefix := range map[string]string{
+		"run_1/task_1":    "run_1-task_1-",
+		"a/b/c":           "a-b-c-",
+		"weird:ref name!": "weird-ref-name--",
+	} {
+		got := sanitizeRef(in)
+		if !strings.HasPrefix(got, prefix) {
+			t.Errorf("sanitizeRef(%q) = %q, want prefix %q", in, got, prefix)
 		}
+		if strings.ContainsAny(got, "/. :!") {
+			t.Errorf("sanitizeRef(%q) = %q still contains an unsafe rune", in, got)
+		}
+	}
+
+	// …and the fold is INJECTIVE: two refs that share a folded form (a dot vs a
+	// dash) must NOT collide onto the same workspace dir.
+	if a, b := sanitizeRef("r1/data.load"), sanitizeRef("r1/data-load"); a == b {
+		t.Errorf("sanitizeRef collision: %q == %q", a, b)
+	}
+
+	// Deterministic: gcWorkspaces relies on the same input mapping to the same dir.
+	if a, b := sanitizeRef("r1/data.load"), sanitizeRef("r1/data.load"); a != b {
+		t.Errorf("sanitizeRef not deterministic: %q != %q", a, b)
 	}
 }
