@@ -51,12 +51,12 @@ When you open a run, the log panel at the bottom opens automatically for the mos
 
 The panel gives you:
 
-- **Live tailing** — while the task runs, its stdout/stderr streams into the panel over SSE and the view auto-follows to the newest line. A pulsing *live* indicator shows the stream is open; it disappears when the task finishes.
+- **Live tailing** — while the task runs, its stdout/stderr streams into the panel over SSE and the view auto-follows to the newest line. Opening a large existing log starts from its latest 1 MiB rather than replaying the entire file. A pulsing *live* indicator shows the stream is open; it disappears when the task finishes.
 - **Find in log** — type in the filter box to show only matching lines (case-insensitive), with a running match count.
 - **Download full log** — a link in the panel header downloads the complete captured log file as `<task>.log`.
 
 !!! note
-    The live view buffers the last 5,000 lines (a `showing last 5000 lines` hint appears when trimmed). **Download full log** always serves the entire file. Each attempt writes a fresh log file, so after a retry the panel shows the current attempt's output, not a concatenation of every try.
+    The live view buffers the last 5,000 lines (a `showing last 5000 lines` hint appears when trimmed). **Download full log** streams the entire captured file. Each task attempt is capped at 64 MiB on disk; excess output is discarded after a visible truncation marker. Each retry writes a fresh file, so the panel shows the current attempt, not a concatenation of every try.
 
 ## Recovering a run
 

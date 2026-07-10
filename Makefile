@@ -1,4 +1,4 @@
-# cronova build targets. Requires Go 1.26+ (see go.mod).
+# cronova build targets. Requires Go 1.26.5+ (see go.mod).
 # No CGO: the SQLite driver is pure Go, so binaries are fully static.
 
 PKG        := ./cmd/cronova

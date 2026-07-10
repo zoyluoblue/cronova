@@ -39,6 +39,9 @@ type Store interface {
 	// CreateDagRun inserts a run. It returns ErrAlreadyExists if a run for the
 	// same (dag_id, logical_date) already exists.
 	CreateDagRun(ctx context.Context, r *model.DagRun) error
+	// CreateManualDagRunBounded atomically inserts a manual run only while both
+	// active-run bounds have capacity. It returns model.ErrQueueFull otherwise.
+	CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error
 	GetDagRun(ctx context.Context, runID string) (*model.DagRun, error)
 	GetDagRunByLogicalDate(ctx context.Context, dagID string, logicalDate time.Time) (*model.DagRun, error)
 	ListDagRuns(ctx context.Context, dagID string, limit int) ([]*model.DagRun, error)

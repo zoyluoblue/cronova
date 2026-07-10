@@ -22,20 +22,21 @@ Commands fall into four groups:
 Run the scheduling loop plus the web console and REST API (default `http://localhost:8090`). This is the whole server — cron parsing, catchup, retries, task execution, UI, and API in one process.
 
 ```bash
-cronova serve -db data/cronova.db -dags dags -http :8090
+cronova serve -db data/cronova.db -dags dags -http 127.0.0.1:8090
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `-http` | `:8090` | HTTP address for the console + API (empty to disable). |
+| `-http` | `127.0.0.1:8090` | HTTP address for the console + API (empty to disable). |
 | `-db` | `data/cronova.db` | SQLite metadata database path. |
 | `-dags` | `dags` | Directory of DAG YAML definitions. |
 | `-logs` | `logs` | Directory for task log files. |
 | `-projects` | `~/.cronova/projects` | Directory for uploaded [project files](tutorial/projects.md). |
-| `-executor` | *(in-process)* | gRPC executor target, e.g. `unix:///tmp/cronova-executor.sock`. Empty = in-process executor. |
+| `-executor` | *(in-process)* | Absolute Unix-socket executor target. Empty = in-process executor; TCP targets are rejected. |
 | `-tick` | `2s` | Scheduling-loop interval. |
 | `-retention` | `2160h` (90 days) | Delete finished runs **and their logs** older than this; `0` = keep forever. See [`cronova prune`](#cronova-prune) for one-off cleanups. |
 | `-auth` | off | Require login for the console/API (overrides config). |
+| `-allow-unauthenticated-remote` | off | **Dangerous:** permit auth-off serving on a non-loopback address. |
 | `-config` | `cronova.yaml` | Path to a YAML config file (optional). |
 | `key_file` / `CRONOVA_KEY_FILE` | `cronova.key` | Config/env only (no flag): key file that encrypts connection passwords at rest. Auto-generated (`0600`) on first `serve` — back it up; losing it makes stored passwords unreadable. `none` disables encryption (plaintext, with a startup warning). |
 
@@ -46,13 +47,17 @@ Settings resolve in order: built-in defaults ← config file ← `CRONOVA_*` env
 The standalone, crash-recoverable task executor. Run it first, then point the scheduler at its socket with `serve -executor` — tasks survive a scheduler restart. See [Architecture](ARCHITECTURE.md).
 
 ```bash
-cronova-executor -sock /tmp/cronova-executor.sock &
-cronova serve -executor unix:///tmp/cronova-executor.sock
+cronova-executor &
+cronova serve -executor "unix:///tmp/cronova-$(id -u)/executor.sock"
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `-sock` | `/tmp/cronova-executor.sock` | Unix socket path to listen on. |
+| `-sock` | `/tmp/cronova-<uid>/executor.sock` | Unix socket path. Its parent must be private (`0700`); the socket is forced to `0600`. |
+
+The executor API has no separate credentials. Filesystem ownership is its trust
+boundary, so cronova accepts only absolute Unix sockets and refuses a public
+socket directory or any TCP target.
 
 ## Service lifecycle
 
@@ -98,7 +103,7 @@ Non-interactive installs preset values with `CRONOVA_ADMIN_USER`, `CRONOVA_ADMIN
 
 ### `cronova update`
 
-Download a prebuilt release from GitHub, verify its SHA256 checksum, atomically swap the binary (and `cronova-executor`, if installed), refresh the service definition (unit/plist), and restart the service.
+Download a prebuilt release from GitHub, require and verify its SHA256 checksum, atomically swap the binary (and `cronova-executor`, if installed), refresh the service definition (unit/plist), and restart the service. Missing checksum metadata aborts the update.
 
 ```bash
 cronova update                               # latest release
@@ -143,12 +148,12 @@ cronova v0.3.0 darwin/arm64
 Probe the server's readiness endpoint and exit non-zero if unhealthy — a curl-free liveness check for systemd, load balancers, or cron probes.
 
 ```bash
-cronova healthcheck -http :8090 && echo healthy
+cronova healthcheck -http 127.0.0.1:8090 && echo healthy
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `-http` | `:8090` | Server HTTP address (env `CRONOVA_HTTP`). |
+| `-http` | `127.0.0.1:8090` | Server HTTP address (env `CRONOVA_HTTP`). |
 | `-path` | `/readyz` | Path to probe. |
 
 ## Local operations

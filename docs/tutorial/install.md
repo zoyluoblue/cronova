@@ -15,14 +15,14 @@ tar -xzf cronova_darwin_arm64.tar.gz
 chmod +x cronova
 ```
 
-Swap the filename for your platform: `cronova_linux_amd64.tar.gz`, `cronova_linux_arm64.tar.gz`, or `cronova_darwin_amd64.tar.gz`. Each release also attaches a `SHA256SUMS` file if you want to verify the download.
+Swap the filename for your platform: `cronova_linux_amd64.tar.gz`, `cronova_linux_arm64.tar.gz`, or `cronova_darwin_amd64.tar.gz`. Each release attaches `SHA256SUMS`; verify the archive before extracting it. The one-line installer and `cronova update` require this verification and abort if the checksum metadata is missing.
 
 !!! tip
     The tarball is more than the binary: it also unpacks a `dags/` folder with runnable [example DAGs](https://github.com/zoyluoblue/cronova/tree/main/dags), a `cronova.yaml.example` config template, and the standalone `cronova-executor`. Starting from the tarball means the console won't be empty on first launch.
 
 ## Option 2: Build from source
 
-With **Go 1.26+** installed:
+With **Go 1.26.5+** installed:
 
 ```bash
 git clone https://github.com/zoyluoblue/cronova
@@ -86,7 +86,7 @@ You can check the same thing from a second terminal with the CLI:
 Each loaded DAG is listed with its schedule — proof the scheduler is up and reading your DAG directory.
 
 !!! warning
-    Authentication is **off** by default, and a fresh `serve` prints a warning about it: anyone who can reach port 8090 can trigger or delete DAGs. That's fine on your laptop for this tutorial; before exposing cronova to a network, enable login — see [Enabling login](../GETTING_STARTED.md#enabling-login).
+    Authentication is **off** for this plain development `serve`, but the default listener is `127.0.0.1:8090`, so it is reachable only from this machine. Cronova refuses an unauthenticated non-loopback bind unless you explicitly enable the dangerous override. Before network access, enable login — see [Enabling login](../GETTING_STARTED.md#enabling-login).
 
 Stop the server anytime with ++ctrl+c++ — your DAGs and the database stay on disk, ready for the next `./cronova serve`.
 

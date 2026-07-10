@@ -42,6 +42,13 @@ func TestLocalSuccess(t *testing.T) {
 	if !strings.Contains(string(data), "hello") || !strings.Contains(string(data), "world") {
 		t.Errorf("log missing output:\n%s", data)
 	}
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("log mode = %o, want 600", got)
+	}
 }
 
 func TestLocalDir(t *testing.T) {
@@ -201,6 +208,35 @@ func TestRedactWriterCappedBuffer(t *testing.T) {
 	}
 }
 
+func TestTaskLogSinkCapsDiskUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hard-cap.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := newCappedLogSink(f, 16)
+	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	if n, err := sink.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(payload))
+	}
+	if n, err := sink.Write([]byte("more")); err != nil || n != 4 {
+		t.Fatalf("post-cap Write = (%d, %v), want (4, nil)", n, err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), "0123456789abcdef") {
+		t.Fatalf("unexpected retained prefix: %q", data)
+	}
+	if strings.Count(string(data), "log truncated") != 1 || strings.Contains(string(data), "ghijkl") {
+		t.Fatalf("cap marker/output mismatch: %q", data)
+	}
+}
+
 // TestRedactWriterStraddleNoLeak drives a secret across the cap flush boundary so
 // a naive cut would land inside it and emit its prefix in cleartext (the value
 // then reassembles in the log). The flush must never split a complete secret —
@@ -327,5 +363,35 @@ func TestLocalEnvInjection(t *testing.T) {
 	data, _ := os.ReadFile(logPath)
 	if !strings.Contains(string(data), "date=2026-06-09") {
 		t.Errorf("env not injected:\n%s", data)
+	}
+}
+
+func TestTaskEnvironmentFiltersSchedulerSecrets(t *testing.T) {
+	t.Setenv("CRONOVA_ADMIN_PASSWORD", "must-not-reach-task")
+	t.Setenv("CRONOVA_TASK_ENV_ALLOWLIST", "SAFE_PARENT_VALUE")
+	t.Setenv("SAFE_PARENT_VALUE", "allowed")
+
+	e := NewLocal()
+	logPath := filepath.Join(t.TempDir(), "filtered-env.log")
+	ref, err := e.Launch(context.Background(), Spec{
+		TaskRunID: "r/env-filter",
+		Command:   `printf 'admin=%s safe=%s injected=%s\n' "${CRONOVA_ADMIN_PASSWORD-unset}" "$SAFE_PARENT_VALUE" "$CRONOVA_RUN_ID"`,
+		Env:       map[string]string{"CRONOVA_RUN_ID": "run-123"},
+		LogPath:   logPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitExited(t, e, ref, 3*time.Second)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	if strings.Contains(log, "must-not-reach-task") {
+		t.Fatalf("scheduler secret leaked into task environment:\n%s", log)
+	}
+	if !strings.Contains(log, "admin=unset safe=allowed injected=run-123") {
+		t.Fatalf("filtered environment mismatch:\n%s", log)
 	}
 }

@@ -184,7 +184,7 @@ usage:
   cronova api <METHOD> <path> [json-body]     raw call to any REST endpoint
   cronova get <dag_id>                        show a DAG definition
   cronova run <run_id>                        show a run + its task states
-  cronova logs <task_instance_id>             fetch a task's log
+  cronova logs <task_instance_id>             fetch a task's recent log tail
   cronova cancel <run_id>                     cancel an active run
   cronova retry <run_id> [task_id]            retry a run's failed tasks (or one task)
   cronova mark <run_id> [task_id] <state>     operator override of a run/task state
@@ -226,7 +226,7 @@ func parsePositionals(fs *flag.FlagSet, args []string) []string {
 
 func openStore(dbPath string) (*sqlite.Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir: %w", err)
 		}
 	}
@@ -276,9 +276,10 @@ func cmdServe(args []string) error {
 	logDir := fs.String("logs", "logs", "directory for task log files")
 	projectsDir := fs.String("projects", "", "directory for uploaded project files (default ~/.cronova/projects)")
 	tick := fs.Duration("tick", 2*time.Second, "scheduling loop interval")
-	executorAddr := fs.String("executor", "", "gRPC executor target (e.g. unix:///tmp/cronova-executor.sock); empty = in-process executor")
-	httpAddr := fs.String("http", ":8090", "HTTP address for the console API + web UI (empty to disable)")
+	executorAddr := fs.String("executor", "", "executor target (absolute unix:///path socket only); empty = in-process executor")
+	httpAddr := fs.String("http", "127.0.0.1:8090", "HTTP address for the console API + web UI (empty to disable)")
 	authFlag := fs.Bool("auth", false, "require login for the console/API (overrides config)")
+	allowUnauthenticatedRemote := fs.Bool("allow-unauthenticated-remote", false, "DANGEROUS: allow an unauthenticated console on a non-loopback address")
 	retention := fs.Duration("retention", 90*24*time.Hour, "delete finished runs + their logs older than this (0 = keep forever)")
 	_ = fs.Parse(args)
 
@@ -297,6 +298,7 @@ func cmdServe(args []string) error {
 	overlaySetFlags(&cfg, fs, map[string]any{
 		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "tick": tick,
 		"executor": executorAddr, "http": httpAddr, "auth": authFlag, "retention": retention,
+		"allow-unauthenticated-remote": allowUnauthenticatedRemote,
 	})
 	if cfg.Projects == "" {
 		cfg.Projects = defaultProjectsDir() // ~/.cronova/projects (may be "" if no home)
@@ -308,6 +310,9 @@ func cmdServe(args []string) error {
 	}
 	retentionDur, err := parseRetention(cfg.Retention)
 	if err != nil {
+		return err
+	}
+	if err := validateHTTPExposure(cfg); err != nil {
 		return err
 	}
 
@@ -348,12 +353,16 @@ func cmdServe(args []string) error {
 			return err
 		}
 	}
+	// Do not leave the bootstrap password available to later child processes.
+	// Runner also filters CRONOVA_* variables, making this defense in depth.
+	cfg.Auth.AdminPassword = ""
+	_ = os.Unsetenv("CRONOVA_ADMIN_PASSWORD")
 	if cfg.Auth.Enabled {
 		if n, _ := st.CountUsers(context.Background()); n == 0 {
 			log.Print("cronova: WARNING auth enabled but no users exist — create one with 'cronova users add' or set CRONOVA_ADMIN_USER/CRONOVA_ADMIN_PASSWORD")
 		}
 	} else {
-		log.Print("cronova: WARNING authentication is DISABLED — anyone who can reach the console may trigger/delete DAGs and run commands (enable with -auth or auth.enabled)")
+		log.Print("cronova: WARNING authentication is DISABLED — console access is safe only on loopback (enable with -auth or auth.enabled)")
 	}
 
 	var exec executor.Executor
@@ -373,8 +382,11 @@ func cmdServe(args []string) error {
 	}
 
 	if cfg.Projects != "" {
-		if err := os.MkdirAll(cfg.Projects, 0o755); err != nil {
+		if err := os.MkdirAll(cfg.Projects, 0o700); err != nil {
 			return fmt.Errorf("create projects dir %s: %w", cfg.Projects, err)
+		}
+		if err := os.Chmod(cfg.Projects, 0o700); err != nil {
+			return fmt.Errorf("secure projects dir %s: %w", cfg.Projects, err)
 		}
 	}
 
@@ -399,7 +411,7 @@ func cmdServe(args []string) error {
 		apiSrv := api.New(st, sch, cfg.Logs, web.FS(), api.Info{Executor: executorLabel, Tick: tickDur.String()})
 		apiSrv.SetAuth(api.AuthConfig{Enabled: cfg.Auth.Enabled, SessionTTL: cfg.sessionTTL(), SecureCookie: cfg.Auth.SecureCookie})
 		apiSrv.SetProjectsDir(cfg.Projects)
-		httpSrv = &http.Server{Addr: cfg.HTTP, Handler: apiSrv.Handler()}
+		httpSrv = newConsoleHTTPServer(cfg.HTTP, apiSrv.Handler())
 		go func() {
 			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)
 			err := httpSrv.ListenAndServe()
@@ -429,6 +441,18 @@ func cmdServe(args []string) error {
 		return runErr
 	}
 	return nil
+}
+
+func newConsoleHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 func cmdTrigger(args []string) error {
@@ -719,7 +743,7 @@ func cmdRuns(args []string) error {
 // liveness using the cronova binary itself, with no curl/shell dependency.
 func cmdHealthcheck(args []string) error {
 	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
-	addr := fs.String("http", envOr("CRONOVA_HTTP", ":8090"), "server HTTP address")
+	addr := fs.String("http", envOr("CRONOVA_HTTP", "127.0.0.1:8090"), "server HTTP address")
 	path := fs.String("path", "/readyz", "path to probe")
 	_ = fs.Parse(args)
 	host := *addr

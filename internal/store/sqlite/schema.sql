@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Opaque server-side sessions (DB-backed so they survive restart and can be
--- revoked on logout). token is a random 256-bit value stored in an httpOnly cookie.
+-- revoked on logout). Only a prefixed SHA-256 digest of the cookie token is stored.
 CREATE TABLE IF NOT EXISTS sessions (
     token       TEXT PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id),

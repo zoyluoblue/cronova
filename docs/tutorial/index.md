@@ -14,7 +14,7 @@ Everything runs locally: one `cronova` binary, an embedded SQLite database, and 
 
 - A **Linux or macOS** machine — a laptop is fine. Prebuilt binaries (latest release: **v0.2.1**) cover amd64 and arm64.
 - A terminal.
-- **Go 1.26+**, *only* if you choose to build from source. The prebuilt release and the one-line installer need no toolchain at all.
+- **Go 1.26.5+**, *only* if you choose to build from source. The prebuilt release and the one-line installer need no toolchain at all.
 
 !!! tip
     The binary is CGO-free (pure-Go SQLite), so there is nothing to compile or link against — download, `chmod +x`, run.
@@ -42,7 +42,7 @@ Every chapter follows the same rhythm: a short explanation, a small runnable sni
 ## What you learned
 
 - The tutorial evolves one ETL-style pipeline from a single task into a scheduled, dependency-aware, retry-hardened workflow.
-- You need only a Linux/macOS machine — Go 1.26+ is required only for source builds.
+- You need only a Linux/macOS machine — Go 1.26.5+ is required only for source builds.
 - Ten chapters take you from install to cross-DAG orchestration, with reference docs for everything deeper.
 
 Next up: get the binary running in [Install cronova](install.md).

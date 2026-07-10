@@ -215,6 +215,13 @@ func TestTriggerAndPause(t *testing.T) {
 		t.Errorf("unexpected run_id: %v", body)
 	}
 
+	trig.triggerErr = model.ErrQueueFull
+	rec, _ = get(t, h, "POST", "/api/dags/etl/trigger")
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("queue-full trigger: code=%d retry-after=%q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	trig.triggerErr = nil
+
 	rec, _ = get(t, h, "POST", "/api/dags/etl/pause?paused=true")
 	if rec.Code != 200 {
 		t.Fatalf("pause: %d", rec.Code)
@@ -222,6 +229,23 @@ func TestTriggerAndPause(t *testing.T) {
 	d, _ := st.GetDAG(context.Background(), "etl")
 	if !d.Paused {
 		t.Error("dag not paused")
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	h, _, _, _ := setup(t)
+	rec, _ := get(t, h, "GET", "/api/info")
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Errorf("missing frame-ancestors CSP: %q", rec.Header().Get("Content-Security-Policy"))
 	}
 }
 

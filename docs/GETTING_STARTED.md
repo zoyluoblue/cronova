@@ -10,7 +10,7 @@ There are three ways to get the `cronova` binary. Pick the one that fits.
 
 ### Build from source
 
-Build the scheduler, web console, and CLI into one static binary with Go 1.26+:
+Build the scheduler, web console, and CLI into one static binary with Go 1.26.5+:
 
 ```bash
 git clone https://github.com/zoyluoblue/cronova
@@ -53,18 +53,19 @@ By default `serve` uses relative working-directory paths and the in-process exec
 
 | Setting | Flag | Env var | Default |
 |---|---|---|---|
-| Console + API address | `-http` | `CRONOVA_HTTP` | `:8090` (all interfaces) |
+| Console + API address | `-http` | `CRONOVA_HTTP` | `127.0.0.1:8090` (loopback only) |
 | DAG YAML directory | `-dags` | `CRONOVA_DAGS` | `dags` |
 | SQLite database | `-db` | `CRONOVA_DB` | `data/cronova.db` |
 | Task log directory | `-logs` | `CRONOVA_LOGS` | `logs` |
 | Uploaded projects | `-projects` | `CRONOVA_PROJECTS` | `~/.cronova/projects` |
 | Scheduler tick | `-tick` | `CRONOVA_TICK` | `2s` |
 | gRPC executor target | `-executor` | `CRONOVA_EXECUTOR` | *(empty = in-process)* |
-| Require login | `-auth` | `CRONOVA_AUTH` | *(off unless configured)* |
+| Require login | `-auth` | `CRONOVA_AUTH` | *(off for local `serve`; `init` defaults on)* |
+| Allow unauthenticated remote bind | `-allow-unauthenticated-remote` | `CRONOVA_ALLOW_UNAUTHENTICATED_REMOTE` | `false` |
 
 Settings resolve in this precedence, highest first: **explicit flag → `CRONOVA_*` env → `cronova.yaml` config file → built-in default**. The config file is optional; `serve` only errors on a missing config if you pass `-config` explicitly.
 
-> The default in-process executor runs tasks inside the `serve` process, so a restart ends running tasks. For crash-recoverable execution that survives a scheduler restart or upgrade, run tasks in the decoupled gRPC executor via `-executor` / `CRONOVA_EXECUTOR` — see [Deployment](DEPLOY.md).
+> The default in-process executor runs tasks inside the `serve` process, so a restart ends running tasks. For crash-recoverable execution that survives a scheduler restart or upgrade, run tasks in the decoupled gRPC executor via an absolute `unix:///...` socket in a private (`0700`) directory. TCP executor targets are rejected. See [Deployment](DEPLOY.md).
 
 Drive the same server from another terminal with the CLI:
 
@@ -76,7 +77,7 @@ Drive the same server from another terminal with the CLI:
 
 ### Enabling login
 
-Authentication is off unless you turn it on. A fresh `serve` with auth disabled prints a warning, because anyone who can reach the console can trigger or delete DAGs. Enable it and seed an admin:
+Authentication is off for a plain development `serve`, but the listener is loopback-only. Cronova refuses an unauthenticated non-loopback bind unless the explicit dangerous override is set. Enable login and seed an admin before exposing the console:
 
 ```bash
 CRONOVA_ADMIN_USER=admin CRONOVA_ADMIN_PASSWORD=... ./cronova serve -auth

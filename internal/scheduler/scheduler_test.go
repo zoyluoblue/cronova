@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -141,5 +142,21 @@ func TestTriggerUnknownDAG(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.TriggerManual(context.Background(), "ghost", nil); err == nil {
 		t.Fatal("expected error triggering unknown dag")
+	}
+}
+
+func TestManualTriggerQueueLimits(t *testing.T) {
+	s := newTestScheduler(t)
+	ctx := context.Background()
+	if _, err := s.CreateDAG(ctx, "dag_id: bounded\ntasks:\n  - id: task\n    command: echo ok\n"); err != nil {
+		t.Fatal(err)
+	}
+	s.opts.MaxManualQueuePerDAG = 1
+	s.opts.MaxManualQueueGlobal = 10
+	if _, err := s.TriggerManual(ctx, "bounded", nil); err != nil {
+		t.Fatalf("first trigger: %v", err)
+	}
+	if _, err := s.TriggerManual(ctx, "bounded", nil); !errors.Is(err, model.ErrQueueFull) {
+		t.Fatalf("second trigger error = %v, want ErrQueueFull", err)
 	}
 }

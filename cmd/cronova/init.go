@@ -94,6 +94,9 @@ func cmdInit(args []string) error {
 	}
 
 	cfg.Auth.Enabled = authEnabled
+	if err := validateHTTPExposure(cfg); err != nil {
+		return fmt.Errorf("unsafe setup: %w", err)
+	}
 
 	if err := writeFileMode(*configPath, renderConfigYAML(cfg), 0o644); err != nil {
 		return err
@@ -250,11 +253,16 @@ func renderConfigYAML(c Config) string {
 # "127.0.0.1:8090" = this machine only (front with a reverse proxy for remote access).
 http: "%s"
 
+# DANGEROUS escape hatch. Required only when auth is disabled and http binds a
+# non-loopback address. Keep false for normal deployments.
+allow_unauthenticated_remote: %t
+
 # Scheduler tick — how often the loop wakes to schedule/poll work.
 tick: %s
 
 # Task executor. Empty = in-process (tasks die on restart). A gRPC target such as
 # "unix:///run/cronova/executor.sock" survives scheduler restarts (crash recovery).
+# The socket's parent directory must be private (mode 0700).
 executor: "%s"
 
 auth:
@@ -269,5 +277,5 @@ auth:
 # db:   /var/lib/cronova/cronova.db
 # dags: /var/lib/cronova/dags
 # logs: /var/log/cronova
-`, c.HTTP, c.Tick, c.Executor, c.Auth.Enabled, c.Auth.SessionTTL, c.Auth.SecureCookie)
+`, c.HTTP, c.AllowUnauthenticatedRemote, c.Tick, c.Executor, c.Auth.Enabled, c.Auth.SessionTTL, c.Auth.SecureCookie)
 }

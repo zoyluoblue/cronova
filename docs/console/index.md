@@ -13,7 +13,7 @@ cronova serve
 # console + REST API on http://localhost:8090
 ```
 
-The default listen address is `:8090`; change it with the `-http` flag or the `http:` key in `cronova.yml` (see [Install & first run](../tutorial/install.md)). Every drill-down in the console — a DAG, a task, a single run — is a hash route like `#/dag/etl_daily/runs`, so any view you are looking at can be bookmarked, refreshed, or pasted into a chat message.
+The default listen address is `127.0.0.1:8090`; change it with the `-http` flag or the `http:` key in `cronova.yaml` (see [Install & first run](../tutorial/install.md)). Every drill-down in the console — a DAG, a task, a single run — is a hash route like `#/dag/etl_daily/runs`, so any view you are looking at can be bookmarked, refreshed, or pasted into a chat message.
 
 ## Layout
 
@@ -50,7 +50,7 @@ To jump to a DAG from anywhere: focus the search box, type a fragment of the DAG
 
 ## Signing in
 
-Authentication is **off by default** — on a fresh `cronova serve` the console opens straight to the dashboard, and the server logs a warning that anyone who can reach the port can trigger and delete DAGs. Enable login with the `-auth` flag (or `auth.enabled: true` in `cronova.yml`); the `cronova init` setup wizard prompts for an admin account and recommends auth on for new installs.
+Authentication is **off for a plain development `serve`**, but the default listener is loopback-only. Cronova refuses an unauthenticated non-loopback bind unless the dangerous override is explicitly enabled. Use `-auth` (or `auth.enabled: true` in `cronova.yaml`) for network access; `cronova init` creates an admin and defaults auth on for new installations.
 
 With auth on:
 

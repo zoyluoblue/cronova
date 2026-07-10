@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -223,16 +224,22 @@ type logSink interface {
 	Close() error
 }
 
-// redactBufCap bounds the line buffer so a newline-less stream can't grow it
-// without limit.
-const redactBufCap = 1 << 20
+const (
+	// redactBufCap bounds the line buffer so a newline-less stream can't grow it
+	// without limit.
+	redactBufCap = 1 << 20
+	// maxTaskLogBytes bounds disk consumption from one task. A short truncation
+	// marker may extend the file a few bytes past this boundary.
+	maxTaskLogBytes = int64(64 << 20)
+)
 
 // newLogSink returns a plain file sink when there is nothing to redact (writes
 // pass straight through, unbuffered), or a redactWriter that masks every secret
 // value in each completed line.
 func newLogSink(f *os.File, redact []string) logSink {
+	base := newCappedLogSink(f, maxTaskLogBytes)
 	if len(redact) == 0 {
-		return f
+		return base
 	}
 	// Copy and sort by length descending so redactBytes masks the LONGEST match
 	// first — otherwise a secret that is a prefix of another ("pass" vs "password")
@@ -245,7 +252,57 @@ func newLogSink(f *os.File, redact []string) logSink {
 			maxLen = len(s)
 		}
 	}
-	return &redactWriter{w: f, secrets: secrets, maxLen: maxLen}
+	return &redactWriter{w: base, secrets: secrets, maxLen: maxLen}
+}
+
+// cappedLogSink acknowledges writes after its limit so a noisy child keeps
+// running, while discarding excess bytes and recording one visible marker.
+type cappedLogSink struct {
+	w         *os.File
+	remaining int64
+	maxBytes  int64
+	truncated bool
+	mu        sync.Mutex
+}
+
+func newCappedLogSink(f *os.File, maxBytes int64) *cappedLogSink {
+	return &cappedLogSink{w: f, remaining: maxBytes, maxBytes: maxBytes}
+}
+
+func (cw *cappedLogSink) Write(p []byte) (int, error) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	want := len(p)
+	if want == 0 {
+		return 0, nil
+	}
+	allowed := int64(want)
+	if allowed > cw.remaining {
+		allowed = cw.remaining
+	}
+	if allowed > 0 {
+		n, err := cw.w.Write(p[:int(allowed)])
+		cw.remaining -= int64(n)
+		if err != nil {
+			return n, err
+		}
+		if int64(n) != allowed {
+			return n, io.ErrShortWrite
+		}
+	}
+	if int64(want) > allowed && !cw.truncated {
+		cw.truncated = true
+		if _, err := fmt.Fprintf(cw.w, "\n=== log truncated after %d bytes ===\n", cw.maxBytes); err != nil {
+			return int(allowed), err
+		}
+	}
+	return want, nil
+}
+
+func (cw *cappedLogSink) Close() error {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	return cw.w.Close()
 }
 
 // redactWriter masks secret substrings in everything written to a task log. It
@@ -255,7 +312,7 @@ func newLogSink(f *os.File, redact []string) logSink {
 // on Close. cmd.Stdout and cmd.Stderr share one sink and os/exec writes them from
 // separate goroutines, so Write is mutex-guarded.
 type redactWriter struct {
-	w       *os.File
+	w       logSink
 	secrets []string
 	maxLen  int // longest secret; bounds the tail held back across a capped flush
 	mu      sync.Mutex
@@ -360,16 +417,48 @@ func openLog(path string) (*os.File, error) {
 	if path == "" {
 		return nil, errors.New("empty log path")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	logDir := filepath.Dir(path)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err := os.Chmod(logDir, 0o700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 }
 
 func buildEnv(extra map[string]string) []string {
-	env := os.Environ()
+	allowed := map[string]bool{
+		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
+		"SHELL": true, "TMPDIR": true, "TMP": true, "TEMP": true,
+		"LANG": true, "LANGUAGE": true, "TZ": true, "TERM": true,
+		"COLORTERM": true, "NO_COLOR": true, "SSL_CERT_FILE": true,
+		"SSL_CERT_DIR": true, "GIT_SSL_CAINFO": true,
+	}
+	for _, name := range strings.FieldsFunc(os.Getenv("CRONOVA_TASK_ENV_ALLOWLIST"), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		allowed[name] = true
+	}
+
+	values := make(map[string]string, len(allowed)+len(extra))
+	for _, item := range os.Environ() {
+		name, value, ok := strings.Cut(item, "=")
+		if ok && (allowed[name] || strings.HasPrefix(name, "LC_")) {
+			values[name] = value
+		}
+	}
 	for k, v := range extra {
-		env = append(env, k+"="+v)
+		values[k] = v
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, k := range keys {
+		env = append(env, k+"="+values[k])
 	}
 	return env
 }

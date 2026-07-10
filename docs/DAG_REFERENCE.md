@@ -144,6 +144,13 @@ Any `command`, `url`, header, `body`, or query can reference `{{ name }}` placeh
 | `{{ task_id }}` | `CRONOVA_TASK_ID` | This task's id. |
 | `{{ try_number }}` | `CRONOVA_TRY_NUMBER` | Attempt number (increments on retry). |
 
+Shell tasks do not inherit the scheduler's complete process environment. Cronova
+passes a small runtime-safe set (`PATH`, locale, home/temp and certificate
+variables) plus the task-specific `CRONOVA_*` values above. This prevents server
+credentials such as `CRONOVA_ADMIN_PASSWORD` from reaching task code. Add a
+parent variable explicitly with `CRONOVA_TASK_ENV_ALLOWLIST=name1,name2`, or put
+the value in the task's resolved environment instead.
+
 Plus UI-managed references, resolved server-side (secrets never enter the blanket env):
 
 - `{{ var.KEY }}` — a shared [variable](AGENTS.md).
@@ -174,7 +181,7 @@ cronova pools                    # list pools and usage
 cronova pools set reports 4      # create/resize the "reports" pool to 4 slots
 ```
 
-Every task defaults to the `default` pool. See the [CLI Reference](CLI.md#local-operations) and [Architecture](ARCHITECTURE.md).
+Every task defaults to the `default` pool. See the [CLI Reference](CLI.md) and [Architecture](ARCHITECTURE.md).
 
 ## See also
 

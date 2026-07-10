@@ -63,7 +63,7 @@ func (c *Client) TriggerDAG(ctx context.Context, dagID string, params map[string
 	return out.RunID, err
 }
 
-// TaskLog returns a task instance's captured log (plain text).
+// TaskLog returns the bounded tail of a task instance's captured log.
 func (c *Client) TaskLog(ctx context.Context, tiID string) (string, error) {
 	res, err := c.Call(ctx, "GET", "/api/tasks/{tiID}/log", Options{Path: map[string]string{"tiID": tiID}, Accept: "text/plain"})
 	if err != nil {

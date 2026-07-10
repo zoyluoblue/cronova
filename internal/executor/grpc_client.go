@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"time"
 
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
@@ -20,10 +22,14 @@ type GRPCClient struct {
 
 var _ Executor = (*GRPCClient)(nil)
 
-// Dial connects to an executor server. target is a gRPC dial target, e.g.
-// "unix:///tmp/cronova-executor.sock" or "localhost:9091". The connection is
-// lazy; the first RPC establishes it.
+// Dial connects to an executor over an absolute Unix socket. The executor has
+// no application-layer authentication, so TCP targets are intentionally
+// rejected; filesystem ownership and socket mode form the trust boundary.
 func Dial(target string) (*GRPCClient, error) {
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme != "unix" || !filepath.IsAbs(u.Path) || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("executor target must be an absolute unix:///path socket, got %q", target)
+	}
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("dial executor %q: %w", target, err)

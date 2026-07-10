@@ -57,8 +57,18 @@ type Server struct {
 	info        Info
 	auth        AuthConfig
 	loginLim    *loginLimiter // brute-force throttle for POST /api/login
+	sseSlots    chan struct{} // bounds long-lived log-stream connections
 	started     time.Time     // for /metrics uptime
 }
+
+const (
+	defaultLogTailBytes = int64(4 << 20)
+	sseInitialTailBytes = int64(1 << 20)
+	sseLineChunkBytes   = 64 << 10
+	sseReadPerDrain     = int64(1 << 20)
+	maxSSEConnections   = 128
+	maxRunPageSize      = 200
+)
 
 func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Server {
 	if info.TZ == "" {
@@ -67,7 +77,10 @@ func New(st store.Store, eng Engine, logDir string, web fs.FS, info Info) *Serve
 		// honest label for "what timezone do cron fields mean".
 		info.TZ = "UTC"
 	}
-	return &Server{store: st, eng: eng, logDir: logDir, web: web, info: info, loginLim: newLoginLimiter(), started: time.Now()}
+	return &Server{
+		store: st, eng: eng, logDir: logDir, web: web, info: info,
+		loginLim: newLoginLimiter(), sseSlots: make(chan struct{}, maxSSEConnections), started: time.Now(),
+	}
 }
 
 // SetAuth enables/configures authentication. Must be called before Handler().
@@ -141,7 +154,17 @@ func (s *Server) Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 		}))
 	}
-	return s.withAuth(mux)
+	return securityHeaders(s.withAuth(mux))
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // --- helpers ---
@@ -167,6 +190,9 @@ func mapErr(w http.ResponseWriter, err error) {
 		httpErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, model.ErrNoTasks), errors.Is(err, model.ErrBadMarkState):
 		httpErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, model.ErrQueueFull):
+		w.Header().Set("Retry-After", "5")
+		httpErr(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry), errors.Is(err, model.ErrRunStillActive):
 		httpErr(w, http.StatusConflict, err.Error())
 	default:
@@ -884,6 +910,16 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > maxRunPageSize {
+		limit = maxRunPageSize
+	}
+	if offset < 0 {
+		httpErr(w, http.StatusBadRequest, "offset must be non-negative")
+		return
+	}
 	// state=failed or state=failed,cancelled — unknown names are rejected so a
 	// typo returns an error instead of silently matching nothing.
 	var states []model.RunState
@@ -973,7 +1009,7 @@ func (s *Server) getLog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	data, err := os.ReadFile(ti.LogPath)
+	f, err := os.Open(ti.LogPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			w.Header().Set("Content-Type", "text/plain")
@@ -983,8 +1019,32 @@ func (s *Server) getLog(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write(data)
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="task-%d.log"`, ti.ID))
+		http.ServeContent(w, r, fmt.Sprintf("task-%d.log", ti.ID), stat.ModTime(), f)
+		return
+	}
+
+	start := int64(0)
+	if stat.Size() > defaultLogTailBytes {
+		start = stat.Size() - defaultLogTailBytes
+		w.Header().Set("X-Cronova-Log-Truncated", "true")
+		w.Header().Set("X-Cronova-Log-Total-Bytes", strconv.FormatInt(stat.Size(), 10))
+		w.Header().Set("X-Cronova-Log-Start-Offset", strconv.FormatInt(start, 10))
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = io.Copy(w, io.LimitReader(f, defaultLogTailBytes))
 }
 
 // streamLog tails the task's log over Server-Sent Events until the task reaches
@@ -999,17 +1059,36 @@ func (s *Server) streamLog(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	select {
+	case s.sseSlots <- struct{}{}:
+		defer func() { <-s.sseSlots }()
+	default:
+		w.Header().Set("Retry-After", "5")
+		httpErr(w, http.StatusServiceUnavailable, "too many active log streams")
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	// The server has a finite WriteTimeout for normal responses. SSE is expected
+	// to stay open for the task lifetime, so clear only this response's deadline.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	ctx := r.Context()
 	var offset int64
 	var lineBuf []byte // holds an incomplete trailing line across ticks
+	if stat, err := os.Stat(ti.LogPath); err == nil && stat.Size() > sseInitialTailBytes {
+		offset = stat.Size() - sseInitialTailBytes
+		_, _ = fmt.Fprintf(w, "event: truncated\ndata: showing log from byte %d of %d\n\n", offset, stat.Size())
+	}
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 
 	emit := func(line []byte) {
+		// A raw carriage return is also an SSE line boundary. Strip it so task
+		// output cannot inject protocol fields without the required data prefix.
+		line = bytes.ReplaceAll(line, []byte{'\r'}, nil)
 		_, _ = w.Write([]byte("data: "))
 		_, _ = w.Write(line)
 		_, _ = w.Write([]byte("\n\n"))
@@ -1022,14 +1101,31 @@ func (s *Server) streamLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer f.Close()
+		if stat, err := f.Stat(); err == nil {
+			switch {
+			case stat.Size() < offset:
+				offset = 0
+				lineBuf = nil
+			case stat.Size()-offset > sseInitialTailBytes:
+				offset = stat.Size() - sseInitialTailBytes
+				lineBuf = nil
+				_, _ = fmt.Fprintf(w, "event: truncated\ndata: showing log from byte %d of %d\n\n", offset, stat.Size())
+			}
+		}
 		if _, err := f.Seek(offset, 0); err != nil {
 			return
 		}
 		buf := make([]byte, 32*1024)
-		for {
-			n, err := f.Read(buf)
+		remaining := sseReadPerDrain
+		for remaining > 0 {
+			readSize := int64(len(buf))
+			if remaining < readSize {
+				readSize = remaining
+			}
+			n, err := f.Read(buf[:readSize])
 			if n > 0 {
 				offset += int64(n)
+				remaining -= int64(n)
 				lineBuf = append(lineBuf, buf[:n]...)
 			}
 			if err != nil {
@@ -1041,8 +1137,17 @@ func (s *Server) streamLog(w http.ResponseWriter, r *http.Request) {
 			if i < 0 {
 				break
 			}
-			emit(lineBuf[:i])
+			line := lineBuf[:i]
+			for len(line) > sseLineChunkBytes {
+				emit(line[:sseLineChunkBytes])
+				line = line[sseLineChunkBytes:]
+			}
+			emit(line)
 			lineBuf = lineBuf[i+1:]
+		}
+		for len(lineBuf) > sseLineChunkBytes {
+			emit(lineBuf[:sseLineChunkBytes])
+			lineBuf = lineBuf[sseLineChunkBytes:]
 		}
 		if final && len(lineBuf) > 0 {
 			emit(lineBuf)

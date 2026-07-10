@@ -57,7 +57,7 @@ flaky_pipeline__manual_1751871234...    2026-07-07T00:00:00Z  success  manual   
 Open the run in the console at [http://localhost:8090](http://localhost:8090) and click the `fetch` task: the log shows each attempt — `attempt 1: connection reset by peer`, `attempt 2: …`, and finally `attempt 3: fetched 1200 rows`. The task's try number is stored per attempt, so you can always tell how hard a task had to work.
 
 !!! tip
-    Automatic retries handle transient failures. For a run that already **finished** as failed, use the operator command `cronova retry <run_id> [task_id]` to re-run just the failed tasks — see the [CLI Reference](../CLI.md#agent--remote-mode).
+    Automatic retries handle transient failures. For a run that already **finished** as failed, use the operator command `cronova retry <run_id> [task_id]` to re-run just the failed tasks — see the [CLI Reference](../CLI.md).
 
 ## DAG-level defaults
 

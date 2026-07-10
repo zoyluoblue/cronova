@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 ## 快速开始
 
 ```bash
-# 1. 构建(Go 1.26+)—— 或从 Releases 下预编译二进制
+# 1. 构建(Go 1.26.5+)—— 或从 Releases 下预编译二进制
 go build -o cronova ./cmd/cronova
 
 # 2. 启动调度器 + Web 控制台(进程内 executor)
@@ -57,6 +57,8 @@ go build -o cronova ./cmd/cronova
 ```
 
 打开 **http://localhost:8090** 进入控制台 —— DAG 列表、运行历史、任务状态、实时日志、一键手动触发。
+
+开发模式默认不启用认证，但只监听本机回环地址。未启用认证时，非回环监听会被拒绝，除非显式设置危险选项 `-allow-unauthenticated-remote`。部署新实例请使用 `cronova init`，向导默认开启认证。
 
 <div align="center">
   <img src="docs/img/dashboard.png" alt="cronova 仪表盘 —— 自托管工作流调度器,展示 DAG、运行历史、成功率与调度" width="900">

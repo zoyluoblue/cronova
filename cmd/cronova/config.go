@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +22,9 @@ type Config struct {
 	Tick     string `yaml:"tick"`
 	Executor string `yaml:"executor"`
 	HTTP     string `yaml:"http"`
+	// AllowUnauthenticatedRemote is an explicit escape hatch for binding the
+	// unauthenticated console to a non-loopback address.
+	AllowUnauthenticatedRemote bool `yaml:"allow_unauthenticated_remote"`
 	// Retention deletes finished runs (DB rows + log dirs) older than this
 	// duration, e.g. "2160h" for 90 days. "0" keeps everything forever.
 	Retention string `yaml:"retention"`
@@ -36,7 +41,7 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	c := Config{DB: "data/cronova.db", Dags: "dags", Logs: "logs", Tick: "2s", HTTP: ":8090",
+	c := Config{DB: "data/cronova.db", Dags: "dags", Logs: "logs", Tick: "2s", HTTP: "127.0.0.1:8090",
 		Retention: "2160h", // 90 days; "0" = keep forever
 		KeyFile:   "cronova.key"}
 	c.Auth.SessionTTL = "24h"
@@ -66,7 +71,9 @@ func loadConfigFile(c *Config, path string, explicit bool) error {
 		}
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(b, c); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(c); err != nil {
 		return fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return nil
@@ -86,6 +93,11 @@ func applyEnv(c *Config) {
 	env("CRONOVA_TICK", &c.Tick)
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
+	if v, ok := os.LookupEnv("CRONOVA_ALLOW_UNAUTHENTICATED_REMOTE"); ok {
+		if b, valid := parseBool(v); valid {
+			c.AllowUnauthenticatedRemote = b
+		}
+	}
 	env("CRONOVA_RETENTION", &c.Retention)
 	env("CRONOVA_KEY_FILE", &c.KeyFile)
 	if v, ok := os.LookupEnv("CRONOVA_AUTH"); ok {
@@ -153,4 +165,30 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	if set["auth"] {
 		c.Auth.Enabled = *vals["auth"].(*bool)
 	}
+	if set["allow-unauthenticated-remote"] {
+		c.AllowUnauthenticatedRemote = *vals["allow-unauthenticated-remote"].(*bool)
+	}
+}
+
+// isLoopbackHTTPAddr reports whether addr is a TCP host:port reachable only
+// through a loopback interface. An empty host such as ":8090" binds all
+// interfaces and is therefore not loopback-only.
+func isLoopbackHTTPAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func validateHTTPExposure(c Config) error {
+	if c.HTTP == "" || c.Auth.Enabled || isLoopbackHTTPAddr(c.HTTP) || c.AllowUnauthenticatedRemote {
+		return nil
+	}
+	return fmt.Errorf("refusing unauthenticated non-loopback HTTP bind %q: enable auth or explicitly set allow_unauthenticated_remote / -allow-unauthenticated-remote", c.HTTP)
 }

@@ -21,7 +21,8 @@ differ only in the service manager and file layout — see
 
 ## Quick install (one-click)
 
-On a fresh amd64/arm64 **Linux or macOS** box with nothing but `curl`:
+On an amd64/arm64 **Linux or macOS** box with standard `curl`, `tar`, and
+`sha256sum`/`shasum` tooling:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
@@ -46,7 +47,7 @@ HTTP port [8090]:
 Console reachable from:
   1) all interfaces (0.0.0.0) — reachable by server IP
   2) this machine only (127.0.0.1) — use a reverse proxy / SSH tunnel
-choose [1]:
+choose [2]:
 Admin username [admin]:
 Admin password (blank = generate a strong one):   (input hidden)
 Require login for the console/API (recommended) [Y/n]:
@@ -87,12 +88,13 @@ curl -fsSL .../bootstrap.sh | \
 | `CRONOVA_BASE_URL` | GitHub | Download origin (private mirror / air-gapped). |
 | `CRONOVA_ADMIN_USER` | `admin` | First admin username (→ `cronova.env`). |
 | `CRONOVA_ADMIN_PASSWORD` | generated | First admin password (→ `cronova.env`). |
-| `CRONOVA_HTTP` | `:8090` | Console/API listen addr. `:8090` = all interfaces; `127.0.0.1:8090` = local only. |
+| `CRONOVA_HTTP` | `127.0.0.1:8090` | Console/API listen addr. `:8090` = all interfaces and requires auth. |
 | `CRONOVA_AUTH` | `true` | Require login for the console/API. |
 | `CRONOVA_SESSION_TTL` | `24h` | Login session lifetime. |
 | `CRONOVA_SECURE_COOKIE` | `false` | Mark the session cookie `Secure` (set behind HTTPS). |
 | `CRONOVA_TICK` | `2s` | Scheduler loop interval (lower = snappier + more CPU). |
 | `CRONOVA_EXECUTOR` | in-process | gRPC executor target for crash-recovery (e.g. `unix:///run/cronova/executor.sock`). |
+| `CRONOVA_TASK_ENV_ALLOWLIST` | empty | Comma/space-separated parent env names shell tasks may inherit in addition to the safe built-ins. `CRONOVA_*` secrets are not inherited. |
 
 Storage paths (`db`/`dags`/`logs`) are **not** presettable this way — the service
 unit/plist sets them via flags, which win. Change them by editing the unit/plist.
@@ -115,7 +117,7 @@ them and make sure they are on the service `PATH` (see below).
 
 ## 1. Build the binary
 
-On any machine with **Go 1.26+**:
+On any machine with **Go 1.26.5+**:
 
 ```bash
 make release          # -> dist/cronova   (static, no CGO, linux/amd64)
@@ -125,7 +127,7 @@ No Go on your build box? Produce the binary with a throwaway build container
 (this is a *build* step — nothing Docker is needed at runtime):
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src golang:1.26 \
+docker run --rm -v "$PWD":/src -w /src golang:1.26.5 \
   sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/cronova ./cmd/cronova'
 ```
 
@@ -190,9 +192,9 @@ cronova update v0.2.0                        # a specific tag (re-install or dow
 cronova update -proxy http://127.0.0.1:7890  # download through a proxy
 ```
 
-`update` downloads the prebuilt release from GitHub (same asset + `SHA256SUMS`
-verification as the bootstrap installer), atomically replaces the installed
-binary and refreshes the service definition (backing the old ones up, so a failed
+`update` downloads the prebuilt release from GitHub, requires the asset to be
+listed in `SHA256SUMS`, bounds both downloads, and verifies it before atomically
+replacing the installed binary and refreshing the service definition (backing the old ones up, so a failed
 restart — verified by confirming the service actually stays running — rolls back
 automatically), and restarts the service. `CRONOVA_BASE_URL=<origin>` points it at
 a private mirror; it **must be `https://`** (plain `http://` is allowed only for
@@ -219,7 +221,7 @@ reversible by re-installing. Only `--purge` deletes it.
 ## macOS (launchd)
 
 The one-click installer above works on macOS too. To install from source instead
-(needs **Go 1.26+**):
+(needs **Go 1.26.5+**):
 
 ```bash
 make build                       # -> ./cronova for the host (Apple Silicon/Intel)
@@ -299,10 +301,9 @@ The console can upload scripts / project folders / zips (task editor →
 fresh temp copy of that directory (deleted when the attempt ends; leftovers from
 crashes are garbage-collected). Constraints to know about:
 
-- **Same-host only.** The scheduler stages the copy on ITS filesystem, so the
-  executor must share it: the default in-process executor, or a gRPC executor on
-  the same host / shared mount. A remote executor on another machine will not
-  see the files.
+- **Same-host only.** The scheduler stages the copy on its filesystem, so use
+  the default in-process executor or the local Unix-socket executor on the same
+  host/shared mount. TCP executor targets are deliberately unsupported.
 - **Linux + standalone executor:** the workspace copies live under the temp dir.
   If you run `cronova-executor` as its own systemd unit with `PrivateTmp=true`,
   scheduler and executor get DIFFERENT /tmp namespaces and staging breaks — keep
@@ -328,7 +329,7 @@ atomically (rolls back on a failed restart) and restarts the service:
 cronova update            # or: cronova update v0.2.0 to pin a version
 ```
 
-From source instead (needs Go 1.26; the installer is idempotent and keeps
+From source instead (needs Go 1.26.5+; the installer is idempotent and keeps
 config/DAGs/DB):
 
 ```bash
@@ -340,6 +341,11 @@ sudo systemctl restart cronova
 In-process executor: a restart ends running tasks. For zero-loss restarts run the
 standalone `cronova-executor` and point `serve` at it (`-executor`); see the
 README's crash-recovery section.
+
+The standalone executor accepts only an absolute Unix socket. Put it in a
+private (`0700`) directory; the executor forces the socket itself to `0600` and
+rejects TCP targets. The default is `/tmp/cronova-<uid>/executor.sock`. For a
+systemd pair, prefer a private `/run/cronova/` directory shared by both units.
 
 ## Cutting a release (maintainers)
 
@@ -367,4 +373,3 @@ make package          # -> dist/cronova_linux_{amd64,arm64}.tar.gz + SHA256SUMS
 
 > Requires a **public** repo (or the target has a token) so `curl` can fetch
 > `bootstrap.sh` from `raw.githubusercontent.com` and the release assets.
-

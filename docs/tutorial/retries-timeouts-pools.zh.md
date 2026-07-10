@@ -57,7 +57,7 @@ flaky_pipeline__manual_1751871234...    2026-07-07T00:00:00Z  success  manual   
 在控制台 [http://localhost:8090](http://localhost:8090) 打开这次运行并点击 `fetch` 任务：日志会展示每一次尝试——`attempt 1: connection reset by peer`、`attempt 2: …`，最后是 `attempt 3: fetched 1200 rows`。任务的尝试序号按每次尝试分别存储，你随时可以看到一个任务经历了多少波折才成功。
 
 !!! tip
-    自动重试处理的是瞬时故障。对于已经以失败**结束**的运行，请使用运维命令 `cronova retry <run_id> [task_id]` 只重跑失败的任务——参见 [CLI 参考](../CLI.md#agent--remote-mode)。
+    自动重试处理的是瞬时故障。对于已经以失败**结束**的运行，请使用运维命令 `cronova retry <run_id> [task_id]` 只重跑失败的任务——参见 [CLI 参考](../CLI.md)。
 
 ## DAG 级默认值
 

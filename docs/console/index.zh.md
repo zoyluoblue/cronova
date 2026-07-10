@@ -13,7 +13,7 @@ cronova serve
 # console + REST API on http://localhost:8090
 ```
 
-默认监听地址为 `:8090`；可通过 `-http` 标志或 `cronova.yml` 中的 `http:` 键修改（见[安装与首次运行](../tutorial/install.md)）。控制台中的每一层下钻——一个 DAG、一个任务、一次运行——都是形如 `#/dag/etl_daily/runs` 的 hash 路由，因此你正在查看的任何视图都可以被收藏、刷新，或直接粘贴到聊天消息中分享。
+默认监听地址为 `127.0.0.1:8090`；可通过 `-http` 标志或 `cronova.yaml` 中的 `http:` 键修改（见[安装与首次运行](../tutorial/install.md)）。控制台中的每一层下钻——一个 DAG、一个任务、一次运行——都是形如 `#/dag/etl_daily/runs` 的 hash 路由，因此你正在查看的任何视图都可以被收藏、刷新，或直接粘贴到聊天消息中分享。
 
 ## 布局
 
@@ -50,7 +50,7 @@ cronova serve
 
 ## 登录
 
-认证**默认关闭**——全新的 `cronova serve` 会直接打开仪表盘，同时服务器会在日志中警告：任何能访问该端口的人都可以触发和删除 DAG。使用 `-auth` 标志（或在 `cronova.yml` 中设置 `auth.enabled: true`）启用登录；`cronova init` 安装向导会提示创建管理员账户，并建议新装机器开启认证。
+普通开发模式的 `cronova serve` **默认关闭认证**，但只监听本机回环地址。未认证的非回环监听会被拒绝，除非显式打开危险豁免。网络访问应使用 `-auth`（或在 `cronova.yaml` 中设置 `auth.enabled: true`）；`cronova init` 会创建管理员，并在新安装时默认开启认证。
 
 启用认证后：
 

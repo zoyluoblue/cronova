@@ -36,7 +36,7 @@ cronova runs on **Linux and macOS**, on both **amd64 and arm64**. The fastest pa
 curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/bootstrap.sh | sudo bash
 ```
 
-Prefer to build from source? With Go 1.26+:
+Prefer to build from source? With Go 1.26.5+:
 
 ```bash
 go build -o cronova ./cmd/cronova
@@ -47,7 +47,7 @@ Prebuilt binaries are on the [Releases](https://github.com/zoyluoblue/cronova/re
 
 ## What port does the console use?
 
-The web console and REST API default to port **8090** (config default `:8090`, i.e. all interfaces). Open `http://localhost:8090` after `cronova serve`. Change it with the `-http` flag, the `CRONOVA_HTTP` env var, or the `http:` key in `cronova.yaml` — e.g. `127.0.0.1:8090` to bind local-only behind a reverse proxy.
+The web console and REST API default to **`127.0.0.1:8090`** (loopback only). Open `http://localhost:8090` after `cronova serve`. Change it with `-http`, `CRONOVA_HTTP`, or the `http:` key in `cronova.yaml`. A non-loopback bind with auth disabled is refused unless the explicit dangerous override is set.
 
 ## How do I upgrade cronova?
 
@@ -63,7 +63,7 @@ An unpinned update that is already current is a no-op. A pinned version always a
 
 ## Is the update safe if it fails halfway?
 
-Yes. `update` backs up the old binary and service definition before swapping, then restarts and **confirms the service actually stays running** (not just that it loaded). If the restart fails, it automatically rolls the binaries back and brings the previous version back up — the box is never left on a half-applied update. A missing `SHA256SUMS` is a warning; a checksum mismatch is fatal, and downgrade-to-cleartext redirects are refused.
+Yes. `update` backs up the old binary and service definition before swapping, then restarts and **confirms the service actually stays running** (not just that it loaded). If the restart fails, it automatically rolls the binaries back and brings the previous version back up — the box is never left on a half-applied update. Missing/incomplete `SHA256SUMS`, a checksum mismatch, an oversized payload, or a downgrade-to-cleartext redirect is fatal.
 
 ## Is cronova crash-safe / production-ready?
 

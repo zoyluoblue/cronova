@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,9 +25,13 @@ import (
 // releaseRepo is where prebuilt release tarballs live (matches deploy/bootstrap.sh).
 const releaseRepo = "zoyluoblue/cronova"
 
-// maxBinary caps how much we read for any single file in the release tarball —
-// a guard against a malformed/hostile archive, comfortably above real binaries.
-const maxBinary = 256 << 20 // 256 MiB
+const (
+	// maxBinary caps any single extracted executable.
+	maxBinary = 256 << 20 // 256 MiB
+	// Download bounds prevent a release endpoint from exhausting updater memory.
+	maxReleaseArchiveBytes  = int64(512 << 20)
+	maxReleaseMetadataBytes = int64(4 << 20)
+)
 
 // cmdUpdate replaces the installed cronova (and cronova-executor, if present)
 // with a prebuilt release from GitHub, then restarts the managed service. It is
@@ -261,26 +266,32 @@ func validateBaseURL(base string) error {
 	return fmt.Errorf("refusing insecure update origin %q — CRONOVA_BASE_URL must be https:// (http:// is allowed only for localhost)", base)
 }
 
-// fetchRelease downloads the tarball, verifies it against SHA256SUMS when the
-// release publishes one (a missing sums file is a warning, a mismatch is fatal —
-// same trust model as deploy/bootstrap.sh), and extracts the binaries + version.
+// fetchRelease requires SHA256SUMS, downloads the bounded tarball, verifies it,
+// and only then extracts executable payloads. Missing or incomplete checksum
+// metadata is fatal: a root self-updater must never install unverified bytes.
 func fetchRelease(base, asset, proxy string) (bins map[string][]byte, version string, err error) {
-	tarball, err := httpGet(base+"/"+asset, proxy)
+	sums, err := httpGet(base+"/SHA256SUMS", proxy, maxReleaseMetadataBytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("download SHA256SUMS: %w", err)
+	}
+	want, ok := sumFor(string(sums), asset)
+	if !ok {
+		return nil, "", fmt.Errorf("%s is not listed in SHA256SUMS", asset)
+	}
+	decoded, decodeErr := hex.DecodeString(want)
+	if decodeErr != nil || len(decoded) != sha256.Size {
+		return nil, "", fmt.Errorf("invalid SHA-256 digest for %s in SHA256SUMS", asset)
+	}
+
+	tarball, err := httpGet(base+"/"+asset, proxy, maxReleaseArchiveBytes)
 	if err != nil {
 		return nil, "", fmt.Errorf("download %s: %w — see https://github.com/%s/releases", asset, err, releaseRepo)
 	}
-
-	if sums, sErr := httpGet(base+"/SHA256SUMS", proxy); sErr != nil {
-		fmt.Fprintf(os.Stderr, "cronova: warning — could not fetch SHA256SUMS (%v), skipping verification\n", sErr)
-	} else if want, ok := sumFor(string(sums), asset); !ok {
-		fmt.Fprintf(os.Stderr, "cronova: warning — %s not listed in SHA256SUMS, skipping verification\n", asset)
-	} else {
-		got := fmt.Sprintf("%x", sha256.Sum256(tarball))
-		if !strings.EqualFold(got, want) {
-			return nil, "", fmt.Errorf("checksum mismatch for %s:\n  got  %s\n  want %s", asset, got, want)
-		}
-		fmt.Println("cronova: checksum OK")
+	got := fmt.Sprintf("%x", sha256.Sum256(tarball))
+	if !strings.EqualFold(got, want) {
+		return nil, "", fmt.Errorf("checksum mismatch for %s:\n  got  %s\n  want %s", asset, got, want)
 	}
+	fmt.Println("cronova: checksum OK")
 
 	bins, version, err = extractReleaseBinaries(bytes.NewReader(tarball))
 	if err != nil {
@@ -294,7 +305,7 @@ func fetchRelease(base, asset, proxy string) (bins map[string][]byte, version st
 
 // httpGet returns the body of a 200 response; any other status or transport
 // error is returned as an error.
-func httpGet(url, proxy string) ([]byte, error) {
+func httpGet(url, proxy string, maxBytes int64) ([]byte, error) {
 	resp, err := httpClient(proxy).Get(url)
 	if err != nil {
 		return nil, err
@@ -303,7 +314,17 @@ func httpGet(url, proxy string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	if resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("response is too large: %d bytes (limit %d)", resp.ContentLength, maxBytes)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds %d-byte limit", maxBytes)
+	}
+	return b, nil
 }
 
 // sumFor pulls the hex digest for a file out of a `sha256sum`-format listing
@@ -348,18 +369,27 @@ func extractReleaseBinaries(r io.Reader) (map[string][]byte, string, error) {
 		}
 		switch path.Base(h.Name) {
 		case "cronova", "cronova-executor":
+			if h.Size < 0 || h.Size > maxBinary {
+				return nil, "", fmt.Errorf("release file %s is too large: %d bytes", path.Base(h.Name), h.Size)
+			}
 			b, err := io.ReadAll(io.LimitReader(tr, maxBinary))
 			if err != nil {
 				return nil, "", fmt.Errorf("extract %s: %w", path.Base(h.Name), err)
 			}
 			out[path.Base(h.Name)] = b
 		case "com.cronova.plist", "cronova.service": // service definition, refreshed on update
+			if h.Size < 0 || h.Size > 1<<20 {
+				return nil, "", fmt.Errorf("release file %s is too large: %d bytes", path.Base(h.Name), h.Size)
+			}
 			b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
 			if err != nil {
 				return nil, "", fmt.Errorf("extract %s: %w", path.Base(h.Name), err)
 			}
 			out[path.Base(h.Name)] = b
 		case "VERSION":
+			if h.Size < 0 || h.Size > 1<<10 {
+				return nil, "", fmt.Errorf("release VERSION is too large: %d bytes", h.Size)
+			}
 			b, err := io.ReadAll(io.LimitReader(tr, 1<<10))
 			if err == nil {
 				version = strings.TrimSpace(string(b))

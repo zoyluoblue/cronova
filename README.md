@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 ## Quick start
 
 ```bash
-# 1. Build (Go 1.26+) — or grab a prebuilt binary from Releases
+# 1. Build (Go 1.26.5+) — or grab a prebuilt binary from Releases
 go build -o cronova ./cmd/cronova
 
 # 2. Start the scheduler + web console (in-process executor)
@@ -57,6 +57,11 @@ go build -o cronova ./cmd/cronova
 ```
 
 Open **http://localhost:8090** for the console — DAG list, run history, task states, live logs, and one-click manual triggers.
+
+The development default is unauthenticated but loopback-only. A non-loopback
+bind is refused unless login is enabled or the explicit
+`-allow-unauthenticated-remote` escape hatch is set. Use `cronova init` for a
+new deployed instance; it enables authentication by default.
 
 <div align="center">
   <img src="docs/img/dashboard.png" alt="cronova dashboard — self-hosted workflow scheduler showing DAGs, run history, success rate, and schedules" width="900">

@@ -12,6 +12,10 @@ import (
 // a 400 client error.
 var ErrNoTasks = errors.New("dag has no tasks")
 
+// ErrQueueFull is returned when a manual trigger would exceed a configured
+// queued-run bound. The API maps it to 429 so clients can retry later.
+var ErrQueueFull = errors.New("manual trigger queue is full")
+
 // ErrActiveRuns is returned when an operation (e.g. delete) is refused because
 // the DAG still has queued/running runs. The API maps it to a 409 conflict.
 var ErrActiveRuns = errors.New("dag has active runs")

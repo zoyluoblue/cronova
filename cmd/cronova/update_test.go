@@ -283,18 +283,26 @@ func TestFetchRelease(t *testing.T) {
 	})
 
 	t.Run("checksum mismatch is fatal", func(t *testing.T) {
-		srv := newServer("deadbeef  "+asset+"\n", true)
+		srv := newServer(strings.Repeat("0", 64)+"  "+asset+"\n", true)
 		defer srv.Close()
 		if _, _, err := fetchRelease(srv.URL, asset, ""); err == nil {
 			t.Fatal("expected a checksum-mismatch error")
 		}
 	})
 
-	t.Run("missing SHA256SUMS still succeeds", func(t *testing.T) {
+	t.Run("missing SHA256SUMS is fatal", func(t *testing.T) {
 		srv := newServer("", false)
 		defer srv.Close()
-		if _, _, err := fetchRelease(srv.URL, asset, ""); err != nil {
-			t.Fatalf("missing sums should warn+skip, not fail: %v", err)
+		if _, _, err := fetchRelease(srv.URL, asset, ""); err == nil {
+			t.Fatal("missing sums must prevent an unverified update")
+		}
+	})
+
+	t.Run("asset missing from SHA256SUMS is fatal", func(t *testing.T) {
+		srv := newServer(sum+"  some-other-asset.tar.gz\n", true)
+		defer srv.Close()
+		if _, _, err := fetchRelease(srv.URL, asset, ""); err == nil {
+			t.Fatal("unlisted asset must prevent an unverified update")
 		}
 	})
 
@@ -305,6 +313,16 @@ func TestFetchRelease(t *testing.T) {
 			t.Fatal("expected a download error for a missing asset")
 		}
 	})
+}
+
+func TestHTTPGetRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 65))
+	}))
+	defer srv.Close()
+	if _, err := httpGet(srv.URL, "", 64); err == nil || (!strings.Contains(err.Error(), "large") && !strings.Contains(err.Error(), "exceeds")) {
+		t.Fatalf("oversized response error = %v", err)
+	}
 }
 
 func TestExtractCapturesServiceDef(t *testing.T) {

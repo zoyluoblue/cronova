@@ -45,6 +45,10 @@ type Options struct {
 	// than this age. 0 disables pruning entirely — nothing is ever deleted.
 	Retention time.Duration
 	Logger    *slog.Logger
+	// Manual trigger admission bounds protect the metadata DB and scheduler from
+	// an accidental or hostile trigger flood. Non-positive values use defaults.
+	MaxManualQueuePerDAG int
+	MaxManualQueueGlobal int
 	// AllowPrivateNotifyTargets disables the SSRF guard on outbound notify
 	// webhooks (loopback/private/link-local IPs). Off in production; tests set it
 	// so an httptest server on 127.0.0.1 can receive deliveries.
@@ -88,6 +92,12 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 	}
 	if opts.LogDir == "" {
 		opts.LogDir = "logs"
+	}
+	if opts.MaxManualQueuePerDAG <= 0 {
+		opts.MaxManualQueuePerDAG = 1000
+	}
+	if opts.MaxManualQueueGlobal <= 0 {
+		opts.MaxManualQueueGlobal = 10000
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -358,6 +368,7 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 	if len(d.Tasks) == 0 {
 		return "", fmt.Errorf("dag %q: %w; add a task before triggering", dagID, model.ErrNoTasks)
 	}
+
 	now := time.Now().UTC()
 	run := &model.DagRun{
 		RunID:       fmt.Sprintf("%s__manual_%d", dagID, now.UnixNano()),
@@ -367,7 +378,10 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 		TriggerType: model.TriggerManual,
 		Params:      params,
 	}
-	if err := s.store.CreateDagRun(ctx, run); err != nil {
+	if err := s.store.CreateManualDagRunBounded(ctx, run, s.opts.MaxManualQueuePerDAG, s.opts.MaxManualQueueGlobal); err != nil {
+		if errors.Is(err, model.ErrQueueFull) {
+			return "", fmt.Errorf("dag %q reached a manual queue limit (per-DAG %d, global %d): %w", dagID, s.opts.MaxManualQueuePerDAG, s.opts.MaxManualQueueGlobal, err)
+		}
 		return "", err
 	}
 	s.log.Info("manual run created", "dag", dagID, "run", run.RunID)

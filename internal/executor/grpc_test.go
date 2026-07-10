@@ -92,3 +92,12 @@ func TestGRPCExecutorProbeUnknownAndCancel(t *testing.T) {
 		t.Errorf("cancelled task exit = 0, want non-zero")
 	}
 }
+
+func TestDialRejectsNonUnixTargets(t *testing.T) {
+	for _, target := range []string{"localhost:9091", "dns:///executor.internal:9091", "unix://relative.sock", "unix:///tmp/e.sock?x=1"} {
+		if c, err := Dial(target); err == nil {
+			_ = c.Close()
+			t.Errorf("Dial(%q) accepted a target outside the Unix-socket trust boundary", target)
+		}
+	}
+}

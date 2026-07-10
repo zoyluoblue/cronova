@@ -40,7 +40,7 @@ func cmdRun(args []string) error { // get one run with task states
 	return callAndEmit(g, "GET", "/api/runs/{runID}", client.Options{Path: map[string]string{"runID": pos[0]}})
 }
 
-func cmdLogs(args []string) error { // fetch a task instance's log (plain text)
+func cmdLogs(args []string) error { // fetch a task instance's bounded log tail
 	fs := flag.NewFlagSet("logs", flag.ExitOnError)
 	resolve := addGlobalFlags(fs)
 	pos := parsePositionals(fs, args)

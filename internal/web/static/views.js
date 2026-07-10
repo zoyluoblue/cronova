@@ -1670,7 +1670,7 @@ function showLog(tiID, taskID) {
     <div class="run-log-panel">
     <div class="run-log-head">
       <div>${t("log_word")} · <span class="mono">${esc(taskID)}</span> <span class="live" id="live"></span></div>
-      <a id="log-dl" href="/api/tasks/${tiID}/log" download="${esc(taskID)}.log">${t("log_download")}</a>
+      <a id="log-dl" href="/api/tasks/${tiID}/log?download=1" download="${esc(taskID)}.log">${t("log_download")}</a>
     </div>
     <div class="log-toolbar">
       <input id="log-find" placeholder="${t("log_find_ph")}" style="max-width:220px">

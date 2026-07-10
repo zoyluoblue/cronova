@@ -146,7 +146,9 @@ func apiCatalog() []apiEndpoint {
 			Summary: "List a DAG's runs", Desc: "Return recent runs for a DAG, newest first.",
 			Params: []apiParam{
 				{Name: "id", In: "path", Required: true, Desc: "DAG id.", Example: "etl_daily"},
-				{Name: "limit", In: "query", Desc: "Max runs to return (default 50).", Example: "20"}},
+				{Name: "limit", In: "query", Desc: "Max runs to return (default 100, capped at 200).", Example: "20"},
+				{Name: "offset", In: "query", Desc: "Non-negative paging offset.", Example: "0"},
+				{Name: "state", In: "query", Desc: "Optional comma-separated run states.", Example: "failed,cancelled"}},
 			Response: []any{map[string]any{"run_id": "etl_daily__2026-07-05T06:00:00Z", "dag_id": "etl_daily", "state": "success", "trigger_type": "schedule"}}},
 		{Method: "GET", Path: "/api/dag-graph", Tag: "DAGs",
 			Summary: "Cross-DAG dependency graph", Desc: "Return the global DAG dependency graph (trigger_after edges) for visualization.",
@@ -203,8 +205,10 @@ func apiCatalog() []apiEndpoint {
 				{Name: "taskID", In: "path", Required: true, Desc: "Task id.", Example: "load"}},
 			Request: map[string]any{"state": "success"}, Response: map[string]any{"marked": true}},
 		{Method: "GET", Path: "/api/tasks/{tiID}/log", Tag: "Tasks",
-			Summary: "Get a task log", Desc: "Fetch the captured stdout/stderr log of a task instance (plain text).",
-			Params:       []apiParam{{Name: "tiID", In: "path", Required: true, Desc: "Task instance id (numeric).", Example: "42"}},
+			Summary: "Get a task log", Desc: "Fetch the latest 4 MiB of captured stdout/stderr as plain text. Set download=1 to stream the complete captured file.",
+			Params: []apiParam{
+				{Name: "tiID", In: "path", Required: true, Desc: "Task instance id (numeric).", Example: "42"},
+				{Name: "download", In: "query", Desc: "Set to 1 for a streaming full-file download.", Example: "1"}},
 			ResponseDesc: "Plain-text log body.", Response: "2026-07-05T06:00:01Z starting extract\n2026-07-05T06:00:03Z done\n"},
 
 		// ---- Pools ----

@@ -17,7 +17,7 @@
 #   CRONOVA_ADMIN_USER=admin        seed this admin username
 #   CRONOVA_ADMIN_PASSWORD=secret   seed this admin password (else one is generated)
 # Server config (-> cronova.yaml, non-interactive install):
-#   CRONOVA_HTTP=:8090              console/API listen addr (":8090"=all, "127.0.0.1:8090"=local)
+#   CRONOVA_HTTP=127.0.0.1:8090     console/API listen addr (safe default: local only)
 #   CRONOVA_AUTH=true               require login for the console/API (default: true)
 #   CRONOVA_SESSION_TTL=24h         login session lifetime
 #   CRONOVA_SECURE_COOKIE=true      mark the session cookie Secure (set behind HTTPS)
@@ -55,7 +55,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v shasum >/dev/null 2>&1; then
   sha256_check() { shasum -a 256 -c - ; }
 else
-  sha256_check() { return 2; } # no tool -> signal "skip" below
+  die "sha256sum (Linux) or shasum (macOS) is required for release verification"
 fi
 
 # CRONOVA_BASE_URL overrides the download origin (private mirror / air-gapped /
@@ -71,22 +71,22 @@ tarball="cronova_${os}_${arch}.tar.gz"
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
+echo "==> downloading checksums ($VERSION)"
+curl -fsSL --proto '=https' --tlsv1.2 --max-filesize 4194304 \
+  -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" \
+  || die "SHA256SUMS is required; refusing an unverified install"
+awk -v name="$tarball" '$2 == name || $2 == "*" name { print; found=1 } END { exit !found }' \
+  "$tmp/SHA256SUMS" > "$tmp/ASSET_SHA256" \
+  || die "$tarball is not listed in SHA256SUMS"
+
 echo "==> downloading $tarball ($VERSION)"
-curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/$tarball" "$base/$tarball" \
+curl -fSL --proto '=https' --tlsv1.2 --max-filesize 536870912 \
+  -o "$tmp/$tarball" "$base/$tarball" \
   || die "download failed — does release '$VERSION' have $tarball? see https://github.com/$REPO/releases"
 
-# verify checksum when the release publishes SHA256SUMS
-if curl -fsSL --proto '=https' -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" 2>/dev/null; then
-  if ( cd "$tmp" && grep " $tarball\$" SHA256SUMS | sha256_check >/dev/null ); then
-    echo "==> checksum OK"
-  elif [[ $? -eq 2 ]]; then
-    echo "cronova: warning — no sha256 tool (sha256sum/shasum), skipping verification" >&2
-  else
-    die "checksum verification failed for $tarball"
-  fi
-else
-  echo "cronova: warning — SHA256SUMS not found, skipping verification" >&2
-fi
+( cd "$tmp" && sha256_check < ASSET_SHA256 >/dev/null ) \
+  || die "checksum verification failed for $tarball"
+echo "==> checksum OK"
 
 tar -C "$tmp" -xzf "$tmp/$tarball"
 echo "==> installing"

@@ -36,7 +36,7 @@ if [[ -z "$BIN_SRC" ]]; then
 fi
 if [[ -z "$BIN_SRC" || ! -x "$BIN_SRC" ]]; then
   echo "error: no cronova binary found. Build one first:" >&2
-  echo "         make release        # -> dist/cronova  (needs Go 1.26)" >&2
+  echo "         make release        # -> dist/cronova  (needs Go 1.26.5+)" >&2
   echo "       or pass the path:  sudo $0 /path/to/cronova" >&2
   exit 1
 fi

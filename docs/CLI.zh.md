@@ -10,10 +10,10 @@ cronova <command> [args] [flags]
 
 | 分组 | 命令 | 作用范围 |
 |---|---|---|
-| [调度器](#scheduler) | `serve`、`cronova-executor` | 本机（长期运行的进程） |
-| [服务生命周期](#service-lifecycle) | `start`/`stop`/`restart`/`status`、`init`、`update`、`uninstall`、`version`、`healthcheck` | 宿主机服务管理器（systemd / launchd） |
-| [本地操作](#local-operations) | `trigger`、`dags`、`runs`、`backfill`、`prune`、`pools`、`users` | 直接操作 SQLite 数据库（`-db`）——加 `-server` 也可走远程 |
-| [远程 / 智能体模式](#remote--agent-mode) | `api`、`get`、`run`、`logs`、`cancel`、`retry`、`mark`、`pause`、`overview`、`tokens`、`mcp` | 运行中服务器的带认证 REST API |
+| [调度器](#调度器) | `serve`、`cronova-executor` | 本机（长期运行的进程） |
+| [服务生命周期](#服务生命周期) | `start`/`stop`/`restart`/`status`、`init`、`update`、`uninstall`、`version`、`healthcheck` | 宿主机服务管理器（systemd / launchd） |
+| [本地操作](#本地操作) | `trigger`、`dags`、`runs`、`backfill`、`prune`、`pools`、`users` | 直接操作 SQLite 数据库（`-db`）——加 `-server` 也可走远程 |
+| [远程 / 智能体模式](#远程--智能体模式) | `api`、`get`、`run`、`logs`、`cancel`、`retry`、`mark`、`pause`、`overview`、`tokens`、`mcp` | 运行中服务器的带认证 REST API |
 
 ## 调度器
 
@@ -22,20 +22,21 @@ cronova <command> [args] [flags]
 运行调度循环，外加 Web 控制台与 REST API（默认 `http://localhost:8090`）。这就是完整的服务器——cron 解析、补跑、重试、任务执行、UI 与 API 全部在一个进程内。
 
 ```bash
-cronova serve -db data/cronova.db -dags dags -http :8090
+cronova serve -db data/cronova.db -dags dags -http 127.0.0.1:8090
 ```
 
 | 标志 | 默认值 | 说明 |
 |---|---|---|
-| `-http` | `:8090` | 控制台 + API 的 HTTP 地址（留空则禁用）。 |
+| `-http` | `127.0.0.1:8090` | 控制台 + API 的 HTTP 地址（留空则禁用）。 |
 | `-db` | `data/cronova.db` | SQLite 元数据数据库路径。 |
 | `-dags` | `dags` | DAG YAML 定义所在目录。 |
 | `-logs` | `logs` | 任务日志文件目录。 |
 | `-projects` | `~/.cronova/projects` | 已上传[项目文件](tutorial/projects.md)的存放目录。 |
-| `-executor` | *（进程内）* | gRPC executor 目标地址，例如 `unix:///tmp/cronova-executor.sock`。留空 = 进程内执行器。 |
+| `-executor` | *（进程内）* | executor 的绝对 Unix socket 地址。留空 = 进程内执行器；TCP 地址会被拒绝。 |
 | `-tick` | `2s` | 调度循环间隔。 |
 | `-retention` | `2160h`（90 天） | 删除早于该窗口的已结束运行**及其日志**；`0` = 永久保留。一次性清理见 [`cronova prune`](#cronova-prune)。 |
 | `-auth` | 关闭 | 要求登录才能访问控制台/API（覆盖配置文件）。 |
+| `-allow-unauthenticated-remote` | 关闭 | **危险：**允许未认证服务监听非回环地址。 |
 | `-config` | `cronova.yaml` | YAML 配置文件路径（可选）。 |
 | `key_file` / `CRONOVA_KEY_FILE` | `cronova.key` | 仅限配置文件/环境变量（无命令行标志）：用于连接密码 at-rest 加密的密钥文件。首次 `serve` 时自动生成（`0600`）——务必备份；丢失后已存储的密码将无法解读。设为 `none` 可禁用加密（明文存储，启动时会告警）。 |
 
@@ -46,13 +47,15 @@ cronova serve -db data/cronova.db -dags dags -http :8090
 独立、可从崩溃中恢复的任务执行器。先启动它，再用 `serve -executor` 让调度器指向它的 socket——任务可以在调度器重启后存活。参见[架构](ARCHITECTURE.md)。
 
 ```bash
-cronova-executor -sock /tmp/cronova-executor.sock &
-cronova serve -executor unix:///tmp/cronova-executor.sock
+cronova-executor &
+cronova serve -executor "unix:///tmp/cronova-$(id -u)/executor.sock"
 ```
 
 | 标志 | 默认值 | 说明 |
 |---|---|---|
-| `-sock` | `/tmp/cronova-executor.sock` | 监听的 Unix socket 路径。 |
+| `-sock` | `/tmp/cronova-<uid>/executor.sock` | Unix socket 路径；父目录必须为私有目录（`0700`），socket 会强制设为 `0600`。 |
+
+executor API 没有单独的应用层凭据，文件系统所有权就是信任边界。因此 cronova 只接受绝对 Unix socket，并拒绝公开目录或任何 TCP 目标。
 
 ## 服务生命周期
 
@@ -98,7 +101,7 @@ cronova init -yes     # accept defaults / CRONOVA_* env, no prompts
 
 ### `cronova update`
 
-从 GitHub 下载预编译发布版，校验其 SHA256 校验和，原子替换二进制（若安装了 `cronova-executor` 也一并替换），刷新服务定义（unit/plist），然后重启服务。
+从 GitHub 下载预编译发布版，强制获取并校验 SHA256 校验和，原子替换二进制（若安装了 `cronova-executor` 也一并替换），刷新服务定义（unit/plist），然后重启服务。缺少校验信息会直接终止更新。
 
 ```bash
 cronova update                               # latest release
@@ -143,17 +146,17 @@ cronova v0.3.0 darwin/arm64
 探测服务器的就绪端点，不健康时以非零退出码结束——为 systemd、负载均衡器或 cron 探针提供的免 curl 存活检查。
 
 ```bash
-cronova healthcheck -http :8090 && echo healthy
+cronova healthcheck -http 127.0.0.1:8090 && echo healthy
 ```
 
 | 标志 | 默认值 | 说明 |
 |---|---|---|
-| `-http` | `:8090` | 服务器 HTTP 地址（环境变量 `CRONOVA_HTTP`）。 |
+| `-http` | `127.0.0.1:8090` | 服务器 HTTP 地址（环境变量 `CRONOVA_HTTP`）。 |
 | `-path` | `/readyz` | 要探测的路径。 |
 
 ## 本地操作
 
-在持有数据库的机器上运行；它们直接作用于 SQLite 数据库。所有命令都接受 `-db`（默认 `data/cronova.db`），大多数还接受[全局 `-server`/`-token`/`-o` 标志](#global-flags-and-environment)——给出 `-server` 后，同一命令就会改走 REST API（`backfill` 和 `prune` 仅限本地）。
+在持有数据库的机器上运行；它们直接作用于 SQLite 数据库。所有命令都接受 `-db`（默认 `data/cronova.db`），大多数还接受[全局 `-server`/`-token`/`-o` 标志](#全局标志与环境变量)——给出 `-server` 后，同一命令就会改走 REST API（`backfill` 和 `prune` 仅限本地）。
 
 ### `cronova trigger`
 

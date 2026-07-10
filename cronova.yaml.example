@@ -3,10 +3,14 @@
 # Precedence, highest first:  flag  >  CRONOVA_* env  >  this file  >  built-in default.
 
 # ── HTTP console + API ──────────────────────────────────────────────────────
-# ":8090"          all interfaces (reachable by the server's IP)
-# "127.0.0.1:8090" this machine only (put a reverse proxy in front for remote use)
+# "127.0.0.1:8090" this machine only (safe default; use a reverse proxy for remote use)
+# ":8090"          all interfaces (requires auth, unless the dangerous override below is true)
 # ""               disables the console/API entirely (scheduler still runs)
-http: ":8090"
+http: "127.0.0.1:8090"
+
+# DANGEROUS: required to bind an unauthenticated console to a non-loopback IP.
+# Leave false for normal deployments.
+allow_unauthenticated_remote: false
 
 # ── Scheduler ───────────────────────────────────────────────────────────────
 tick: 2s                    # how often the loop wakes to schedule/poll work
@@ -14,6 +18,7 @@ tick: 2s                    # how often the loop wakes to schedule/poll work
 # Task executor. Empty = in-process (tasks die on a scheduler restart).
 # A gRPC target keeps tasks alive across restarts (crash recovery), e.g.:
 #   executor: "unix:///run/cronova/executor.sock"
+# The socket parent must be private (0700); TCP executor targets are rejected.
 executor: ""
 
 # ── Authentication ──────────────────────────────────────────────────────────

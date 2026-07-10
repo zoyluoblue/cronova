@@ -3,13 +3,35 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/store"
 )
+
+func TestNewSecuresDatabaseFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mode.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("database mode = %o, want 600", got)
+	}
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -38,6 +60,56 @@ func TestMigrateSeedsDefaultPool(t *testing.T) {
 	// Migrate is idempotent.
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("second Migrate: %v", err)
+	}
+}
+
+func TestCreateManualDagRunBoundedAcrossConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bounded.db")
+	open := func() *Store {
+		s, err := New(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	a, b := open(), open()
+	ctx := context.Background()
+	if err := a.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpsertDAG(ctx, &model.DAG{DagID: "bounded", StartDate: time.Now().UTC(), MaxActiveRuns: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	stores := []*Store{a, b}
+	errs := make([]error, len(stores))
+	var wg sync.WaitGroup
+	for i, st := range stores {
+		wg.Add(1)
+		go func(i int, st *Store) {
+			defer wg.Done()
+			now := time.Now().UTC().Add(time.Duration(i) * time.Nanosecond)
+			errs[i] = st.CreateManualDagRunBounded(ctx, &model.DagRun{
+				RunID: fmt.Sprintf("bounded__%d", i), DagID: "bounded", LogicalDate: now,
+				State: model.RunQueued, TriggerType: model.TriggerManual,
+			}, 1, 1)
+		}(i, st)
+	}
+	wg.Wait()
+	successes, full := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, model.ErrQueueFull):
+			full++
+		default:
+			t.Fatalf("unexpected bounded insert error: %v", err)
+		}
+	}
+	if successes != 1 || full != 1 {
+		t.Fatalf("bounded inserts: successes=%d full=%d errors=%v", successes, full, errs)
 	}
 }
 

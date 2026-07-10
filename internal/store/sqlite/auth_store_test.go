@@ -56,12 +56,22 @@ func TestSessionLifecycleAndExpiry(t *testing.T) {
 	if err := s.CreateSession(ctx, live); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	var storedToken string
+	if err := s.db.QueryRowContext(ctx, `SELECT token FROM sessions WHERE user_id=?`, u.ID).Scan(&storedToken); err != nil {
+		t.Fatalf("read stored session token: %v", err)
+	}
+	if storedToken == live.Token || storedToken != hashSessionToken(live.Token) {
+		t.Fatalf("stored token = %q, want only its SHA-256 digest", storedToken)
+	}
 	got, err := s.GetSession(ctx, "tok-live")
 	if err != nil {
 		t.Fatalf("GetSession(live): %v", err)
 	}
 	if got.UserID != u.ID {
 		t.Fatalf("session user = %d, want %d", got.UserID, u.ID)
+	}
+	if got.Token != live.Token {
+		t.Fatalf("returned token = %q, want caller token", got.Token)
 	}
 
 	// an already-expired session must read as absent (and be pruned)
@@ -79,6 +89,36 @@ func TestSessionLifecycleAndExpiry(t *testing.T) {
 	}
 	if _, err := s.GetSession(ctx, "tok-live"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("deleted session err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMigrateHashesLegacySessionTokens(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := &model.User{Username: "legacy", PasswordHash: "h", Role: model.RoleViewer}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	const raw = "legacy-raw-cookie-token"
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions(token, user_id, expires_at) VALUES (?,?,?)`, raw, u.ID, fmtTime(time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.db.QueryRowContext(ctx, `SELECT token FROM sessions WHERE user_id=?`, u.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != hashSessionToken(raw) {
+		t.Fatalf("migrated token = %q, want %q", stored, hashSessionToken(raw))
+	}
+	if _, err := s.GetSession(ctx, raw); err != nil {
+		t.Fatalf("legacy browser token stopped working after migration: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("session migration is not idempotent: %v", err)
 	}
 }
 

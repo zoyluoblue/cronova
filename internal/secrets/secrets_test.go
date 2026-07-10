@@ -56,9 +56,18 @@ func TestLoadOrCreateKeyFile(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("key file mode = %v, want 0600", fi.Mode().Perm())
 	}
+	if fi, _ := os.Stat(filepath.Dir(path)); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("key directory mode = %v, want 0700", fi.Mode().Perm())
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	k2, created, err := LoadOrCreateKeyFile(path)
 	if err != nil || created || string(k2) != string(k1) {
 		t.Fatalf("second load must return the same key without creating")
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("existing key file mode was not repaired: %v", fi.Mode().Perm())
 	}
 	// corrupted file is an error, not a silent new key
 	os.WriteFile(path, []byte("nonsense"), 0o600)

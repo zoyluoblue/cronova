@@ -15,14 +15,14 @@ tar -xzf cronova_darwin_arm64.tar.gz
 chmod +x cronova
 ```
 
-请根据你的平台替换文件名：`cronova_linux_amd64.tar.gz`、`cronova_linux_arm64.tar.gz` 或 `cronova_darwin_amd64.tar.gz`。如需校验下载文件，每个发布版还附带一个 `SHA256SUMS` 文件。
+请根据你的平台替换文件名：`cronova_linux_amd64.tar.gz`、`cronova_linux_arm64.tar.gz` 或 `cronova_darwin_amd64.tar.gz`。每个发布版都附带 `SHA256SUMS`，请在解压前完成校验；一行安装脚本和 `cronova update` 会强制校验，缺失校验信息时直接终止。
 
 !!! tip
     压缩包里不只有二进制文件：它还会解出一个包含可直接运行的[示例 DAG](https://github.com/zoyluoblue/cronova/tree/main/dags) 的 `dags/` 目录、一份 `cronova.yaml.example` 配置模板，以及独立的 `cronova-executor`。从压缩包开始，首次启动时控制台就不会是空的。
 
 ## 方式二：从源码构建
 
-安装 **Go 1.26+** 后：
+安装 **Go 1.26.5+** 后：
 
 ```bash
 git clone https://github.com/zoyluoblue/cronova
@@ -86,7 +86,7 @@ cronova v0.2.1 darwin/arm64
 每个已加载的 DAG 都会连同其调度一起列出——这证明调度器已经启动并在读取你的 DAG 目录。
 
 !!! warning
-    认证默认是**关闭**的，全新的 `serve` 启动时会打印相应警告：任何能访问 8090 端口的人都可以触发或删除 DAG。在你自己的笔记本上跟随本教程没有问题；但在把 cronova 暴露到网络之前，请先启用登录——见[启用登录](../GETTING_STARTED.md#enabling-login)。
+    本教程中的普通开发模式 `serve` 默认**关闭认证**，但只监听 `127.0.0.1:8090`，因此仅本机可访问。未认证的非回环监听会被拒绝，除非显式打开危险豁免。对外提供访问前请先启用登录——见[启用登录](../GETTING_STARTED.md#enabling-login)。
 
 随时可以用 ++ctrl+c++ 停止服务——你的 DAG 和数据库仍保留在磁盘上，等待下一次 `./cronova serve`。
 

@@ -15,11 +15,14 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -73,6 +76,12 @@ func New(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	if path != ":memory:" && !strings.HasPrefix(path, "file::memory:") {
+		if err := os.Chmod(path, 0o600); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("secure sqlite file: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
 }
 
@@ -92,6 +101,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
 		}
+	}
+	if err := s.migrateSessionTokenHashes(ctx); err != nil {
+		return fmt.Errorf("migrate session tokens: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO pools(name, slots) VALUES (?, ?)`,
@@ -328,6 +340,32 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	return nil
 }
 
+func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO dag_runs (`+runCols+`)
+		 SELECT ?,?,?,?,?,?,?,?
+		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE dag_id=? AND state IN ('queued','running')) < ?
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < ?`,
+		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
+		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
+		r.DagID, r.DagID, perDAG, global)
+	if err != nil {
+		if isUniqueErr(err) {
+			return store.ErrAlreadyExists
+		}
+		return fmt.Errorf("create bounded dag_run %q: %w", r.RunID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	d, derr := s.GetDAG(ctx, r.DagID)
+	if derr != nil || d.DeletedAt != nil {
+		return store.ErrNotFound
+	}
+	return model.ErrQueueFull
+}
+
 func (s *Store) GetDagRun(ctx context.Context, runID string) (*model.DagRun, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+runCols+` FROM dag_runs WHERE run_id=?`, runID)
 	return scanRun(row)
@@ -363,6 +401,9 @@ func (s *Store) LatestScheduledRun(ctx context.Context, dagID string) (*model.Da
 func (s *Store) ListDagRunsPage(ctx context.Context, dagID string, states []model.RunState, limit, offset int) ([]*model.DagRun, error) {
 	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	if offset < 0 {
 		offset = 0
@@ -772,16 +813,17 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 func (s *Store) CreateSession(ctx context.Context, se *model.Session) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)`,
-		se.Token, se.UserID, fmtTime(se.ExpiresAt))
+		hashSessionToken(se.Token), se.UserID, fmtTime(se.ExpiresAt))
 	return err
 }
 
 func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
 	var se model.Session
 	var created, expires string
+	hashed := hashSessionToken(token)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT token, user_id, created_at, expires_at FROM sessions WHERE token=?`, token).
-		Scan(&se.Token, &se.UserID, &created, &expires)
+		`SELECT user_id, created_at, expires_at FROM sessions WHERE token=?`, hashed).
+		Scan(&se.UserID, &created, &expires)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -790,16 +832,49 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 	}
 	se.CreatedAt = parseLoose(created)
 	se.ExpiresAt = parseLoose(expires)
+	se.Token = token
 	if !se.ExpiresAt.After(time.Now()) { // expired: prune + treat as absent
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, token)
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, hashed)
 		return nil, store.ErrNotFound
 	}
 	return &se, nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, token)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token=?`, hashSessionToken(token))
 	return err
+}
+
+func hashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// migrateSessionTokenHashes upgrades pre-hardening rows that stored the raw
+// cookie token. The prefix makes this idempotent across every startup.
+func (s *Store) migrateSessionTokenHashes(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT token FROM sessions WHERE token NOT LIKE 'sha256:%'`)
+	if err != nil {
+		return err
+	}
+	var legacy []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		legacy = append(legacy, token)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, token := range legacy {
+		if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET token=? WHERE token=?`, hashSessionToken(token), token); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) DeleteExpiredSessions(ctx context.Context) error {

@@ -86,6 +86,9 @@ func (c *Cipher) Decrypt(stored string) (string, error) {
 func LoadOrCreateKeyFile(path string) (key []byte, created bool, err error) {
 	b, err := os.ReadFile(path)
 	if err == nil {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, false, fmt.Errorf("secure key file %s: %w", path, err)
+		}
 		key, derr := hex.DecodeString(strings.TrimSpace(string(b)))
 		if derr != nil || len(key) != 32 {
 			return nil, false, fmt.Errorf("key file %s is not a 64-char hex key", path)
@@ -100,7 +103,7 @@ func LoadOrCreateKeyFile(path string) (key []byte, created bool, err error) {
 		return nil, false, err
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, false, err
 		}
 	}

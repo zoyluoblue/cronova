@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -278,6 +280,28 @@ func TestListRunsFilterAndPaging(t *testing.T) {
 	}
 }
 
+func TestListRunsCapsPageSize(t *testing.T) {
+	h, st, _, _ := setup(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < maxRunPageSize+5; i++ {
+		if err := st.CreateDagRun(ctx, &model.DagRun{
+			RunID: fmt.Sprintf("etl__page_%03d", i), DagID: "etl", LogicalDate: base.Add(time.Duration(i) * time.Second),
+			State: model.RunSuccess, TriggerType: model.TriggerManual,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, body := get(t, h, "GET", "/api/dags/etl/runs?limit=999999")
+	if rec.Code != http.StatusOK || len(body.([]any)) != maxRunPageSize {
+		t.Fatalf("capped page: code=%d len=%d, want %d", rec.Code, len(body.([]any)), maxRunPageSize)
+	}
+	rec, _ = get(t, h, "GET", "/api/dags/etl/runs?offset=-1")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative offset code = %d, want 400", rec.Code)
+	}
+}
+
 func TestGetRunNotFound(t *testing.T) {
 	h, _, _, _ := setup(t)
 	rec, body := get(t, h, "GET", "/api/runs/no_such_run")
@@ -324,6 +348,33 @@ func TestTaskLogEdgeCases(t *testing.T) {
 	}
 	if body.(string) != "(no log yet)\n" {
 		t.Errorf("missing log body = %q", body)
+	}
+}
+
+func TestTaskLogTailAndStreamingDownload(t *testing.T) {
+	h, st, _, _ := setup(t)
+	path := filepath.Join(t.TempDir(), "large.log")
+	payload := bytes.Repeat([]byte("x"), int(defaultLogTailBytes)+257)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTaskInstance(context.Background(), &model.TaskInstance{
+		RunID: "etl__r1", TaskID: "large", State: model.TaskSuccess, Pool: "default", LogPath: path,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id := findTaskInstanceID(t, st, "etl__r1", "large")
+	url := "/api/tasks/" + strconv.FormatInt(id, 10) + "/log"
+	rec, body := get(t, h, "GET", url)
+	if rec.Code != http.StatusOK || len(body.(string)) != int(defaultLogTailBytes) {
+		t.Fatalf("tail response: code=%d bytes=%d", rec.Code, len(body.(string)))
+	}
+	if rec.Header().Get("X-Cronova-Log-Truncated") != "true" {
+		t.Fatal("tail response did not report truncation")
+	}
+	rec, body = get(t, h, "GET", url+"?download=1")
+	if rec.Code != http.StatusOK || len(body.(string)) != len(payload) {
+		t.Fatalf("download response: code=%d bytes=%d want=%d", rec.Code, len(body.(string)), len(payload))
 	}
 }
 
@@ -385,6 +436,48 @@ func TestStreamLogReplaysTerminalTask(t *testing.T) {
 				t.Errorf("stream did not end with a done event:\n%s", out)
 			}
 		})
+	}
+}
+
+func TestStreamLogBoundsInitialReplayAndLongLines(t *testing.T) {
+	h, st, _, _ := setup(t)
+	path := filepath.Join(t.TempDir(), "no-newline.log")
+	payload := append(bytes.Repeat([]byte("A"), 256), bytes.Repeat([]byte("B"), int(sseInitialTailBytes))...)
+	payload = append(payload, '\n')
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTaskInstance(context.Background(), &model.TaskInstance{
+		RunID: "etl__r1", TaskID: "long-line", State: model.TaskSuccess, Pool: "default", LogPath: path,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id := findTaskInstanceID(t, st, "etl__r1", "long-line")
+	rec, _ := get(t, h, "GET", "/api/tasks/"+strconv.FormatInt(id, 10)+"/log/stream")
+	out := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(out, "event: truncated") {
+		t.Fatalf("bounded SSE response: code=%d prefix=%q", rec.Code, out[:min(len(out), 120)])
+	}
+	if strings.Contains(out, strings.Repeat("A", 64)) {
+		t.Fatal("SSE replay included bytes older than its initial tail window")
+	}
+	for _, event := range strings.Split(out, "\n\n") {
+		if strings.HasPrefix(event, "data: ") && len(event) > sseLineChunkBytes+len("data: ") {
+			t.Fatalf("SSE data event has %d bytes, exceeds chunk bound", len(event))
+		}
+	}
+}
+
+func TestStreamLogRejectsWhenConnectionLimitReached(t *testing.T) {
+	_, st, trig, _ := setup(t)
+	srv := New(st, trig, t.TempDir(), nil, Info{})
+	srv.sseSlots = make(chan struct{}, 1)
+	srv.sseSlots <- struct{}{}
+	h := srv.Handler()
+	id := findTaskInstanceID(t, st, "etl__r1", "extract")
+	rec, _ := get(t, h, "GET", "/api/tasks/"+strconv.FormatInt(id, 10)+"/log/stream")
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("full SSE pool: code=%d retry-after=%q", rec.Code, rec.Header().Get("Retry-After"))
 	}
 }
 
