@@ -39,6 +39,9 @@ type Store interface {
 	// CreateDagRun inserts a run. It returns ErrAlreadyExists if a run for the
 	// same (dag_id, logical_date) already exists.
 	CreateDagRun(ctx context.Context, r *model.DagRun) error
+	// CreateDagRunBounded atomically inserts a run while the global queued-run
+	// bound has capacity. It is used by scheduled, dependency, and backfill runs.
+	CreateDagRunBounded(ctx context.Context, r *model.DagRun, global int) error
 	// CreateManualDagRunBounded atomically inserts a manual run only while both
 	// active-run bounds have capacity. It returns model.ErrQueueFull otherwise.
 	CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error
@@ -56,6 +59,12 @@ type Store interface {
 	// RecentRuns returns the most recent runs across all live DAGs, newest first.
 	RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, error)
 	UpdateDagRunState(ctx context.Context, runID string, state model.RunState, startedAt, finishedAt *time.Time) error
+	// UpdateDagRunSuccess atomically records a successful run and publishes its
+	// durable dependency event. Re-entering success re-arms a consumed event.
+	UpdateDagRunSuccess(ctx context.Context, runID string, startedAt, finishedAt *time.Time) error
+	// UpdateDagRunDefinition switches a run to a new immutable definition. Normal
+	// execution never calls this; an explicit terminal-run retry adopts latest.
+	UpdateDagRunDefinition(ctx context.Context, runID, definitionYAML, definitionHash string) error
 	CountActiveRuns(ctx context.Context, dagID string) (int, error)
 	// CountRunsByState returns the all-time run count grouped by state (for /metrics).
 	CountRunsByState(ctx context.Context) (map[model.RunState]int, error)
@@ -69,6 +78,8 @@ type Store interface {
 	RecordAudit(ctx context.Context, e *model.AuditEntry) error
 	// ListAudit returns audit entries newest-first; target != "" filters to one dag/run.
 	ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error)
+	// PruneAudit deletes entries older than cutoff and returns the number removed.
+	PruneAudit(ctx context.Context, cutoff time.Time) (int64, error)
 
 	// --- API tokens (Bearer auth) ---
 	CreateAPIToken(ctx context.Context, t *model.APIToken, hash string) error
@@ -95,6 +106,10 @@ type Store interface {
 	ListDownstreams(ctx context.Context, upstream string) ([]string, error)
 	// ListUpstreams returns the dag_ids downstream depends on.
 	ListUpstreams(ctx context.Context, downstream string) ([]string, error)
+	// ListPendingEvents returns oldest-first durable events for one source.
+	ListPendingEvents(ctx context.Context, source string, limit int) ([]*model.Event, error)
+	// ConsumeEvent idempotently marks an event delivered.
+	ConsumeEvent(ctx context.Context, id int64) error
 
 	// --- pools ---
 	UpsertPool(ctx context.Context, p *model.Pool) error
@@ -103,6 +118,8 @@ type Store interface {
 	// CountRunningInPool returns how many task instances currently occupy a
 	// slot in the named pool (states queued + running).
 	CountRunningInPool(ctx context.Context, pool string) (int, error)
+	// CountActiveTaskInstances returns executor slots occupied globally (queued + running).
+	CountActiveTaskInstances(ctx context.Context) (int, error)
 
 	// --- auth: users + sessions ---
 	CreateUser(ctx context.Context, u *model.User) error

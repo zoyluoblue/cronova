@@ -56,6 +56,11 @@ Because the logical date carries over, a backfilled upstream run triggers a repo
 !!! tip
     `trigger_after` takes a list, so a downstream can fan in from several upstreams. It fires only when **every** listed upstream has a successful run for that logical date, and it still respects the downstream's own `max_active_runs`.
 
+The success signal is durable: cronova commits it with the upstream run's final
+state. If the global queued-run limit is full, the signal stays pending and is
+retried on later scheduler ticks. Once admitted, the downstream waits in
+`queued` until its own `max_active_runs` slot is available.
+
 ## Trigger the chain
 
 With `cronova serve` running, fire the upstream:
@@ -138,7 +143,7 @@ If you set `sla` or `dagrun_timeout` on a DAG, breaches report through the same 
 
 ## Where to go next
 
-That's the whole tutorial — you've gone from a single `echo` task to a scheduled, dependency-aware, retry-hardened, cross-DAG pipeline with alerting, all on one binary and an embedded SQLite database. From here:
+That's the whole tutorial — you've gone from a single `echo` task to a scheduled, dependency-aware, retry-hardened, cross-DAG pipeline with alerting, all on a compact native install with embedded SQLite. From here:
 
 - **[Deployment](../DEPLOY.md)** — install cronova as a systemd/launchd service, switch to the crash-recoverable gRPC executor so running tasks survive a scheduler restart or upgrade, and keep it updated with `cronova update`.
 - **[AI Agents (MCP)](../AGENTS.md)** — let AI agents list, create, validate, and trigger DAGs through the built-in MCP server and the remote JSON CLI.

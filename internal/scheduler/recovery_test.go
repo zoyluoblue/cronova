@@ -14,6 +14,8 @@ import (
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // startExecutorServer runs a gRPC executor on a temp socket. It survives the
@@ -34,6 +36,7 @@ func startExecutorServer(t *testing.T) (string, func()) {
 	}
 	srv := grpc.NewServer()
 	pb.RegisterExecutorServer(srv, executor.NewGRPCServer(executor.NewRunner()))
+	healthpb.RegisterHealthServer(srv, health.NewServer())
 	go func() { _ = srv.Serve(lis) }()
 	return "unix://" + sock, srv.Stop
 }

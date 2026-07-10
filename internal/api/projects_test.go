@@ -285,6 +285,27 @@ func TestUploadFolderTraversalRejected(t *testing.T) {
 	}
 }
 
+func TestUploadFolderFailureLeavesExistingProjectUntouched(t *testing.T) {
+	h, projDir := projectsServer(t)
+	if rec := postFile(t, h, "app", "stable.txt", "old"); rec.Code != http.StatusOK {
+		t.Fatalf("seed upload = %d", rec.Code)
+	}
+	rec := postFiles(t, h, "app", map[string]string{
+		"stable.txt": "new",
+		"../bad.txt": "must fail",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("mixed upload = %d, want 400; body=%s", rec.Code, rec.Body)
+	}
+	got, err := os.ReadFile(filepath.Join(projDir, "app", "stable.txt"))
+	if err != nil || string(got) != "old" {
+		t.Fatalf("committed project changed after failed upload: got=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, "app", "bad.txt")); !os.IsNotExist(err) {
+		t.Fatalf("failed upload left bad.txt behind: %v", err)
+	}
+}
+
 // TestSpecToYAMLCarriesProject: the build path (UI spec -> canonical YAML) must
 // keep a shell task's project. Regression for the hand-rolled spec structs that
 // silently dropped it.

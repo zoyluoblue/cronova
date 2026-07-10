@@ -10,6 +10,8 @@ import (
 
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // shortSocketDir returns a temp dir under /tmp. Unix socket paths have a ~104
@@ -36,6 +38,7 @@ func startTestServer(t *testing.T) (string, func()) {
 	}
 	srv := grpc.NewServer()
 	pb.RegisterExecutorServer(srv, NewGRPCServer(NewRunner()))
+	healthpb.RegisterHealthServer(srv, health.NewServer())
 	go func() { _ = srv.Serve(lis) }()
 	return "unix://" + sock, srv.Stop
 }

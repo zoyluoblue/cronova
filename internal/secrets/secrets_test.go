@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -44,6 +45,45 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	c2, _ := NewCipher(key2)
 	if _, err := c2.Decrypt(sealed); err == nil {
 		t.Fatal("wrong key must fail to decrypt")
+	}
+}
+
+func TestLoadOrCreateKeyFileConcurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys", "cronova.key")
+	const workers = 16
+	keys := make([][]byte, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			keys[i], _, errs[i] = LoadOrCreateKeyFile(path)
+		}(i)
+	}
+	wg.Wait()
+	for i := range workers {
+		if errs[i] != nil {
+			t.Fatalf("worker %d: %v", i, errs[i])
+		}
+		if string(keys[i]) != string(keys[0]) {
+			t.Fatalf("worker %d observed a different key", i)
+		}
+	}
+}
+
+func TestLoadOrCreateKeyFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte(strings.Repeat("0", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "cronova.key")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateKeyFile(link); err == nil {
+		t.Fatal("symlink key file was accepted")
 	}
 }
 

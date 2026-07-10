@@ -1,7 +1,7 @@
 // Package sqlite is the SQLite-backed implementation of store.Store.
 //
-// It uses the pure-Go modernc.org/sqlite driver (no CGO) so cronova stays a
-// single static binary. The connection runs with a rollback journal (DELETE
+// It uses the pure-Go modernc.org/sqlite driver (no CGO) so cronova's binaries
+// remain static. The connection runs with a rollback journal (DELETE
 // mode, for cross-process safety — see New) and a busy timeout, and access is
 // serialized via MaxOpenConns(1) (see docs/ARCHITECTURE.md §6).
 //
@@ -97,6 +97,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	for _, alter := range []string{
 		`ALTER TABLE dags ADD COLUMN deleted_at DATETIME`,
 		`ALTER TABLE dag_runs ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dag_runs ADD COLUMN definition_yaml TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dag_runs ADD COLUMN definition_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_instances ADD COLUMN definition_hash TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
@@ -104,6 +107,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	if err := s.migrateSessionTokenHashes(ctx); err != nil {
 		return fmt.Errorf("migrate session tokens: %w", err)
+	}
+	// Older releases created events as an unused, non-unique reserved table.
+	// Collapse any manually-inserted duplicates before enforcing idempotent keys.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE id NOT IN (SELECT MIN(id) FROM events GROUP BY source, event_key)`); err != nil {
+		return fmt.Errorf("deduplicate events: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source_key ON events(source, event_key)`); err != nil {
+		return fmt.Errorf("index events: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO pools(name, slots) VALUES (?, ?)`,
@@ -275,7 +286,7 @@ func (s *Store) SetDAGPaused(ctx context.Context, dagID string, paused bool) err
 
 // --- DAG runs ---
 
-const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params`
+const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params, definition_yaml, definition_hash`
 
 func marshalParams(p map[string]string) string {
 	if len(p) == 0 {
@@ -301,7 +312,8 @@ func scanRun(sc scanner) (*model.DagRun, error) {
 	var logStr, state, trig string
 	var startNS, finNS sql.NullString
 	var params string
-	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS, &params)
+	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS, &params,
+		&r.DefinitionYAML, &r.DefinitionHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -325,9 +337,10 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	// SELECT inserts zero rows when deleted_at IS NOT NULL.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
+		 SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
-		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params), r.DagID)
+		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
+		r.DefinitionYAML, r.DefinitionHash, r.DagID)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -340,15 +353,41 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	return nil
 }
 
+func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global int) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO dag_runs (`+runCols+`)
+		 SELECT ?,?,?,?,?,?,?,?,?,?
+		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < ?`,
+		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
+		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
+		r.DefinitionYAML, r.DefinitionHash, r.DagID, global)
+	if err != nil {
+		if isUniqueErr(err) {
+			return store.ErrAlreadyExists
+		}
+		return fmt.Errorf("create bounded dag_run %q: %w", r.RunID, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	d, derr := s.GetDAG(ctx, r.DagID)
+	if derr != nil || d.DeletedAt != nil {
+		return store.ErrNotFound
+	}
+	return model.ErrQueueFull
+}
+
 func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,?,?
+		 SELECT ?,?,?,?,?,?,?,?,?,?
 		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)
 		   AND (SELECT COUNT(*) FROM dag_runs WHERE dag_id=? AND state IN ('queued','running')) < ?
 		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < ?`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
+		r.DefinitionYAML, r.DefinitionHash,
 		r.DagID, r.DagID, perDAG, global)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -466,7 +505,8 @@ func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, err
 	// sub-second one ("…05.3Z") don't compare lexicographically — strftime('%s')
 	// normalizes both to a numeric instant so same-second runs sort correctly.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at, r.params
+		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at, r.params,
+		        r.definition_yaml, r.definition_hash
 		 FROM dag_runs r JOIN dags d ON r.dag_id=d.dag_id
 		 WHERE d.deleted_at IS NULL
 		 ORDER BY COALESCE(CAST(strftime('%s', r.started_at) AS INTEGER), CAST(strftime('%s', r.logical_date) AS INTEGER)) DESC,
@@ -499,6 +539,48 @@ func (s *Store) UpdateDagRunState(ctx context.Context, runID string, state model
 	return nil
 }
 
+// UpdateDagRunSuccess makes the state transition and dependency publication one
+// SQLite transaction. ON CONFLICT re-arms the event when an operator changes a
+// run away from success and later marks it successful again.
+func (s *Store) UpdateDagRunSuccess(ctx context.Context, runID string, startedAt, finishedAt *time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE dag_runs SET state=?, started_at=?, finished_at=? WHERE run_id=?`,
+		string(model.RunSuccess), fmtNullTime(startedAt), fmtNullTime(finishedAt), runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO events(source, event_key, payload, consumed)
+VALUES (?, ?, '', 0)
+ON CONFLICT(source, event_key) DO UPDATE SET
+    consumed=0,
+    created_at=CURRENT_TIMESTAMP`, model.EventSourceDependency, runID); err != nil {
+		return fmt.Errorf("publish dependency event for run %q: %w", runID, err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpdateDagRunDefinition(ctx context.Context, runID, definitionYAML, definitionHash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE dag_runs SET definition_yaml=?, definition_hash=? WHERE run_id=?`,
+		definitionYAML, definitionHash, runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) CountActiveRuns(ctx context.Context, dagID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
@@ -509,14 +591,14 @@ func (s *Store) CountActiveRuns(ctx context.Context, dagID string) (int, error) 
 
 // --- task instances ---
 
-const tiCols = `id, run_id, task_id, state, try_number, max_retries, pool, priority, executor_ref, log_path, started_at, finished_at`
+const tiCols = `id, run_id, task_id, state, try_number, max_retries, pool, priority, definition_hash, executor_ref, log_path, started_at, finished_at`
 
 func scanTI(sc scanner) (*model.TaskInstance, error) {
 	var ti model.TaskInstance
 	var state string
 	var startNS, finNS sql.NullString
 	err := sc.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &state, &ti.TryNumber, &ti.MaxRetries,
-		&ti.Pool, &ti.Priority, &ti.ExecutorRef, &ti.LogPath, &startNS, &finNS)
+		&ti.Pool, &ti.Priority, &ti.DefinitionHash, &ti.ExecutorRef, &ti.LogPath, &startNS, &finNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -531,10 +613,10 @@ func scanTI(sc scanner) (*model.TaskInstance, error) {
 
 func (s *Store) CreateTaskInstance(ctx context.Context, ti *model.TaskInstance) error {
 	res, err := s.db.ExecContext(ctx, `
-INSERT INTO task_instances (run_id, task_id, state, try_number, max_retries, pool, priority, executor_ref, log_path, started_at, finished_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+INSERT INTO task_instances (run_id, task_id, state, try_number, max_retries, pool, priority, definition_hash, executor_ref, log_path, started_at, finished_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ti.RunID, ti.TaskID, string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority,
-		ti.ExecutorRef, ti.LogPath, fmtNullTime(ti.StartedAt), fmtNullTime(ti.FinishedAt))
+		ti.DefinitionHash, ti.ExecutorRef, ti.LogPath, fmtNullTime(ti.StartedAt), fmtNullTime(ti.FinishedAt))
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -592,9 +674,9 @@ func (s *Store) ListTaskInstancesByState(ctx context.Context, state model.TaskSt
 
 func (s *Store) UpdateTaskInstance(ctx context.Context, ti *model.TaskInstance) error {
 	res, err := s.db.ExecContext(ctx, `
-UPDATE task_instances SET state=?, try_number=?, max_retries=?, pool=?, priority=?, executor_ref=?, log_path=?, started_at=?, finished_at=?
+UPDATE task_instances SET state=?, try_number=?, max_retries=?, pool=?, priority=?, definition_hash=?, executor_ref=?, log_path=?, started_at=?, finished_at=?
 WHERE id=?`,
-		string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority, ti.ExecutorRef, ti.LogPath,
+		string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority, ti.DefinitionHash, ti.ExecutorRef, ti.LogPath,
 		fmtNullTime(ti.StartedAt), fmtNullTime(ti.FinishedAt), ti.ID)
 	if err != nil {
 		return err
@@ -614,9 +696,9 @@ const terminalTaskStates = `'success','failed','upstream_failed','skipped','canc
 // whether the write applied.
 func (s *Store) UpdateTaskInstanceGuarded(ctx context.Context, ti *model.TaskInstance, expectRef string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
-UPDATE task_instances SET state=?, try_number=?, max_retries=?, pool=?, priority=?, executor_ref=?, log_path=?, started_at=?, finished_at=?
+UPDATE task_instances SET state=?, try_number=?, max_retries=?, pool=?, priority=?, definition_hash=?, executor_ref=?, log_path=?, started_at=?, finished_at=?
 WHERE id=? AND executor_ref=? AND state NOT IN (`+terminalTaskStates+`)`,
-		string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority, ti.ExecutorRef, ti.LogPath,
+		string(ti.State), ti.TryNumber, ti.MaxRetries, ti.Pool, ti.Priority, ti.DefinitionHash, ti.ExecutorRef, ti.LogPath,
 		fmtNullTime(ti.StartedAt), fmtNullTime(ti.FinishedAt), ti.ID, expectRef)
 	if err != nil {
 		return false, err
@@ -654,6 +736,45 @@ func (s *Store) ListUpstreams(ctx context.Context, downstream string) ([]string,
 	return s.queryStrings(ctx, `SELECT upstream_dag FROM dag_dependencies WHERE downstream_dag=? ORDER BY upstream_dag`, downstream)
 }
 
+func (s *Store) ListPendingEvents(ctx context.Context, source string, limit int) ([]*model.Event, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, source, event_key, payload, consumed, created_at
+FROM events
+WHERE source=? AND consumed=0
+ORDER BY id
+LIMIT ?`, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Event
+	for rows.Next() {
+		var (
+			e        model.Event
+			consumed int
+			created  string
+		)
+		if err := rows.Scan(&e.ID, &e.Source, &e.EventKey, &e.Payload, &consumed, &created); err != nil {
+			return nil, err
+		}
+		e.Consumed = consumed != 0
+		e.CreatedAt = parseLoose(created)
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ConsumeEvent(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE events SET consumed=1 WHERE id=?`, id)
+	return err
+}
+
 func (s *Store) queryStrings(ctx context.Context, query string, args ...any) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -674,6 +795,9 @@ func (s *Store) queryStrings(ctx context.Context, query string, args ...any) ([]
 // --- pools ---
 
 func (s *Store) UpsertPool(ctx context.Context, p *model.Pool) error {
+	if p == nil || p.Slots < 1 || p.Slots > model.MaxPoolSlots {
+		return fmt.Errorf("pool slots must be between 1 and %d", model.MaxPoolSlots)
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO pools(name, slots) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET slots=excluded.slots`,
 		p.Name, p.Slots)
@@ -715,6 +839,13 @@ func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error
 	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM task_instances WHERE pool=? AND state IN ('queued','running')`, pool).
 		Scan(&n)
+	return n, err
+}
+
+func (s *Store) CountActiveTaskInstances(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_instances WHERE state IN ('queued','running')`).Scan(&n)
 	return n, err
 }
 
@@ -1148,6 +1279,12 @@ func (s *Store) PruneRuns(ctx context.Context, cutoff time.Time) ([]*model.DagRu
 			ph = append(ph, "?")
 		}
 		in := strings.Join(ph, ",")
+		eventArgs := make([]any, 0, len(ids)+1)
+		eventArgs = append(eventArgs, model.EventSourceDependency)
+		eventArgs = append(eventArgs, ids...)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE source=? AND event_key IN (`+in+`)`, eventArgs...); err != nil {
+			return nil, fmt.Errorf("prune dependency events: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM task_instances WHERE run_id IN (`+in+`)`, ids...); err != nil {
 			return nil, fmt.Errorf("prune task_instances: %w", err)
 		}
@@ -1199,6 +1336,14 @@ func (s *Store) ListAudit(ctx context.Context, target string, limit int) ([]*mod
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) PruneAudit(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_log WHERE ts < ?`, fmtTime(cutoff))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // CreateAPIToken inserts a token, storing only its hash. The plaintext is never

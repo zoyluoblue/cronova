@@ -120,7 +120,9 @@ func TestDeletedUpstreamBlocksDownstream(t *testing.T) {
 	}
 	// up_c's completion would normally fire down_b (both upstreams succeeded at
 	// the same logical date) — but up_a is archived, so down_b must stay blocked.
-	s.triggerDownstreams(ctx, cRun)
+	if deferred, err := s.triggerDownstreams(ctx, cRun); err != nil || deferred {
+		t.Fatalf("triggerDownstreams: deferred=%v err=%v", deferred, err)
+	}
 	if runs, _ := s.store.ListDagRuns(ctx, "down_b", 10); len(runs) != 0 {
 		t.Errorf("down_b should not fire with an archived upstream, got %d run(s)", len(runs))
 	}

@@ -1,6 +1,6 @@
 # cronova CLI Reference
 
-Every `cronova` command, subcommand, and flag — the single binary that runs the workflow scheduler, manages the installed service, operates DAGs from the terminal, and serves AI agents over the REST API. Run `cronova <command> -h` for any command's own flags. For first steps see [Getting Started](GETTING_STARTED.md); for the DAG YAML schema see the [DAG Reference](DAG_REFERENCE.md).
+Every `cronova` command, subcommand, and flag — the main CLI binary runs the scheduler, manages the installed service pair, operates DAGs from the terminal, and serves AI agents over the REST API. Run `cronova <command> -h` for any command's own flags. For first steps see [Getting Started](GETTING_STARTED.md); for the DAG YAML schema see the [DAG Reference](DAG_REFERENCE.md).
 
 ```
 cronova <command> [args] [flags]
@@ -19,7 +19,7 @@ Commands fall into four groups:
 
 ### `cronova serve`
 
-Run the scheduling loop plus the web console and REST API (default `http://localhost:8090`). This is the whole server — cron parsing, catchup, retries, task execution, UI, and API in one process.
+Run the scheduling loop plus the web console and REST API (default `http://localhost:8090`). With an empty `-executor`, tasks run in this process; installed services pass a private Unix socket and dispatch tasks to the standalone executor.
 
 ```bash
 cronova serve -db data/cronova.db -dags dags -http 127.0.0.1:8090
@@ -32,15 +32,22 @@ cronova serve -db data/cronova.db -dags dags -http 127.0.0.1:8090
 | `-dags` | `dags` | Directory of DAG YAML definitions. |
 | `-logs` | `logs` | Directory for task log files. |
 | `-projects` | `~/.cronova/projects` | Directory for uploaded [project files](tutorial/projects.md). |
+| `-workspaces` | system temp directory | Shared directory for per-attempt project copies; managed services set an explicit state path. |
 | `-executor` | *(in-process)* | Absolute Unix-socket executor target. Empty = in-process executor; TCP targets are rejected. |
 | `-tick` | `2s` | Scheduling-loop interval. |
 | `-retention` | `2160h` (90 days) | Delete finished runs **and their logs** older than this; `0` = keep forever. See [`cronova prune`](#cronova-prune) for one-off cleanups. |
+| `-audit-retention` | `8760h` (365 days) | Delete audit records older than this; `0` = keep forever. |
+| `-max-queued-runs` | `10000` | Global queued-run admission limit across all trigger sources. |
+| `-max-active-runs` | `1000` | Global running-run limit across all DAGs. |
+| `-max-concurrent-tasks` | `64` | Global queued/running task limit across all pools. |
 | `-auth` | off | Require login for the console/API (overrides config). |
 | `-allow-unauthenticated-remote` | off | **Dangerous:** permit auth-off serving on a non-loopback address. |
 | `-config` | `cronova.yaml` | Path to a YAML config file (optional). |
 | `key_file` / `CRONOVA_KEY_FILE` | `cronova.key` | Config/env only (no flag): key file that encrypts connection passwords at rest. Auto-generated (`0600`) on first `serve` — back it up; losing it makes stored passwords unreadable. `none` disables encryption (plaintext, with a startup warning). |
 
 Settings resolve in order: built-in defaults ← config file ← `CRONOVA_*` environment ← explicit flags. `CRONOVA_WEB_DIR` (dev only) serves the console assets from disk instead of the embedded copies.
+Behind a reverse proxy, list its peer IPs/CIDRs under `auth.trusted_proxies` or
+`CRONOVA_TRUSTED_PROXIES`; forwarding headers from every other peer are ignored.
 
 ### `cronova-executor` (separate binary)
 
@@ -68,7 +75,7 @@ These wrap the host service manager — systemd on Linux, launchd on macOS — s
 
 ### `cronova start` / `stop` / `restart`
 
-Control the installed service. `start` and `restart` confirm the daemon actually *stays* running (not just that it loaded) before reporting success — a crash-looping binary is an error, not a green light.
+Control the installed service pair. `start` starts the executor before the scheduler; `stop` stops both. `restart` restarts only the scheduler so in-flight tasks remain owned by the running executor. Startup is reported successful only after both required daemons remain healthy.
 
 ```bash
 cronova restart
@@ -78,7 +85,7 @@ No flags. On a host without an installed service, use `cronova serve` directly.
 
 ### `cronova status`
 
-Show the installed service's status. Read-only — never escalates. On Linux it runs `systemctl status cronova`; on macOS, `launchctl print system/com.cronova`.
+Show scheduler and executor status. Read-only — never escalates. On Linux it queries both systemd units; on macOS, both launchd labels.
 
 ```bash
 cronova status
@@ -86,7 +93,7 @@ cronova status
 
 ### `cronova init`
 
-First-time setup wizard: HTTP port, bind scope (all interfaces vs. `127.0.0.1`), admin account, and auth on/off — each with an Enter-to-accept default. Writes the server config (`cronova.yaml`) and a `0600` secrets file (`cronova.env`) with the seed admin; `serve` creates that admin idempotently on first start. Re-running shows your current values as the defaults.
+First-time setup wizard: HTTP port, bind scope (all interfaces vs. `127.0.0.1`), admin account, and auth on/off — each with an Enter-to-accept default. It writes the complete server config, seeds or rotates the admin hash directly in SQLite, and writes a credential-free `0600` environment-override template. Re-running with a blank password keeps the current credential.
 
 ```bash
 cronova init          # interactive
@@ -96,14 +103,14 @@ cronova init -yes     # accept defaults / CRONOVA_* env, no prompts
 | Flag | Default | Description |
 |---|---|---|
 | `-config` | `cronova.yaml` | Config file to write (env `CRONOVA_CONFIG`). |
-| `-env` | `cronova.env` | Secrets file to write — the admin seed (env `CRONOVA_ENV_FILE`). |
+| `-env` | `cronova.env` | Credential-free `0600` environment-override template to write (env `CRONOVA_ENV_FILE`). |
 | `-yes` | | Non-interactive: accept defaults / env without prompting. |
 
 Non-interactive installs preset values with `CRONOVA_ADMIN_USER`, `CRONOVA_ADMIN_PASSWORD`, `CRONOVA_AUTH`, `CRONOVA_HTTP`, etc. A fresh install defaults auth to **on**; an unrecognized `CRONOVA_AUTH` value never silently disables it.
 
 ### `cronova update`
 
-Download a prebuilt release from GitHub, require and verify its SHA256 checksum, atomically swap the binary (and `cronova-executor`, if installed), refresh the service definition (unit/plist), and restart the service. Missing checksum metadata aborts the update.
+Download a prebuilt release from GitHub, require and verify its SHA256 checksum, and atomically swap both binaries. Managed service definitions are refreshed only when unchanged since installation; customized files are preserved and the new candidates are written as `*.dist`. The scheduler is restarted and checked, while an already-running executor is left alive for in-flight tasks. Missing checksum metadata aborts the update.
 
 ```bash
 cronova update                               # latest release

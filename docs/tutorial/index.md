@@ -1,6 +1,6 @@
 # Tutorial
 
-This tutorial teaches you cronova — the single-binary, self-hosted **workflow scheduler** and open-source Airflow alternative — step by step, from installing the binary to running a production-shaped pipeline with retries, pools, and cross-DAG dependencies.
+This tutorial teaches you cronova — the lightweight, self-hosted **workflow scheduler** and open-source Airflow alternative — step by step, from installing the release to running a production-shaped pipeline with retries, pools, and cross-DAG dependencies.
 
 Each chapter builds on the previous one, but is also written to stand on its own. If you want a specific topic, jump straight to it.
 

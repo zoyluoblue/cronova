@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,24 @@ func TestReadyzReflectsDBHealth(t *testing.T) {
 	rec, body = get(t, h, "GET", "/readyz")
 	if rec.Code != http.StatusServiceUnavailable || body.(map[string]any)["status"] != "not ready" {
 		t.Fatalf("unhealthy readyz = %d %v, want 503 not ready", rec.Code, body)
+	}
+}
+
+func TestReadyzReflectsExecutorHealth(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.New(filepath.Join(dir, "ready-executor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, &stubTrigger{}, dir, nil, Info{})
+	srv.SetReadinessCheck(func(context.Context) error { return errors.New("executor unavailable") })
+	rec, body := get(t, srv.Handler(), "GET", "/readyz")
+	if rec.Code != http.StatusServiceUnavailable || body.(map[string]any)["component"] != "executor" {
+		t.Fatalf("executor-down readyz = %d %v", rec.Code, body)
 	}
 }
 

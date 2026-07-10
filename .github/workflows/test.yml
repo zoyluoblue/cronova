@@ -1,6 +1,5 @@
-# Run the full test suite on every push and pull request, so regressions are
-# caught before they land — release.yml only builds tagged releases and never
-# runs tests.
+# Run the full test suite on every push and pull request. Tagged releases repeat
+# the same gates before any artifact is built or published.
 name: test
 
 on:
@@ -12,14 +11,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: verify modules
+        run: go mod verify
       - name: go vet
         run: go vet ./...
       - name: go test (race)
         run: go test -race ./...
+      - name: coverage floor
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); if ($3 + 0 < 55) { print "coverage " $3 "% is below 55%"; exit 1 } }'
+      - name: vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: deployment script syntax
+        run: bash -n deploy/*.sh scripts/*.sh

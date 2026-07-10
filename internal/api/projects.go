@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/projectfs"
 )
 
 // Uploaded projects are plain directories under the server's projects dir; a
@@ -57,6 +58,9 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []projectInfo{})
 		return
 	}
+	lock := projectfs.Lock(s.projectsDir)
+	lock.RLock()
+	defer lock.RUnlock()
 	entries, err := os.ReadDir(s.projectsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -68,7 +72,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []projectInfo{}
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".upload-") || strings.HasPrefix(e.Name(), ".previous-") {
 			continue
 		}
 		files, size := dirStats(filepath.Join(s.projectsDir, e.Name()))
@@ -88,6 +92,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	lock := projectfs.Lock(s.projectsDir)
+	lock.RLock()
+	defer lock.RUnlock()
 	if _, err := os.Stat(dir); err != nil {
 		httpErr(w, http.StatusNotFound, "project not found")
 		return
@@ -131,12 +138,6 @@ func (s *Server) uploadProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projDir := filepath.Join(s.projectsDir, name)
-	existing := int64(0)
-	if _, sz := dirStats(projDir); sz > 0 {
-		existing = sz
-	}
-
 	var files []*multipart.FileHeader
 	var paths []string // optional, parallel to files: project-root-relative paths
 	if r.MultipartForm != nil {
@@ -144,81 +145,80 @@ func (s *Server) uploadProject(w http.ResponseWriter, r *http.Request) {
 		paths = r.MultipartForm.Value["path"]
 	}
 
-	// Zip archive: a single *.zip part is extracted rather than stored verbatim.
-	if len(files) == 1 && isZipName(files[0].Filename) {
-		n, err := s.extractZipUpload(projDir, files[0], existing)
-		if err != nil {
-			writeUploadErr(w, err)
-			return
-		}
-		s.audit(r, "project.upload", name+" (zip)", fmt.Sprintf("%d files", n))
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "project": name, "files": n})
+	lock := projectfs.Lock(s.projectsDir)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := os.MkdirAll(s.projectsDir, 0o755); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	projDir := filepath.Join(s.projectsDir, name)
+	staging, err := os.MkdirTemp(s.projectsDir, ".upload-"+name+"-")
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "create upload staging failed")
+		return
+	}
+	defer os.RemoveAll(staging)
+	if info, statErr := os.Stat(projDir); statErr == nil && info.IsDir() {
+		if err := copyProjectTree(projDir, staging); err != nil {
+			httpErr(w, http.StatusInternalServerError, "stage existing project failed")
+			return
+		}
+	}
 
-	// One or more file parts (single file or folder), else an inline script.
 	var written int
-	if len(files) > 0 {
-		var incoming int64
-		for _, fh := range files {
-			incoming += fh.Size
-			if fh.Size > maxProjectFileSize {
-				httpErr(w, http.StatusRequestEntityTooLarge, "a file exceeds the size limit")
-				return
-			}
-		}
-		if existing+incoming > maxProjectSize {
-			httpErr(w, http.StatusRequestEntityTooLarge, "project exceeds total size limit")
-			return
-		}
-		if err := os.MkdirAll(projDir, 0o755); err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	isZip := len(files) == 1 && isZipName(files[0].Filename)
+	if isZip {
+		written, err = extractZipUpload(staging, files[0])
+	} else if len(files) > 0 {
 		for i, fh := range files {
-			// The multipart layer strips directories from fh.Filename (a security
-			// default), so a folder upload carries each file's project-relative
-			// path in a parallel `path` field. Fall back to the (base) filename.
+			if fh.Size > maxProjectFileSize {
+				err = errTooBig
+				break
+			}
 			rel := fh.Filename
 			if i < len(paths) && paths[i] != "" {
 				rel = paths[i]
 			}
-			f, err := fh.Open()
-			if err != nil {
-				httpErr(w, http.StatusInternalServerError, "read upload failed")
-				return
+			f, openErr := fh.Open()
+			if openErr != nil {
+				err = openErr
+				break
 			}
-			err = writeProjectFile(projDir, rel, f)
+			err = writeProjectFile(staging, rel, f)
 			_ = f.Close()
 			if err != nil {
-				writeUploadErr(w, err)
-				return
+				break
 			}
 			written++
 		}
 	} else {
-		filename := filepath.Base(r.FormValue("filename"))
+		filename := r.FormValue("filename")
 		if !safeFileName(filename) {
 			httpErr(w, http.StatusBadRequest, "invalid or missing filename")
 			return
 		}
-		content := r.FormValue("content")
-		if existing+int64(len(content)) > maxProjectSize {
-			httpErr(w, http.StatusRequestEntityTooLarge, "project exceeds total size limit")
-			return
-		}
-		if err := os.MkdirAll(projDir, 0o755); err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := writeProjectFile(projDir, filename, strings.NewReader(content)); err != nil {
-			writeUploadErr(w, err)
-			return
-		}
+		err = writeProjectFile(staging, filename, strings.NewReader(r.FormValue("content")))
 		written = 1
 	}
+	if err != nil {
+		writeUploadErr(w, err)
+		return
+	}
+	if _, size := dirStats(staging); size > maxProjectSize {
+		writeUploadErr(w, errTooBig)
+		return
+	}
+	if err := commitProjectTree(projDir, staging); err != nil {
+		httpErr(w, http.StatusInternalServerError, "commit upload failed")
+		return
+	}
 
-	s.audit(r, "project.upload", name, fmt.Sprintf("%d file(s)", written))
+	target := name
+	if isZip {
+		target += " (zip)"
+	}
+	s.audit(r, "project.upload", target, fmt.Sprintf("%d file(s)", written))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "project": name, "files": written})
 }
 
@@ -295,7 +295,7 @@ func writeProjectFile(projDir, relPath string, src io.Reader) error {
 
 // extractZipUpload extracts a .zip part into projDir with zip-slip protection,
 // per-entry and total size caps. Returns the number of files written.
-func (s *Server) extractZipUpload(projDir string, fh *multipart.FileHeader, existing int64) (int, error) {
+func extractZipUpload(projDir string, fh *multipart.FileHeader) (int, error) {
 	f, err := fh.Open()
 	if err != nil {
 		return 0, err
@@ -316,7 +316,7 @@ func (s *Server) extractZipUpload(projDir string, fh *multipart.FileHeader, exis
 		}
 		total += int64(e.UncompressedSize64)
 	}
-	if existing+total > maxProjectSize {
+	if total > maxProjectSize {
 		return 0, errTooBig
 	}
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -341,12 +341,74 @@ func (s *Server) extractZipUpload(projDir string, fh *multipart.FileHeader, exis
 	return n, nil
 }
 
+// copyProjectTree copies only plain directories and regular files. Uploaded
+// projects never preserve symlinks or device nodes across a version swap.
+func copyProjectTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		in, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		err = writeProjectFile(dst, filepath.ToSlash(rel), in)
+		_ = in.Close()
+		return err
+	})
+}
+
+// commitProjectTree swaps staging into place. Callers hold the project root's
+// write lock, so readers observe either the old complete tree or the new one.
+func commitProjectTree(dst, staging string) error {
+	backup, err := os.MkdirTemp(filepath.Dir(dst), ".previous-"+filepath.Base(dst)+"-")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(backup); err != nil {
+		return err
+	}
+	hadOld := false
+	if _, err := os.Stat(dst); err == nil {
+		if err := os.Rename(dst, backup); err != nil {
+			return err
+		}
+		hadOld = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(staging, dst); err != nil {
+		if hadOld {
+			_ = os.Rename(backup, dst)
+		}
+		return err
+	}
+	if hadOld {
+		_ = os.RemoveAll(backup)
+	}
+	return nil
+}
+
 // DELETE /api/projects/{name} — remove a project directory.
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	dir, ok := s.projectDir(w, r)
 	if !ok {
 		return
 	}
+	lock := projectfs.Lock(s.projectsDir)
+	lock.Lock()
+	defer lock.Unlock()
 	if _, err := os.Stat(dir); err != nil {
 		httpErr(w, http.StatusNotFound, "project not found")
 		return

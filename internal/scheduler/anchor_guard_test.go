@@ -87,6 +87,17 @@ tasks:
 		t.Fatalf("backfill created=%d err=%v", created, err)
 	}
 	s.tickOnce(ctx)
+	// tickOnce dispatches the first real `sleep` process asynchronously. Always
+	// cancel and join it before TempDir/store cleanup, including on assertion failure.
+	t.Cleanup(func() {
+		runs, _ := s.store.ListDagRuns(context.Background(), "gated", 100)
+		for _, run := range runs {
+			if run.State == model.RunRunning || run.State == model.RunQueued {
+				_ = s.CancelRun(context.Background(), run.RunID)
+			}
+		}
+		s.WaitInflight()
+	})
 	runs, _ := s.store.ListDagRuns(ctx, "gated", 100)
 	var running, queued int
 	for _, r := range runs {

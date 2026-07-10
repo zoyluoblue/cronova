@@ -13,7 +13,7 @@
 #   CRONOVA_START=0                 install but don't start (default: start)
 #   CRONOVA_NONINTERACTIVE=1        skip the wizard even with a TTY (defaults + env)
 #   CRONOVA_BASE_URL=<origin>       download from a private mirror instead of GitHub
-# Admin seed (-> cronova.env):
+# Admin seed (hashed directly into SQLite; plaintext is never persisted):
 #   CRONOVA_ADMIN_USER=admin        seed this admin username
 #   CRONOVA_ADMIN_PASSWORD=secret   seed this admin password (else one is generated)
 # Server config (-> cronova.yaml, non-interactive install):
@@ -22,7 +22,7 @@
 #   CRONOVA_SESSION_TTL=24h         login session lifetime
 #   CRONOVA_SECURE_COOKIE=true      mark the session cookie Secure (set behind HTTPS)
 #   CRONOVA_TICK=2s                 scheduler loop interval
-#   CRONOVA_EXECUTOR=<gRPC target>  decoupled executor (empty = in-process)
+# Installed services always use the bundled standalone Unix-socket executor.
 set -euo pipefail
 
 REPO="zoyluoblue/cronova"

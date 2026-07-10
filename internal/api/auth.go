@@ -97,7 +97,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		// POSTs), but an Origin/Referer check closes the residual gap and covers
 		// login CSRF too. Machine clients (Authorization: Bearer) are exempt — they
 		// are legitimately cross-origin and carry no ambient cookie to abuse.
-		if isUnsafeMethod(r.Method) && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") && !sameOrigin(r) {
+		if isUnsafeMethod(r.Method) && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") && !s.sameOrigin(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request blocked"})
 			return
 		}
@@ -135,12 +135,9 @@ func isUnsafeMethod(m string) bool {
 // on a cross-origin unsafe request, so their absence means it is not a
 // browser-driven cross-site attack.
 //
-// The comparison is against the PUBLIC host: behind a TLS-terminating reverse
-// proxy the browser Origin carries the external hostname while r.Host is the
-// internal upstream address, so we honor X-Forwarded-Host first (the standard
-// header proxies set). Otherwise a proxy that does not rewrite Host would make
-// every state-changing console request fail the check.
-func sameOrigin(r *http.Request) bool {
+// The comparison is against the PUBLIC host when the TCP peer is a trusted
+// proxy. Forwarded headers from direct clients are ignored.
+func (s *Server) sameOrigin(r *http.Request) bool {
 	src := r.Header.Get("Origin")
 	if src == "" {
 		src = r.Header.Get("Referer")
@@ -152,21 +149,10 @@ func sameOrigin(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return u.Host == effectiveHost(r)
+	return u.Host == s.effectiveHost(r)
 }
 
-// effectiveHost is the host the browser addressed: the first X-Forwarded-Host
-// value if a proxy set one, else the request's own Host.
-func effectiveHost(r *http.Request) string {
-	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
-		// A proxy may append a comma-separated chain; the client-facing host is first.
-		if i := strings.IndexByte(xfh, ','); i >= 0 {
-			xfh = xfh[:i]
-		}
-		return strings.TrimSpace(xfh)
-	}
-	return r.Host
-}
+func sameOrigin(r *http.Request) bool { return (&Server{}).sameOrigin(r) }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
@@ -199,7 +185,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	// is locked out with exponential growth. Checked before touching the store
 	// so a locked-out attacker learns nothing about account existence.
 	now := time.Now()
-	limKeys := []string{"u:" + req.Username, "ip:" + clientIP(r.RemoteAddr)}
+	clientAddr := s.clientIP(r)
+	limKeys := []string{"u:" + req.Username, "ip:" + clientAddr}
 	if wait := s.loginLim.retryAfter(now, limKeys...); wait > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed logins — try again later"})
@@ -207,7 +194,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	loginFailed := func() {
 		s.loginLim.fail(now, limKeys...)
-		s.audit(r, "login_failed", truncate(req.Username, 64), "from "+clientIP(r.RemoteAddr))
+		s.audit(r, "login_failed", truncate(req.Username, 64), "from "+clientAddr)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 	}
 	user, err := s.store.GetUserByUsername(r.Context(), req.Username)
@@ -263,11 +250,20 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// GET /readyz — readiness (DB reachable).
+// GET /readyz — readiness (DB and configured runtime dependencies reachable).
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.CountUsers(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 		return
+	}
+	if s.readyCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		err := s.readyCheck(ctx)
+		cancel()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready", "component": "executor"})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }

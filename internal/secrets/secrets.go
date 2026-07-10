@@ -84,30 +84,73 @@ func (c *Cipher) Decrypt(stored string) (string, error) {
 // whether a new key was minted — callers log that so operators know to back
 // the file up.
 func LoadOrCreateKeyFile(path string) (key []byte, created bool, err error) {
-	b, err := os.ReadFile(path)
-	if err == nil {
+	load := func() ([]byte, error) {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+			return nil, fmt.Errorf("key file %s must be a regular file, not a symlink", path)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
 		if err := os.Chmod(path, 0o600); err != nil {
-			return nil, false, fmt.Errorf("secure key file %s: %w", path, err)
+			return nil, fmt.Errorf("secure key file %s: %w", path, err)
 		}
-		key, derr := hex.DecodeString(strings.TrimSpace(string(b)))
-		if derr != nil || len(key) != 32 {
-			return nil, false, fmt.Errorf("key file %s is not a 64-char hex key", path)
+		decoded, derr := hex.DecodeString(strings.TrimSpace(string(b)))
+		if derr != nil || len(decoded) != 32 {
+			return nil, fmt.Errorf("key file %s is not a 64-char hex key", path)
 		}
+		return decoded, nil
+	}
+
+	key, err = load()
+	if err == nil {
 		return key, false, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, false, err
 	}
-	key = make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, false, err
-	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, false, err
 		}
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(key)+"\n"), 0o600); err != nil {
+	key = make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, false, err
+	}
+	tmp, err := os.CreateTemp(dir, ".cronova-key-*")
+	if err != nil {
+		return nil, false, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, false, err
+	}
+	if _, err := tmp.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
+		_ = tmp.Close()
+		return nil, false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, false, err
+	}
+	// Link publishes the complete file only if the destination is still absent.
+	// Concurrent starters therefore converge on one key instead of overwriting it.
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) {
+			winner, loadErr := load()
+			return winner, false, loadErr
+		}
 		return nil, false, err
 	}
 	return key, true, nil

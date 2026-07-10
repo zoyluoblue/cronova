@@ -11,6 +11,7 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,11 +45,18 @@ type Options struct {
 	// Retention prunes finished runs (DB rows + their log directories) older
 	// than this age. 0 disables pruning entirely — nothing is ever deleted.
 	Retention time.Duration
-	Logger    *slog.Logger
+	// AuditRetention is independent from run retention. 0 keeps audit entries forever.
+	AuditRetention time.Duration
+	Logger         *slog.Logger
 	// Manual trigger admission bounds protect the metadata DB and scheduler from
 	// an accidental or hostile trigger flood. Non-positive values use defaults.
 	MaxManualQueuePerDAG int
 	MaxManualQueueGlobal int
+	// MaxQueuedRunsGlobal caps every queued run source, including schedules,
+	// dependencies, and backfills. MaxConcurrentTasks caps executor occupancy.
+	MaxQueuedRunsGlobal int
+	MaxActiveRunsGlobal int
+	MaxConcurrentTasks  int
 	// AllowPrivateNotifyTargets disables the SSRF guard on outbound notify
 	// webhooks (loopback/private/link-local IPs). Off in production; tests set it
 	// so an httptest server on 127.0.0.1 can receive deliveries.
@@ -98,6 +106,15 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 	}
 	if opts.MaxManualQueueGlobal <= 0 {
 		opts.MaxManualQueueGlobal = 10000
+	}
+	if opts.MaxQueuedRunsGlobal <= 0 {
+		opts.MaxQueuedRunsGlobal = opts.MaxManualQueueGlobal
+	}
+	if opts.MaxActiveRunsGlobal <= 0 {
+		opts.MaxActiveRunsGlobal = 1000
+	}
+	if opts.MaxConcurrentTasks <= 0 {
+		opts.MaxConcurrentTasks = 64
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -334,6 +351,12 @@ func (s *Scheduler) poolSlots(ctx context.Context, name string) int {
 	if err != nil {
 		return defaultPoolSlots
 	}
+	if p.Slots < 1 {
+		return 1
+	}
+	if p.Slots > model.MaxPoolSlots {
+		return model.MaxPoolSlots
+	}
 	return p.Slots
 }
 
@@ -378,6 +401,7 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 		TriggerType: model.TriggerManual,
 		Params:      params,
 	}
+	snapshotRun(run, d)
 	if err := s.store.CreateManualDagRunBounded(ctx, run, s.opts.MaxManualQueuePerDAG, s.opts.MaxManualQueueGlobal); err != nil {
 		if errors.Is(err, model.ErrQueueFull) {
 			return "", fmt.Errorf("dag %q reached a manual queue limit (per-DAG %d, global %d): %w", dagID, s.opts.MaxManualQueuePerDAG, s.opts.MaxManualQueueGlobal, err)
@@ -437,9 +461,12 @@ func (s *Scheduler) Backfill(ctx context.Context, dagID string, from, to time.Ti
 			State:       model.RunQueued,
 			TriggerType: model.TriggerBackfill,
 		}
-		switch err := s.store.CreateDagRun(ctx, run); {
+		snapshotRun(run, d)
+		switch err := s.store.CreateDagRunBounded(ctx, run, s.opts.MaxQueuedRunsGlobal); {
 		case errors.Is(err, store.ErrAlreadyExists):
 			skipped++ // that period already ran (or is queued) — never double-run
+		case errors.Is(err, model.ErrQueueFull):
+			return created, skipped, fmt.Errorf("global queued-run limit %d reached: %w", s.opts.MaxQueuedRunsGlobal, err)
 		case err != nil:
 			return created, skipped, err
 		default:
@@ -511,6 +538,9 @@ func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
 	// intersect with the current DAG's tasks: a task no longer in the DAG has no
 	// dispatch path, so reactivating it would wedge the run in `running` forever.
 	ids := intersect(downstreamClosure(d.Tasks, taskID), valid)
+	if err := s.prepareRetryDefinition(ctx, run, d, tiByTask, ids); err != nil {
+		return err
+	}
 	return s.clearAndReactivate(ctx, run, tiByTask, ids)
 }
 
@@ -540,6 +570,9 @@ func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 	}
 	if len(ids) == 0 {
 		return fmt.Errorf("run %q: %w", runID, model.ErrNothingToRetry)
+	}
+	if err := s.prepareRetryDefinition(ctx, run, d, tiByTask, ids); err != nil {
+		return err
 	}
 	return s.clearAndReactivate(ctx, run, tiByTask, ids)
 }
@@ -651,11 +684,15 @@ func (s *Scheduler) MarkRun(ctx context.Context, runID string, target model.RunS
 		now := time.Now().UTC() // never nil for a terminal run, but be defensive
 		fin = &now
 	}
-	if err := s.store.UpdateDagRunState(ctx, runID, target, run.StartedAt, fin); err != nil {
-		return err
-	}
 	if target == model.RunSuccess {
-		s.triggerDownstreams(ctx, run)
+		if err := s.store.UpdateDagRunSuccess(ctx, runID, run.StartedAt, fin); err != nil {
+			return err
+		}
+		// Preserve MarkRun's synchronous trigger behavior when capacity is
+		// available. A full queue leaves the durable event for a later tick.
+		s.processPendingDependencyEvents(ctx)
+	} else if err := s.store.UpdateDagRunState(ctx, runID, target, run.StartedAt, fin); err != nil {
+		return err
 	}
 	s.log.Info("run marked", "run", runID, "state", target)
 	return nil
@@ -670,9 +707,9 @@ func (s *Scheduler) markContext(ctx context.Context, runID string) (*model.DagRu
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	d, _, ok := s.cachedDAG(run.DagID)
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("dag %q not active: %w", run.DagID, store.ErrNotFound)
+	d, err := s.dagForRun(ctx, run)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	tis, err := s.store.ListTaskInstances(ctx, runID)
 	if err != nil {
@@ -759,6 +796,42 @@ func (s *Scheduler) clearAndReactivate(ctx context.Context, run *model.DagRun, t
 	return s.store.UpdateDagRunState(ctx, run.RunID, model.RunRunning, &now, nil)
 }
 
+// prepareRetryDefinition is the explicit version boundary: a finished run keeps
+// its original snapshot forever unless an operator retries it. The retry adopts
+// the latest DAG, creates any newly-added tasks, and stamps reset tasks with the
+// new definition hash. Removed task instances remain as history but are ignored
+// by finalization because they are not part of the adopted snapshot.
+func (s *Scheduler) prepareRetryDefinition(ctx context.Context, run *model.DagRun, d *model.DAG, tiByTask map[string]*model.TaskInstance, reset map[string]bool) error {
+	hash := definitionHash(d.DefinitionYAML)
+	if err := s.store.UpdateDagRunDefinition(ctx, run.RunID, d.DefinitionYAML, hash); err != nil {
+		return err
+	}
+	run.DefinitionYAML = d.DefinitionYAML
+	run.DefinitionHash = hash
+	for _, t := range d.Tasks {
+		ti := tiByTask[t.ID]
+		if ti == nil {
+			ti = &model.TaskInstance{
+				RunID: run.RunID, TaskID: t.ID, State: model.TaskScheduled,
+				MaxRetries: t.Retries, Pool: t.Pool, Priority: t.Priority,
+				DefinitionHash: hash, LogPath: s.logPath(d.DagID, run.RunID, t.ID),
+			}
+			if err := s.store.CreateTaskInstance(ctx, ti); err != nil {
+				return err
+			}
+			tiByTask[t.ID] = ti
+			continue
+		}
+		if reset[t.ID] {
+			ti.MaxRetries = t.Retries
+			ti.Pool = t.Pool
+			ti.Priority = t.Priority
+			ti.DefinitionHash = hash
+		}
+	}
+	return nil
+}
+
 // retryDelay computes the wait before a task's next attempt. tries is the
 // number of attempts already made (TryNumber after a failure), so the first
 // retry of an exponential task waits the base delay, the second 2×, then 4×…
@@ -827,7 +900,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// Sweep orphaned project workspaces now (recovery has claimed the live ones,
 	// and dispatch hasn't started, so no age guard is needed)…
 	s.gcWorkspaces(ctx, 0)
-	s.pruneOldRuns(ctx)
+	s.housekeeping(ctx)
 	s.log.Info("scheduler started", "tick", s.opts.Tick.String(), "dags", len(s.allDAGs()))
 	t := time.NewTicker(s.opts.Tick)
 	defer t.Stop()
@@ -844,10 +917,25 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-gc.C:
 			s.gcWorkspaces(ctx, time.Hour) // age guard: skip anything mid-launch
-			s.pruneOldRuns(ctx)
+			s.housekeeping(ctx)
 		case <-t.C:
 		}
 	}
+}
+
+func (s *Scheduler) housekeeping(ctx context.Context) {
+	if err := s.store.DeleteExpiredSessions(ctx); err != nil {
+		s.log.Error("expired session cleanup failed", "err", err)
+	}
+	if s.opts.AuditRetention > 0 {
+		cutoff := time.Now().UTC().Add(-s.opts.AuditRetention)
+		if n, err := s.store.PruneAudit(ctx, cutoff); err != nil {
+			s.log.Error("audit retention cleanup failed", "err", err)
+		} else if n > 0 {
+			s.log.Info("audit retention pruned entries", "entries", n, "older_than", s.opts.AuditRetention.String())
+		}
+	}
+	s.pruneOldRuns(ctx)
 }
 
 // WaitInflight blocks until all dispatched tasks have finished. Used by tests
@@ -883,8 +971,12 @@ func (s *Scheduler) pruneOldRuns(ctx context.Context) {
 
 func (s *Scheduler) tickOnce(ctx context.Context) {
 	now := time.Now().UTC()
+	// Give previously-deferred dependency runs first access to newly-available
+	// queue capacity, then pick up events published by runs finalized this tick.
+	s.processPendingDependencyEvents(ctx)
 	s.createDueRuns(ctx, now)
 	s.processActiveRuns(ctx)
+	s.processPendingDependencyEvents(ctx)
 }
 
 // createDueRuns creates the next scheduled run for each scheduled DAG that is
@@ -923,10 +1015,13 @@ func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
 			State:       model.RunQueued,
 			TriggerType: model.TriggerSchedule,
 		}
-		if err := s.store.CreateDagRun(ctx, run); err != nil {
+		snapshotRun(run, cd)
+		if err := s.store.CreateDagRunBounded(ctx, run, s.opts.MaxQueuedRunsGlobal); err != nil {
 			// ErrAlreadyExists: a run for this period already exists. ErrNotFound:
 			// the DAG was soft-deleted concurrently (the CreateDagRun guard) — both benign.
-			if !errors.Is(err, store.ErrAlreadyExists) && !errors.Is(err, store.ErrNotFound) {
+			if errors.Is(err, model.ErrQueueFull) {
+				s.log.Warn("global queued-run limit reached", "limit", s.opts.MaxQueuedRunsGlobal)
+			} else if !errors.Is(err, store.ErrAlreadyExists) && !errors.Is(err, store.ErrNotFound) {
 				s.log.Error("create scheduled run", "dag", d.DagID, "err", err)
 			}
 			continue
@@ -978,7 +1073,11 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 	for _, r := range running {
 		runningBy[r.DagID]++
 	}
+	globalRunning := len(running)
 	for _, run := range queued {
+		if globalRunning >= s.opts.MaxActiveRunsGlobal {
+			break
+		}
 		maxActive := 1
 		if d, _, ok := s.cachedDAG(run.DagID); ok && d.MaxActiveRuns > 0 {
 			maxActive = d.MaxActiveRuns
@@ -987,6 +1086,7 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 			continue // stays queued; picked up on a later tick as slots free
 		}
 		runningBy[run.DagID]++
+		globalRunning++
 		if err := s.processRun(ctx, run); err != nil {
 			s.log.Error("process run", "run", run.RunID, "err", err)
 		}
@@ -1002,7 +1102,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 	// their own goroutines, so this only holds for the cheap synchronous body).
 	s.finalizeMu.Lock()
 	defer s.finalizeMu.Unlock()
-	d, err := s.dagFor(ctx, run.DagID)
+	d, err := s.dagForRun(ctx, run)
 	if err != nil {
 		return err
 	}
@@ -1011,8 +1111,10 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 	if err != nil {
 		return err
 	}
-	if len(tis) == 0 {
-		if err := s.expandRun(ctx, run, d); err != nil {
+	// Reconcile missing snapshot tasks only. This repairs a crash halfway through
+	// first expansion without issuing one doomed UNIQUE insert per task per tick.
+	if len(tis) < len(d.Tasks) {
+		if err := s.expandRun(ctx, run, d, tis); err != nil {
 			return err
 		}
 		if tis, err = s.store.ListTaskInstances(ctx, run.RunID); err != nil {
@@ -1118,7 +1220,15 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		return ready[i].TaskID < ready[j].TaskID
 	})
 	poolRemaining := map[string]int{}
+	activeTasks, err := s.store.CountActiveTaskInstances(ctx)
+	if err != nil {
+		return err
+	}
+	globalRemaining := s.opts.MaxConcurrentTasks - activeTasks
 	for _, ti := range ready {
+		if globalRemaining <= 0 {
+			break
+		}
 		rem, ok := poolRemaining[ti.Pool]
 		if !ok {
 			used, err := s.store.CountRunningInPool(ctx, ti.Pool)
@@ -1135,6 +1245,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			return err
 		}
 		poolRemaining[ti.Pool] = rem - 1
+		globalRemaining--
 	}
 
 	// 4. Finalize the run if every task is terminal.
@@ -1142,8 +1253,17 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 	if err != nil {
 		return err
 	}
-	allTerminal, anyFailed, anyCancelled := true, false, false
+	finalTIByTask := make(map[string]*model.TaskInstance, len(tis))
 	for _, ti := range tis {
+		finalTIByTask[ti.TaskID] = ti
+	}
+	allTerminal, anyFailed, anyCancelled := true, false, false
+	for _, task := range d.Tasks {
+		ti := finalTIByTask[task.ID]
+		if ti == nil {
+			allTerminal = false
+			continue
+		}
 		if !ti.State.IsTerminal() {
 			allTerminal = false
 		}
@@ -1164,7 +1284,13 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			final = model.RunCancelled
 		}
 		fin := time.Now().UTC()
-		if err := s.store.UpdateDagRunState(ctx, run.RunID, final, run.StartedAt, &fin); err != nil {
+		if final == model.RunSuccess {
+			// State and dependency publication share one transaction, so neither a
+			// restart nor a queue-capacity window can lose the downstream trigger.
+			if err := s.store.UpdateDagRunSuccess(ctx, run.RunID, run.StartedAt, &fin); err != nil {
+				return err
+			}
+		} else if err := s.store.UpdateDagRunState(ctx, run.RunID, final, run.StartedAt, &fin); err != nil {
 			return err
 		}
 		s.log.Info("run finished", "run", run.RunID, "state", final)
@@ -1175,9 +1301,6 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			delete(s.notifySuppress, run.RunID)
 		} else {
 			s.notifyRun(d, run, final, fin, tis)
-		}
-		if final == model.RunSuccess {
-			s.triggerDownstreams(ctx, run)
 		}
 		s.clearSLAKeys(run.RunID)
 	} else {
@@ -1277,19 +1400,66 @@ func findTI(tis []*model.TaskInstance, taskID string) *model.TaskInstance {
 	return nil
 }
 
+// processPendingDependencyEvents replays durable success signals oldest-first.
+// An event is consumed only after every eligible downstream was either created
+// or already existed. Queue admission failures remain pending for a later tick.
+func (s *Scheduler) processPendingDependencyEvents(ctx context.Context) {
+	events, err := s.store.ListPendingEvents(ctx, model.EventSourceDependency, 1000)
+	if err != nil {
+		s.log.Error("list dependency events", "err", err)
+		return
+	}
+	for _, event := range events {
+		upstream, err := s.store.GetDagRun(ctx, event.EventKey)
+		if errors.Is(err, store.ErrNotFound) {
+			if err := s.store.ConsumeEvent(ctx, event.ID); err != nil {
+				s.log.Error("consume orphan dependency event", "event", event.ID, "err", err)
+			}
+			continue
+		}
+		if err != nil {
+			s.log.Error("load dependency event run", "event", event.ID, "run", event.EventKey, "err", err)
+			continue
+		}
+		if upstream.State != model.RunSuccess {
+			// A later manual failed mark invalidates the pending success signal.
+			// Marking the run successful again re-arms this same idempotency key.
+			if upstream.State.IsTerminal() {
+				if err := s.store.ConsumeEvent(ctx, event.ID); err != nil {
+					s.log.Error("consume obsolete dependency event", "event", event.ID, "err", err)
+				}
+			}
+			continue
+		}
+		deferred, err := s.triggerDownstreams(ctx, upstream)
+		if err != nil {
+			s.log.Error("deliver dependency event", "event", event.ID, "run", upstream.RunID, "err", err)
+			continue
+		}
+		if deferred {
+			s.log.Debug("dependency event deferred", "event", event.ID, "run", upstream.RunID,
+				"queued_limit", s.opts.MaxQueuedRunsGlobal)
+			continue
+		}
+		if err := s.store.ConsumeEvent(ctx, event.ID); err != nil {
+			s.log.Error("consume dependency event", "event", event.ID, "run", upstream.RunID, "err", err)
+		}
+	}
+}
+
 // triggerDownstreams creates runs for any DAG whose trigger_after upstreams have
 // all succeeded for this run's logical date (see docs/ARCHITECTURE.md §7.1).
-func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagRun) {
+// deferred reports that at least one eligible run could not enter the global
+// queue; callers must retain the durable event and retry it later.
+func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagRun) (deferred bool, err error) {
 	downs, err := s.store.ListDownstreams(ctx, upstream.DagID)
 	if err != nil {
-		s.log.Error("list downstreams", "dag", upstream.DagID, "err", err)
-		return
+		return false, fmt.Errorf("list downstreams for %q: %w", upstream.DagID, err)
 	}
 	for _, dn := range downs {
 		ups, err := s.store.ListUpstreams(ctx, dn)
 		if err != nil {
-			s.log.Error("list upstreams", "dag", dn, "err", err)
-			continue
+			return deferred, fmt.Errorf("list upstreams for %q: %w", dn, err)
 		}
 		allOK := true
 		for _, up := range ups {
@@ -1303,9 +1473,12 @@ func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagR
 				break
 			}
 			r, err := s.store.GetDagRunByLogicalDate(ctx, up, upstream.LogicalDate)
-			if err != nil || r.State != model.RunSuccess {
+			if errors.Is(err, store.ErrNotFound) || (err == nil && r.State != model.RunSuccess) {
 				allOK = false
 				break
+			}
+			if err != nil {
+				return deferred, fmt.Errorf("load upstream %q for downstream %q: %w", up, dn, err)
 			}
 		}
 		if !allOK {
@@ -1317,10 +1490,6 @@ func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagR
 		if !ok || len(dd.Tasks) == 0 {
 			continue
 		}
-		maxActive := dd.MaxActiveRuns
-		if active, _ := s.store.CountActiveRuns(ctx, dn); active >= maxActive {
-			continue
-		}
 		nr := &model.DagRun{
 			RunID:       runID(dn, upstream.LogicalDate),
 			DagID:       dn,
@@ -1328,38 +1497,75 @@ func (s *Scheduler) triggerDownstreams(ctx context.Context, upstream *model.DagR
 			State:       model.RunQueued,
 			TriggerType: model.TriggerDependency,
 		}
-		if err := s.store.CreateDagRun(ctx, nr); err != nil {
-			if !errors.Is(err, store.ErrAlreadyExists) && !errors.Is(err, store.ErrNotFound) {
-				s.log.Error("create dependency run", "dag", dn, "err", err)
+		snapshotRun(nr, dd)
+		if err := s.store.CreateDagRunBounded(ctx, nr, s.opts.MaxQueuedRunsGlobal); err != nil {
+			if errors.Is(err, model.ErrQueueFull) {
+				deferred = true
+				continue
 			}
-			continue
+			if errors.Is(err, store.ErrAlreadyExists) || errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return deferred, fmt.Errorf("create dependency run for %q: %w", dn, err)
 		}
 		s.log.Info("dependency run created", "dag", dn, "upstream", upstream.DagID,
 			"logical_date", upstream.LogicalDate.Format(time.RFC3339))
 	}
+	return deferred, nil
 }
 
-func (s *Scheduler) dagFor(ctx context.Context, dagID string) (*model.DAG, error) {
-	if d, _, ok := s.cachedDAG(dagID); ok {
-		return d, nil
+func definitionHash(yamlText string) string {
+	sum := sha256.Sum256([]byte(yamlText))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func snapshotRun(run *model.DagRun, d *model.DAG) {
+	run.DefinitionYAML = d.DefinitionYAML
+	run.DefinitionHash = definitionHash(d.DefinitionYAML)
+}
+
+func (s *Scheduler) dagForRun(ctx context.Context, run *model.DagRun) (*model.DAG, error) {
+	if run.DefinitionYAML != "" {
+		return parser.Parse([]byte(run.DefinitionYAML))
 	}
-	sd, err := s.store.GetDAG(ctx, dagID)
-	if err != nil {
+	// Legacy queued/running rows predate snapshots. Capture exactly once before
+	// expansion so they become deterministic from this point onward.
+	d, _, ok := s.cachedDAG(run.DagID)
+	if !ok {
+		sd, err := s.store.GetDAG(ctx, run.DagID)
+		if err != nil {
+			return nil, err
+		}
+		d, err = parser.Parse([]byte(sd.DefinitionYAML))
+		if err != nil {
+			return nil, err
+		}
+	}
+	snapshotRun(run, d)
+	if err := s.store.UpdateDagRunDefinition(ctx, run.RunID, run.DefinitionYAML, run.DefinitionHash); err != nil {
 		return nil, err
 	}
-	return parser.Parse([]byte(sd.DefinitionYAML))
+	return d, nil
 }
 
-func (s *Scheduler) expandRun(ctx context.Context, run *model.DagRun, d *model.DAG) error {
+func (s *Scheduler) expandRun(ctx context.Context, run *model.DagRun, d *model.DAG, current []*model.TaskInstance) error {
+	existing := make(map[string]bool, len(current))
+	for _, ti := range current {
+		existing[ti.TaskID] = true
+	}
 	for _, t := range d.Tasks {
+		if existing[t.ID] {
+			continue
+		}
 		ti := &model.TaskInstance{
-			RunID:      run.RunID,
-			TaskID:     t.ID,
-			State:      model.TaskScheduled,
-			MaxRetries: t.Retries,
-			Pool:       t.Pool,
-			Priority:   t.Priority,
-			LogPath:    s.logPath(d.DagID, run.RunID, t.ID),
+			RunID:          run.RunID,
+			TaskID:         t.ID,
+			State:          model.TaskScheduled,
+			MaxRetries:     t.Retries,
+			Pool:           t.Pool,
+			Priority:       t.Priority,
+			DefinitionHash: run.DefinitionHash,
+			LogPath:        s.logPath(d.DagID, run.RunID, t.ID),
 		}
 		if err := s.store.CreateTaskInstance(ctx, ti); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
@@ -1439,15 +1645,21 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	// reusing the executor's normal launch/probe/cancel/log path. The spec (templates
 	// resolved) is passed by env, not interpolated into the shell string — no injection.
 	switch t.Type {
+	case "", "shell", "jar":
+		// These task types execute their validated command directly.
 	case "http":
-		if t.HTTP != nil {
-			// The secrets substituted into url/headers/body are collected so the
-			// executor masks them in run-op's echoed request line (child output).
-			hspec := resolveHTTPSpec(*t.HTTP, collectSecrets(resolve, &secrets))
-			blob, _ := json.Marshal(hspec)
-			env["CRONOVA_OP_SPEC"] = string(blob)
-			command = shellQuote(s.opBinary) + " run-op http"
+		if t.HTTP == nil {
+			now := time.Now().UTC()
+			ti.StartedAt = &now
+			s.recordFailure(ctx, &ti, "invalid http task definition")
+			return
 		}
+		// The secrets substituted into url/headers/body are collected so the
+		// executor masks them in run-op's echoed request line (child output).
+		hspec := resolveHTTPSpec(*t.HTTP, collectSecrets(resolve, &secrets))
+		blob, _ := json.Marshal(hspec)
+		env["CRONOVA_OP_SPEC"] = string(blob)
+		command = shellQuote(s.opBinary) + " run-op http"
 	case "python":
 		// `command` already holds the templated Python code (its secrets are in
 		// `secrets`); the executor masks them in the interpreter's traceback output.
@@ -1461,6 +1673,11 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 		blob, _ := json.Marshal(s.sqlOpSpec(ctx, t.Conn, command, &secrets))
 		env["CRONOVA_OP_SPEC"] = string(blob)
 		command = shellQuote(s.opBinary) + " run-op sql"
+	default:
+		now := time.Now().UTC()
+		ti.StartedAt = &now
+		s.recordFailure(ctx, &ti, "unsupported task type: "+t.Type)
+		return
 	}
 	spec := executor.Spec{
 		TaskRunID: ti.ExecutorRef,

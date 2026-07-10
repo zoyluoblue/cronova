@@ -15,21 +15,35 @@ allow_unauthenticated_remote: false
 # ── Scheduler ───────────────────────────────────────────────────────────────
 tick: 2s                    # how often the loop wakes to schedule/poll work
 
-# Task executor. Empty = in-process (tasks die on a scheduler restart).
-# A gRPC target keeps tasks alive across restarts (crash recovery), e.g.:
+# Manual `cronova serve` defaults to the in-process executor when this is empty.
+# Installed systemd/launchd services override it with the standalone executor so
+# scheduler restarts do not kill running tasks, e.g.:
 #   executor: "unix:///run/cronova/executor.sock"
 # The socket parent must be private (0700); TCP executor targets are rejected.
 executor: ""
+
+# Bound work admitted from every trigger source and across every pool.
+max_queued_runs_global: 10000
+max_active_runs_global: 1000
+max_concurrent_tasks: 64
+
+# Finished runs/logs are retained for 90 days; audit records for one year.
+# Use "0" to keep either class forever.
+retention: 2160h
+audit_retention: 8760h
 
 # ── Authentication ──────────────────────────────────────────────────────────
 auth:
   enabled: true             # require login for the console + API (recommended)
   session_ttl: 24h          # how long a login session stays valid
   secure_cookie: false      # set true when served over HTTPS (marks the cookie Secure)
-  # Seed admin credentials: prefer the CRONOVA_ADMIN_USER / CRONOVA_ADMIN_PASSWORD
-  # env vars (see cronova.env) over storing a password in this world-readable file.
-  # admin_user: ""
-  # admin_password: ""
+  admin_user: admin         # non-secret default shown by the next `cronova init`
+  # Only trust forwarding headers from these reverse-proxy IPs/CIDRs. Loopback
+  # peers are trusted automatically. Leave empty when no reverse proxy is used.
+  trusted_proxies: []
+
+# `cronova init` writes/rotates the admin directly in SQLite. It never persists
+# the plaintext password in this file or cronova.env.
 
 # ── Storage paths ───────────────────────────────────────────────────────────
 # Under systemd these are set by the service unit's flags (which win over this
@@ -37,9 +51,12 @@ auth:
 # db:   data/cronova.db     # SQLite metadata database
 # dags: dags                # directory of DAG YAML definitions
 # logs: logs                # directory for per-task log files
+# key_file: cronova.key      # AES-256-GCM key for connection passwords (0600)
 
 # Uploaded project files (console: task editor → 工程/Project). Each project is
 # a directory here; a shell task with `project: <name>` runs its command inside
 # a fresh temp copy of it. Default: ~/.cronova/projects (of the service user).
-# Requires the scheduler and executor to share a filesystem (same host).
+# Requires the scheduler and executor to share a filesystem (same host). Use an
+# explicit workspace path outside /tmp when they run as separate services.
 # projects: ~/.cronova/projects
+# workspaces: ~/.cronova/workspaces

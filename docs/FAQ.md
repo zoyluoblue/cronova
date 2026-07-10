@@ -1,20 +1,20 @@
 # cronova FAQ — Frequently Asked Questions
 
-Answers to the most common questions about cronova, the single-binary, self-hosted **workflow scheduler** and open-source Airflow / Azkaban alternative — what it is, how it installs, where it stores data, and how to run it in production.
+Answers to the most common questions about cronova, the lightweight, self-hosted **workflow scheduler** and open-source Airflow / Azkaban alternative — what it is, how it installs, where it stores data, and how to run it in production.
 
 This page expands on the short FAQ in the [README](https://github.com/zoyluoblue/cronova#readme). For task-by-task guides see [Getting Started](GETTING_STARTED.md), [DAG Reference](DAG_REFERENCE.md), [CLI Reference](CLI.md), [AI Agents (MCP)](AGENTS.md), [Deployment](DEPLOY.md), and [Architecture](ARCHITECTURE.md).
 
 ## What is cronova?
 
-cronova is an open-source, self-hosted **workflow scheduler** (a.k.a. job scheduler / DAG orchestrator) written in Go. It schedules **DAGs** — directed acyclic graphs of tasks — on cron or interval triggers, runs each task as an OS subprocess using the host's own interpreters, and ships a web console, a REST API, a CLI, and an MCP endpoint for AI agents — all in a single static binary with an embedded SQLite database.
+cronova is an open-source, self-hosted **workflow scheduler** (a.k.a. job scheduler / DAG orchestrator) written in Go. It schedules **DAGs** — directed acyclic graphs of tasks — on cron or interval triggers, runs each task as an OS subprocess using the host's own interpreters, and ships a web console, a REST API, a CLI, and an MCP endpoint for AI agents. Managed installs use a static scheduler plus a static standalone executor and embedded SQLite.
 
 ## Is cronova an Apache Airflow alternative?
 
-Yes. cronova is a lightweight alternative to [Apache Airflow](https://airflow.apache.org/) and Azkaban for teams who want DAG scheduling — dependencies, retries, catchup / backfill, resource pools, a web UI, and a REST API — **without** running a Python stack, a separate database, and a message broker. It is one binary with an embedded database. For very large, plugin-heavy data platforms, Airflow remains the richer ecosystem. See [cronova vs Airflow](COMPARISON.md) for a feature-by-feature breakdown.
+Yes. cronova is a lightweight alternative to [Apache Airflow](https://airflow.apache.org/) and Azkaban for teams who want DAG scheduling — dependencies, retries, catchup / backfill, resource pools, a web UI, and a REST API — **without** running a Python stack, a separate database, and a message broker. It is a compact native service pair with an embedded database. For very large, plugin-heavy data platforms, Airflow remains the richer ecosystem. See [cronova vs Airflow](COMPARISON.md) for a feature-by-feature breakdown.
 
 ## Does cronova need a separate database, a JVM, or Python?
 
-No. The scheduler and web console are a **single Go binary** with an **embedded SQLite** database (pure-Go `modernc.org/sqlite`, CGO-free), so there is no external Postgres/MySQL, no Redis or Celery broker, no JVM, and no Python runtime to install. Python, Java, `psql`, and other interpreters are only needed on the host if *your tasks* invoke them.
+No. The scheduler and web console use an **embedded SQLite** database (pure-Go `modernc.org/sqlite`, CGO-free), so there is no external Postgres/MySQL, no Redis or Celery broker, no JVM, and no Python runtime to install. Managed deployments add only the standalone executor binary. Python, Java, `psql`, and other interpreters are needed on the host only if *your tasks* invoke them.
 
 ## What languages can tasks be written in?
 
@@ -51,7 +51,7 @@ The web console and REST API default to **`127.0.0.1:8090`** (loopback only). Op
 
 ## How do I upgrade cronova?
 
-Run `cronova update`. It downloads the latest prebuilt release for your OS/arch from GitHub, verifies it against `SHA256SUMS` (the same trust model as the installer), atomically swaps the binary, refreshes the service definition, and restarts the service:
+Run `cronova update`. It downloads the latest prebuilt release for your OS/arch from GitHub, verifies it against `SHA256SUMS`, atomically swaps both binaries, preserves customized service definitions, and restarts the scheduler without bouncing an executor that owns in-flight tasks:
 
 ```bash
 cronova update                               # latest release, then restart
@@ -63,11 +63,11 @@ An unpinned update that is already current is a no-op. A pinned version always a
 
 ## Is the update safe if it fails halfway?
 
-Yes. `update` backs up the old binary and service definition before swapping, then restarts and **confirms the service actually stays running** (not just that it loaded). If the restart fails, it automatically rolls the binaries back and brings the previous version back up — the box is never left on a half-applied update. Missing/incomplete `SHA256SUMS`, a checksum mismatch, an oversized payload, or a downgrade-to-cleartext redirect is fatal.
+Yes. `update` backs up the old binaries and managed service definitions before swapping, then restarts and **confirms the scheduler actually stays running** (not just that it loaded). If the restart fails, it automatically rolls back and brings the previous version back up. Missing/incomplete `SHA256SUMS`, a checksum mismatch, an oversized payload, or a downgrade-to-cleartext redirect is fatal. A customized unit/plist is never silently overwritten; the new candidate is written as `*.dist`.
 
 ## Is cronova crash-safe / production-ready?
 
-cronova is designed for reliable operation. Run tasks in the decoupled **gRPC executor** (point `serve` at it with `-executor` / `CRONOVA_EXECUTOR`) and the scheduler can restart or upgrade **without killing running jobs** — on recovery it re-attaches to in-flight tasks with no double execution. With the default in-process executor, a restart ends running tasks. The service runs under systemd/launchd with a mild sandbox, atomic self-updates with rollback, and an audit trail. See [Deployment](DEPLOY.md) and [Architecture](ARCHITECTURE.md) for the execution model.
+cronova is designed for reliable operation. Managed installs use the decoupled **gRPC executor** by default, so the scheduler can restart or upgrade **without killing running jobs** — on recovery it re-attaches to in-flight tasks with no double execution. A manual `serve` with no executor target remains in-process and ends active tasks on exit. Managed services also expose executor-aware readiness, atomic self-updates with rollback, and an audit trail. See [Deployment](DEPLOY.md) and [Architecture](ARCHITECTURE.md) for the execution model.
 
 ## Where does cronova store its data?
 
@@ -79,13 +79,20 @@ State lives in an **embedded SQLite database** plus on-disk DAG YAML, task logs,
 | DAG YAML | `/var/lib/cronova/dags/` | `/usr/local/var/cronova/dags/` |
 | task logs | `/var/log/cronova/` | `/usr/local/var/log/cronova/` |
 | config | `/etc/cronova/cronova.yaml` | `/usr/local/etc/cronova/cronova.yaml` |
-| uploaded projects | `~cronova/.cronova/projects/` | `~/.cronova/projects/` (sudo user) |
+| uploaded projects | `/var/lib/cronova/projects/` | `/usr/local/var/cronova/projects/` |
+| attempt workspaces | `/var/lib/cronova/workspaces/` | `/usr/local/var/cronova/workspaces/` |
 
-Override any of these with the `-db` / `-dags` / `-logs` / `-projects` flags, the `CRONOVA_DB` / `CRONOVA_DAGS` / `CRONOVA_LOGS` / `CRONOVA_PROJECTS` env vars, or `cronova.yaml`. Full layout table: [Deployment → Platform layout](DEPLOY.md#platform-layout).
+Override these with the matching `-db` / `-dags` / `-logs` / `-projects` /
+`-workspaces` flags, `CRONOVA_*` environment variables, or `cronova.yaml`.
+Full layout table: [Deployment → Platform layout](DEPLOY.md#platform-layout).
 
 ## How long does cronova keep run history?
 
 **90 days by default.** The server automatically deletes finished runs — their database rows and their log directories — once they are older than the retention window (default `2160h`, i.e. 90 days). Change it with the `retention:` key in `cronova.yaml`, the `-retention` flag on `cronova serve`, or the `CRONOVA_RETENTION` env var; set it to `0` to keep everything forever. Only finished runs age out — in-flight runs are never touched.
+
+Audit records have an independent one-year default (`audit_retention: 8760h` /
+`CRONOVA_AUDIT_RETENTION` / `-audit-retention`) so shortening run-history
+retention does not erase the operations trail at the same time.
 
 For a one-off cleanup (or a deployment that runs with retention disabled), use `cronova prune`:
 
@@ -101,11 +108,11 @@ Yes. Connection passwords are encrypted **at rest with AES-256-GCM**. On first s
 
 ## How do I run cronova behind a reverse proxy?
 
-Bind cronova to localhost and terminate TLS at your proxy (nginx, Caddy, Traefik, …). The one-click wizard offers a **"this machine only (127.0.0.1)"** bind option for exactly this, or set `CRONOVA_HTTP=127.0.0.1:8090` (or `-http 127.0.0.1:8090`). When serving over HTTPS, set `CRONOVA_SECURE_COOKIE=true` (default `false`) so the session cookie is marked `Secure`. The console, REST API, and live-log SSE stream all share the one HTTP listener, so a single upstream is enough. See [Deployment](DEPLOY.md).
+Bind cronova to localhost and terminate TLS at your proxy (nginx, Caddy, Traefik, …). The one-click wizard offers a **"this machine only (127.0.0.1)"** bind option for exactly this, or set `CRONOVA_HTTP=127.0.0.1:8090` (or `-http 127.0.0.1:8090`). When serving over HTTPS, set `CRONOVA_SECURE_COOKIE=true`. List non-loopback proxy peers in `auth.trusted_proxies` or `CRONOVA_TRUSTED_PROXIES`; `X-Forwarded-*` from every other source is ignored. The console, REST API, and live-log SSE stream all share the one HTTP listener. See [Deployment](DEPLOY.md).
 
 ## Do I need Docker or Kubernetes?
 
-No. cronova is a subprocess scheduler that runs tasks with the **host's own interpreters**, so it deploys as a single static binary under systemd (Linux) or launchd (macOS) — no container image to build, no runtime to bundle. Containerizing a polyglot scheduler would force you to bake every task runtime into the image; native + systemd sidesteps that. If you do want the scheduler containerized, run the standalone `cronova-executor` on the host and point the scheduler at it over gRPC. See [Deployment → Why not Docker?](DEPLOY.md).
+No. cronova is a subprocess scheduler that runs tasks with the **host's own interpreters**, so it deploys as two small static binaries under systemd (Linux) or launchd (macOS) — no container image to build, no runtime to bundle. Containerizing a polyglot scheduler would force you to bake every task runtime into the image; native services avoid that. If you still containerize the scheduler, keep the standalone executor on the host and point the scheduler at it over the private Unix socket. See [Deployment → Why not Docker?](DEPLOY.md).
 
 ## How do I uninstall cronova?
 

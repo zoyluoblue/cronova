@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cronova.executor</string>
+  <key>UserName</key>
+  <string>__USER__</string>
+  <key>GroupName</key>
+  <string>__GROUP__</string>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/var/cronova</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/cronova-executor</string>
+    <string>-sock</string>
+    <string>/usr/local/var/cronova/run/executor.sock</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/cronova/executor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/cronova/executor.log</string>
+</dict>
+</plist>

@@ -105,8 +105,13 @@ func uninstallDarwin(purge bool) error {
 		fmt.Println("==> stopping launchd daemon")
 		_ = run("launchctl", "bootout", "system/"+launchdLabel)
 	}
+	if launchdJobLoaded(launchdExecutorLabel) {
+		fmt.Println("==> stopping launchd executor")
+		_ = run("launchctl", "bootout", "system/"+launchdExecutorLabel)
+	}
 	// 2. service definition + binaries.
 	removePath("plist", launchdPlist)
+	removePath("plist", launchdExecutorPlist)
 	removePath("binary", binExecutor)
 	removePath("binary", binDst)
 
@@ -124,10 +129,13 @@ func uninstallLinux(purge bool) error {
 	// 1. stop + disable the unit (ignore errors — may be stopped/absent).
 	fmt.Println("==> stopping systemd unit")
 	_ = run("systemctl", "disable", "--now", systemdUnit)
+	_ = run("systemctl", "disable", "--now", systemdExecutorUnit)
 	// 2. unit file + reload so systemd forgets it.
 	removePath("unit", systemdUnitPath)
+	removePath("unit", systemdExecutorUnitPath)
 	_ = run("systemctl", "daemon-reload")
 	_ = run("systemctl", "reset-failed", systemdUnit)
+	_ = run("systemctl", "reset-failed", systemdExecutorUnit)
 	// 3. binaries.
 	removePath("binary", binExecutor)
 	removePath("binary", binDst)

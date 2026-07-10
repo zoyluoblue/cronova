@@ -19,6 +19,8 @@ import (
 	"github.com/zoyluo/cronova/internal/executor"
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -40,12 +42,16 @@ func run(sock string) error {
 	runner := executor.NewRunner()
 	srv := grpc.NewServer()
 	pb.RegisterExecutorServer(srv, executor.NewGRPCServer(runner))
+	healthSrv := health.NewServer()
+	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(srv, healthSrv)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	go func() {
 		<-ctx.Done()
 		log.Println("cronova-executor shutting down")
+		healthSrv.Shutdown()
 		srv.GracefulStop()
 	}()
 

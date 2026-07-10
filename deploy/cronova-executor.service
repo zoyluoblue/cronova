@@ -1,0 +1,27 @@
+[Unit]
+Description=cronova standalone task executor
+Documentation=https://github.com/zoyluo/cronova
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cronova
+Group=cronova
+WorkingDirectory=/var/lib/cronova
+StateDirectory=cronova
+LogsDirectory=cronova
+RuntimeDirectory=cronova
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/bin/cronova-executor -sock /run/cronova/executor.sock
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

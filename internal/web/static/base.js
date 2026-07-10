@@ -593,10 +593,18 @@ function attachPanZoom(wrap, store) {
 // ---- sidebar/topbar ----
 // ---- hash routing: every drill-down is linkable and refresh-safe ----
 let suppressHash = false;
+function resetMainScroll() {
+  if (main) main.scrollTop = 0;
+}
+function finishRouteRender() {
+  resetMainScroll();
+  requestAnimationFrame(resetMainScroll);
+}
 // replace=true rewrites the current entry (no new history entry, no hashchange) —
 // use it for in-page normalization (e.g. tab canonicalization) so Back isn't trapped.
 function setHash(h, replace) {
   if (location.hash === h) return;
+  resetMainScroll();
   if (replace) { history.replaceState(null, "", h); return; }
   suppressHash = true; location.hash = h;
 }
@@ -616,7 +624,11 @@ function applyRoute() {
   if (seg[0] === "dag" && seg[1]) return showDag(seg[1], seg[2]); // seg[2]: runs|structure|settings (optional)
   return loadDags();
 }
-window.addEventListener("hashchange", () => { if (suppressHash) { suppressHash = false; return; } Promise.resolve(applyRoute()).catch(() => {}); });
+window.addEventListener("hashchange", () => {
+  if (suppressHash) { suppressHash = false; return; }
+  resetMainScroll();
+  Promise.resolve(applyRoute()).then(finishRouteRender).catch(() => {});
+});
 
 // ---- global quick-jump: the topbar search doubles as a "jump to any DAG" box
 // (an autocomplete dropdown), available on every page — not just a dashboard filter.
@@ -664,7 +676,7 @@ function jumpTo(dagID) { closeJump(); const s = $("search"); s.value = ""; query
 function closeJump() { const m = $("jump-menu"); if (m) { m.hidden = true; m.innerHTML = ""; jumpSel = -1; } $("search").setAttribute("aria-expanded", "false"); $("search").removeAttribute("aria-activedescendant"); }
 
 let serverTZ = "";
-async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }
+async function loadInfo() { try { const i = await api("/api/info"); serverTZ = i.tz || ""; $("f-exec").textContent = i.executor || "—"; $("f-tick").textContent = "tick " + (i.tick || "—"); $("tick").textContent = "tick " + (i.tick || "—"); const v = $("side-version"); if (v) v.textContent = "scheduler " + (i.version || "dev"); const z = $("tzlab"); if (z) { z.textContent = serverTZ; z.title = t("tz_note"); } } catch (_) {} }
 // ---- auth: login gate + user chip ----
 // Resolve who we are. /api/me is 200 (authed, or auth-disabled → implicit admin)
 // or 401 (login required). Returns whether the app may start.

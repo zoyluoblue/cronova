@@ -2,8 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/zoyluo/cronova/internal/model"
 )
 
 // This file exposes the entire cronova HTTP API as a self-describing OpenAPI 3
@@ -216,7 +219,7 @@ func apiCatalog() []apiEndpoint {
 			Summary: "List pools", Desc: "Return concurrency pools and their slot counts.",
 			Response: []any{map[string]any{"name": "default", "slots": 8}}},
 		{Method: "POST", Path: "/api/pools/{name}", Tag: "Pools",
-			Summary: "Create or resize a pool", Desc: "Upsert a concurrency pool. slots must be a positive integer.",
+			Summary: "Create or resize a pool", Desc: fmt.Sprintf("Upsert a concurrency pool. slots must be between 1 and %d.", model.MaxPoolSlots),
 			Params: []apiParam{
 				{Name: "name", In: "path", Required: true, Desc: "Pool name.", Example: "cpu"},
 				{Name: "slots", In: "query", Required: true, Desc: "Number of concurrency slots.", Example: "4"}},
@@ -281,7 +284,7 @@ func apiCatalog() []apiEndpoint {
 			Summary: "Dashboard overview", Desc: "Aggregate counts and recent runs for the console dashboard.",
 			Response: map[string]any{"dags": 12, "runs_active": 1, "recent": []any{}}},
 		{Method: "GET", Path: "/api/audit", Tag: "Operations",
-			Summary: "Operations audit log", Desc: "Return the operations audit trail (trigger/cancel/retry/mark/create/delete/pause/token), newest first.",
+			Summary: "Operations audit log", Desc: "Return operator mutations (runs, DAGs, projects, pools, variables, connections, tokens, users and login failures), newest first. Secret values are never recorded.",
 			Params: []apiParam{
 				{Name: "target", In: "query", Desc: "Filter to one dag/run id.", Example: "etl_daily"},
 				{Name: "limit", In: "query", Desc: "Max entries (1-500, default 100).", Example: "50"}},

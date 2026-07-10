@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -43,22 +44,25 @@ type Engine interface {
 type Info struct {
 	Executor    string `json:"executor"`
 	Tick        string `json:"tick"`
+	Version     string `json:"version"`
 	TZ          string `json:"tz"` // server timezone label, e.g. "CST (UTC+08:00)"
 	AuthEnabled bool   `json:"auth_enabled"`
 }
 
 // Server holds the API dependencies.
 type Server struct {
-	store       store.Store
-	eng         Engine
-	logDir      string
-	projectsDir string // uploaded project files ("" = uploads disabled)
-	web         fs.FS
-	info        Info
-	auth        AuthConfig
-	loginLim    *loginLimiter // brute-force throttle for POST /api/login
-	sseSlots    chan struct{} // bounds long-lived log-stream connections
-	started     time.Time     // for /metrics uptime
+	store          store.Store
+	eng            Engine
+	logDir         string
+	projectsDir    string // uploaded project files ("" = uploads disabled)
+	web            fs.FS
+	info           Info
+	auth           AuthConfig
+	loginLim       *loginLimiter // brute-force throttle for POST /api/login
+	sseSlots       chan struct{} // bounds long-lived log-stream connections
+	started        time.Time     // for /metrics uptime
+	readyCheck     func(context.Context) error
+	trustedProxies []*net.IPNet
 }
 
 const (
@@ -92,6 +96,10 @@ func (s *Server) SetAuth(cfg AuthConfig) {
 // SetProjectsDir points project uploads at dir. "" disables the endpoints. Must
 // be called before Handler(). It is the same dir the scheduler stages from.
 func (s *Server) SetProjectsDir(dir string) { s.projectsDir = dir }
+
+// SetReadinessCheck adds a runtime dependency probe (the standalone executor).
+// It must be configured before Handler is served.
+func (s *Server) SetReadinessCheck(check func(context.Context) error) { s.readyCheck = check }
 
 // Handler builds the HTTP routes (Go 1.22+ method+pattern mux).
 func (s *Server) Handler() http.Handler {
@@ -531,12 +539,27 @@ func (s *Server) createDAG(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
+	parsed, err := parser.Parse(body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	existing, existsErr := s.store.GetDAG(r.Context(), parsed.DagID)
+	isNew := errors.Is(existsErr, store.ErrNotFound) || (existing != nil && existing.DeletedAt != nil)
+	if existsErr != nil && !errors.Is(existsErr, store.ErrNotFound) {
+		mapErr(w, existsErr)
+		return
+	}
 	dagID, err := s.eng.CreateDAG(r.Context(), string(body))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error()) // YAML/validation errors are client errors
 		return
 	}
-	s.audit(r, "create_dag", dagID, "")
+	if isNew {
+		s.audit(r, "create_dag", dagID, fmt.Sprintf("tasks=%d", len(parsed.Tasks)))
+	} else if existing.DefinitionYAML != string(body) {
+		s.audit(r, "update_dag", dagID, fmt.Sprintf("tasks=%d", len(parsed.Tasks)))
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
 }
 
@@ -592,18 +615,23 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Audit a genuinely NEW dag as create_dag; an edit (the console re-POSTs this on
-	// every debounced save) is not audited, so the trail stays meaningful, not spammed.
-	// A soft-deleted id counts as new — CreateDAG revives it (deleted_at cleared).
+	// A soft-deleted id counts as new. Identical debounced saves are not audited;
+	// a real definition change is.
 	existing, existsErr := s.store.GetDAG(r.Context(), spec.DagID)
 	isNew := errors.Is(existsErr, store.ErrNotFound) || (existing != nil && existing.DeletedAt != nil)
+	if existsErr != nil && !errors.Is(existsErr, store.ErrNotFound) {
+		mapErr(w, existsErr)
+		return
+	}
 	dagID, err := s.eng.CreateDAG(r.Context(), string(yml))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if isNew {
-		s.audit(r, "create_dag", dagID, "")
+		s.audit(r, "create_dag", dagID, fmt.Sprintf("tasks=%d", len(spec.Tasks)))
+	} else if existing.DefinitionYAML != string(yml) {
+		s.audit(r, "update_dag", dagID, fmt.Sprintf("tasks=%d", len(spec.Tasks)))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
 }
@@ -977,14 +1005,15 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setPool(w http.ResponseWriter, r *http.Request) {
 	slots, err := strconv.Atoi(r.URL.Query().Get("slots"))
-	if err != nil || slots <= 0 {
-		httpErr(w, http.StatusBadRequest, "slots must be a positive integer")
+	if err != nil || slots <= 0 || slots > model.MaxPoolSlots {
+		httpErr(w, http.StatusBadRequest, fmt.Sprintf("slots must be between 1 and %d", model.MaxPoolSlots))
 		return
 	}
 	if err := s.store.UpsertPool(r.Context(), &model.Pool{Name: r.PathValue("name"), Slots: slots}); err != nil {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "set_pool", r.PathValue("name"), fmt.Sprintf("slots=%d", slots))
 	writeJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "slots": slots})
 }
 

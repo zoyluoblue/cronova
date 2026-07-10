@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     trigger_type  TEXT NOT NULL,
     started_at    DATETIME,
     finished_at   DATETIME,
-    params        TEXT NOT NULL DEFAULT '', -- JSON map of trigger-time params (recorded per run)
+    params          TEXT NOT NULL DEFAULT '', -- JSON map of trigger-time params (recorded per run)
+    definition_yaml TEXT NOT NULL DEFAULT '', -- immutable DAG definition used by this run
+    definition_hash TEXT NOT NULL DEFAULT '', -- SHA-256 of definition_yaml
     UNIQUE (dag_id, logical_date)
 );
 
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS task_instances (
     max_retries   INTEGER NOT NULL DEFAULT 0,
     pool          TEXT NOT NULL DEFAULT 'default',
     priority      INTEGER NOT NULL DEFAULT 0,
+    definition_hash TEXT NOT NULL DEFAULT '', -- definition used by the most recent attempt
     executor_ref  TEXT NOT NULL DEFAULT '',
     log_path      TEXT NOT NULL DEFAULT '',
     started_at    DATETIME,
@@ -56,7 +59,9 @@ CREATE TABLE IF NOT EXISTS dag_dependencies (
     PRIMARY KEY (upstream_dag, downstream_dag)
 );
 
--- Reserved for a future event-driven trigger queue (source/event_key/consumed).
+-- Durable scheduler events. Dependency events use the upstream run_id as their
+-- key; Migrate adds a unique (source,event_key) index after deduplicating the
+-- previously-reserved table used by older releases.
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
@@ -65,6 +70,7 @@ CREATE TABLE IF NOT EXISTS events (
     consumed    INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_events_pending ON events(source, consumed, id);
 
 -- Operations audit trail: who (actor) did what (action) to which target, when.
 -- actor is a username, or 'anonymous' when auth is disabled.
@@ -116,7 +122,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- UI-managed shared configuration. Variables are plain key-value (referenced in
 -- task commands as {{ var.KEY }}); connections hold structured credentials
 -- ({{ conn.ID.host }} etc.). Passwords are stored as-is and NEVER returned by the
--- API (write-only, masked in the UI) — protect the DB file with filesystem perms.
+-- API (write-only, masked in the UI). The store encrypts it with AES-256-GCM
+-- when key_file is configured; key_file: none is the explicit plaintext mode.
 CREATE TABLE IF NOT EXISTS variables (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL DEFAULT '',

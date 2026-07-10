@@ -9,7 +9,7 @@
 set -euo pipefail
 
 os="${1:?usage: package.sh <linux|darwin> <amd64|arm64>}"
-arch="${2:?usage: package.sh <linux|darwin> <amd64|arch64>}"
+arch="${2:?usage: package.sh <linux|darwin> <amd64|arm64>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # CRONOVA_VERSION pins the baked/reported version (reproducible builds, local
 # mirror testing); otherwise derive it from the current tag.
@@ -32,10 +32,10 @@ go build -C "$root" -trimpath -ldflags "$ldflags" -o "$stage/cronova-executor" .
 mkdir -p "$stage/deploy" "$stage/dags" "$stage/docs"
 cp "$root"/deploy/cronova.env.example "$stage/deploy/"
 if [[ "$os" == "darwin" ]]; then
-  cp "$root"/deploy/install-macos.sh "$root"/deploy/com.cronova.plist "$stage/deploy/"
+  cp "$root"/deploy/install-macos.sh "$root"/deploy/com.cronova.plist "$root"/deploy/com.cronova.executor.plist "$stage/deploy/"
   chmod +x "$stage/deploy/install-macos.sh"
 else
-  cp "$root"/deploy/install.sh "$root"/deploy/cronova.service "$stage/deploy/"
+  cp "$root"/deploy/install.sh "$root"/deploy/cronova.service "$root"/deploy/cronova-executor.service "$stage/deploy/"
   chmod +x "$stage/deploy/install.sh"
 fi
 cp "$root"/cronova.yaml.example "$stage/"

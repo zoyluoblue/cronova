@@ -411,6 +411,31 @@ func TestReadPlistUserGroup(t *testing.T) {
 	}
 }
 
+func TestServiceDefinitionManifestDetectsLocalChanges(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "cronova.service")
+	b := filepath.Join(dir, "cronova-executor.service")
+	files := []serviceFile{{path: a, data: []byte("scheduler-v1")}, {path: b, data: []byte("executor-v1")}}
+	for _, f := range files {
+		if err := os.WriteFile(f.path, f.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := filepath.Join(dir, "service-def.sha256")
+	if err := os.WriteFile(manifest, serviceManifest(files), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := serviceFilesMatchManifest(files, manifest); err != nil || !ok {
+		t.Fatalf("managed files = %v, %v; want true", ok, err)
+	}
+	if err := os.WriteFile(a, []byte("local override"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := serviceFilesMatchManifest(files, manifest); err != nil || ok {
+		t.Fatalf("modified files = %v, %v; want false", ok, err)
+	}
+}
+
 func TestSwapBinary(t *testing.T) {
 	t.Run("replace existing with backup + restore", func(t *testing.T) {
 		dir := t.TempDir()

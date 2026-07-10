@@ -63,6 +63,108 @@ func TestMigrateSeedsDefaultPool(t *testing.T) {
 	}
 }
 
+func TestUpdateDagRunSuccessPublishesAndRearmsDependencyEvent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertDAG(ctx, &model.DAG{DagID: "events", MaxActiveRuns: 1, DefinitionYAML: "dag_id: events"}); err != nil {
+		t.Fatal(err)
+	}
+	logical := time.Now().UTC().Truncate(time.Second)
+	if err := s.CreateDagRun(ctx, &model.DagRun{
+		RunID: "events__run", DagID: "events", LogicalDate: logical,
+		State: model.RunQueued, TriggerType: model.TriggerManual,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateDagRunSuccess(ctx, "events__run", &logical, &logical); err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.GetDagRun(ctx, "events__run")
+	if err != nil || run.State != model.RunSuccess {
+		t.Fatalf("run after success = %+v, err=%v", run, err)
+	}
+	events, err := s.ListPendingEvents(ctx, model.EventSourceDependency, 10)
+	if err != nil || len(events) != 1 || events[0].EventKey != "events__run" {
+		t.Fatalf("pending events = %+v, err=%v", events, err)
+	}
+	eventID := events[0].ID
+	if err := s.ConsumeEvent(ctx, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if events, _ := s.ListPendingEvents(ctx, model.EventSourceDependency, 10); len(events) != 0 {
+		t.Fatalf("events after consume = %+v, want none", events)
+	}
+	if err := s.UpdateDagRunState(ctx, "events__run", model.RunFailed, &logical, &logical); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateDagRunSuccess(ctx, "events__run", &logical, &logical); err != nil {
+		t.Fatal(err)
+	}
+	events, err = s.ListPendingEvents(ctx, model.EventSourceDependency, 10)
+	if err != nil || len(events) != 1 || events[0].ID != eventID {
+		t.Fatalf("re-armed events = %+v, err=%v", events, err)
+	}
+}
+
+func TestMigrateAddsDefinitionSnapshotsToLegacyRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	_, err = s.db.ExecContext(ctx, `
+CREATE TABLE dags (
+  dag_id TEXT PRIMARY KEY, schedule TEXT, start_date DATETIME,
+  catchup INTEGER NOT NULL DEFAULT 0, paused INTEGER NOT NULL DEFAULT 0,
+  max_active_runs INTEGER NOT NULL DEFAULT 1, definition_yaml TEXT NOT NULL DEFAULT '',
+  owner TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE dag_runs (
+  run_id TEXT PRIMARY KEY, dag_id TEXT NOT NULL, logical_date DATETIME NOT NULL,
+  state TEXT NOT NULL, trigger_type TEXT NOT NULL, started_at DATETIME,
+  finished_at DATETIME, params TEXT NOT NULL DEFAULT '',
+  UNIQUE (dag_id, logical_date)
+);
+CREATE TABLE task_instances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, task_id TEXT NOT NULL,
+  state TEXT NOT NULL, try_number INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0, pool TEXT NOT NULL DEFAULT 'default',
+  priority INTEGER NOT NULL DEFAULT 0, executor_ref TEXT NOT NULL DEFAULT '',
+  log_path TEXT NOT NULL DEFAULT '', started_at DATETIME, finished_at DATETIME,
+  UNIQUE (run_id, task_id)
+);
+INSERT INTO dags (dag_id, definition_yaml) VALUES ('legacy', 'dag_id: legacy');
+INSERT INTO dag_runs (run_id, dag_id, logical_date, state, trigger_type)
+  VALUES ('legacy__run', 'legacy', '2026-07-01T00:00:00Z', 'queued', 'manual');
+INSERT INTO task_instances (run_id, task_id, state) VALUES ('legacy__run', 'task', 'scheduled');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate legacy schema: %v", err)
+	}
+	run, err := s.GetDagRun(ctx, "legacy__run")
+	if err != nil || run.DefinitionYAML != "" || run.DefinitionHash != "" {
+		t.Fatalf("legacy run after migration = %+v, err=%v", run, err)
+	}
+	tis, err := s.ListTaskInstances(ctx, "legacy__run")
+	if err != nil || len(tis) != 1 || tis[0].DefinitionHash != "" {
+		t.Fatalf("legacy task after migration = %+v, err=%v", tis, err)
+	}
+	if err := s.UpdateDagRunDefinition(ctx, run.RunID, "dag_id: legacy\ntasks: []\n", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	run, err = s.GetDagRun(ctx, run.RunID)
+	if err != nil || run.DefinitionHash != "hash" {
+		t.Fatalf("snapshot update after migration = %+v, err=%v", run, err)
+	}
+}
+
 func TestCreateManualDagRunBoundedAcrossConnections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bounded.db")
 	open := func() *Store {

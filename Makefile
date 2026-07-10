@@ -10,13 +10,19 @@ LDFLAGS    := -s -w -X main.version=$(VERSION)
 build: ## build ./cronova for the host OS/arch
 	go build -trimpath -ldflags "$(LDFLAGS)" -o cronova $(PKG)
 
+.PHONY: build-executor
+build-executor: ## build ./cronova-executor for the host OS/arch
+	go build -trimpath -ldflags "$(LDFLAGS)" -o cronova-executor $(EXEC_PKG)
+
 .PHONY: release
-release: ## static linux/amd64 binary for server deploy -> dist/cronova
+release: release-executor ## static linux/amd64 scheduler + executor -> dist/
+	mkdir -p dist
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" -o dist/cronova $(PKG)
 
 .PHONY: release-executor
 release-executor: ## static linux/amd64 standalone executor -> dist/cronova-executor
+	mkdir -p dist
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" -o dist/cronova-executor $(EXEC_PKG)
 
@@ -35,7 +41,7 @@ package: ## build release tarballs (linux+darwin, amd64+arm64) + checksums -> di
 
 .PHONY: install
 install: ## build for host + install as a native service (systemd/launchd; needs root)
-	$(MAKE) build
+	$(MAKE) build build-executor
 	@case "$$(uname -s)" in \
 	  Darwin) sudo ./deploy/install-macos.sh ./cronova ;; \
 	  Linux)  sudo ./deploy/install.sh ./cronova ;; \

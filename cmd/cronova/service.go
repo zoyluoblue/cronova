@@ -14,10 +14,14 @@ import (
 // Service-control constants must match what the installers lay down:
 // deploy/cronova.service (systemd) and deploy/com.cronova.plist (launchd).
 const (
-	systemdUnit     = "cronova"                             // `systemctl <verb> cronova`
-	systemdUnitPath = "/etc/systemd/system/cronova.service" // installed unit file
-	launchdLabel    = "com.cronova"                         // `launchctl ... system/com.cronova`
-	launchdPlist    = "/Library/LaunchDaemons/com.cronova.plist"
+	systemdUnit             = "cronova"                             // `systemctl <verb> cronova`
+	systemdUnitPath         = "/etc/systemd/system/cronova.service" // installed unit file
+	systemdExecutorUnit     = "cronova-executor"
+	systemdExecutorUnitPath = "/etc/systemd/system/cronova-executor.service"
+	launchdLabel            = "com.cronova" // `launchctl ... system/com.cronova`
+	launchdPlist            = "/Library/LaunchDaemons/com.cronova.plist"
+	launchdExecutorLabel    = "com.cronova.executor"
+	launchdExecutorPlist    = "/Library/LaunchDaemons/com.cronova.executor.plist"
 )
 
 // Install paths shared by update/uninstall. The binary destination is the SAME
@@ -99,15 +103,37 @@ func ensureRoot(action string) error {
 }
 
 func serviceSystemd(action string) error {
+	_, executorErr := os.Stat(systemdExecutorUnitPath)
+	executorInstalled := executorErr == nil
 	switch action {
 	case "start", "stop", "restart":
 		if err := ensureRoot(action); err != nil {
 			return err
 		}
-		return run("systemctl", action, systemdUnit)
+		switch action {
+		case "start":
+			if !executorInstalled {
+				return run("systemctl", "start", systemdUnit)
+			}
+			return run("systemctl", "start", systemdExecutorUnit, systemdUnit)
+		case "stop":
+			if err := run("systemctl", "stop", systemdUnit); err != nil {
+				return err
+			}
+			if !executorInstalled {
+				return nil
+			}
+			return run("systemctl", "stop", systemdExecutorUnit)
+		default:
+			// Restart only the scheduler. The executor keeps ownership of in-flight tasks.
+			return run("systemctl", "restart", systemdUnit)
+		}
 	case "status":
 		// read-only: systemctl status works unprivileged.
-		return run("systemctl", "--no-pager", "status", systemdUnit)
+		if !executorInstalled {
+			return run("systemctl", "--no-pager", "status", systemdUnit)
+		}
+		return run("systemctl", "--no-pager", "status", systemdUnit, systemdExecutorUnit)
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
@@ -124,7 +150,13 @@ func serviceLaunchd(action string) error {
 			}
 			return nil
 		}
-		return run("launchctl", "print", "system/"+launchdLabel)
+		if err := run("launchctl", "print", "system/"+launchdLabel); err != nil {
+			return err
+		}
+		if launchdJobLoaded(launchdExecutorLabel) {
+			return run("launchctl", "print", "system/"+launchdExecutorLabel)
+		}
+		return nil
 	}
 
 	if err := ensureRoot(action); err != nil { // launchctl's system domain needs root
@@ -141,6 +173,9 @@ func serviceLaunchd(action string) error {
 
 	switch action {
 	case "start":
+		if err := ensureLaunchdExecutor(); err != nil {
+			return err
+		}
 		if loaded { // already registered — (re)start it if it's not running
 			return run("launchctl", "kickstart", "system/"+launchdLabel)
 		}
@@ -154,7 +189,13 @@ func serviceLaunchd(action string) error {
 			return nil
 		}
 		// bootout (unload) is the reliable stop: KeepAlive would respawn a plain kill.
-		return run("launchctl", "bootout", "system/"+launchdLabel)
+		if err := run("launchctl", "bootout", "system/"+launchdLabel); err != nil {
+			return err
+		}
+		if launchdJobLoaded(launchdExecutorLabel) {
+			return run("launchctl", "bootout", "system/"+launchdExecutorLabel)
+		}
+		return nil
 	case "restart":
 		if err := installed(); err != nil {
 			return err
@@ -163,6 +204,9 @@ func serviceLaunchd(action string) error {
 		// (running, idle, or crash-looping). `kickstart -k` needs a live instance
 		// to kill and errors on a loaded-but-stopped job; this does not. Mirrors
 		// deploy/install-macos.sh's start_service.
+		if err := ensureLaunchdExecutor(); err != nil {
+			return err
+		}
 		return launchdReload(loaded)
 	default:
 		return fmt.Errorf("unknown action %q", action)
@@ -173,7 +217,30 @@ func serviceLaunchd(action string) error {
 // system domain. Without root this can under-report (the query itself may be
 // denied), which callers account for.
 func launchdLoaded() bool {
-	return exec.Command("launchctl", "print", "system/"+launchdLabel).Run() == nil
+	return launchdJobLoaded(launchdLabel)
+}
+
+func launchdJobLoaded(label string) bool {
+	return exec.Command("launchctl", "print", "system/"+label).Run() == nil
+}
+
+func ensureLaunchdExecutor() error {
+	if _, err := os.Stat(launchdExecutorPlist); err != nil {
+		if os.IsNotExist(err) {
+			return nil // legacy in-process installation
+		}
+		return err
+	}
+	if launchdJobLoaded(launchdExecutorLabel) {
+		if err := launchdConfirmJobRunning(launchdExecutorLabel); err == nil {
+			return nil
+		}
+		if err := run("launchctl", "kickstart", "system/"+launchdExecutorLabel); err != nil {
+			return err
+		}
+		return launchdConfirmJobRunning(launchdExecutorLabel)
+	}
+	return launchdBootstrapJob(launchdExecutorLabel, launchdExecutorPlist)
 }
 
 // launchdReload unloads (if loaded) and re-bootstraps the daemon. bootout is
@@ -200,13 +267,17 @@ func launchdReload(loaded bool) error {
 // `update` would treat a broken binary as a successful restart and discard its
 // rollback backup. Mirrors deploy/install-macos.sh's start_service.
 func launchdBootstrap() error {
+	return launchdBootstrapJob(launchdLabel, launchdPlist)
+}
+
+func launchdBootstrapJob(label, plist string) error {
 	// enable clears any persistent `disabled` override (e.g. a prior `launchctl
 	// disable`), matching the installer; bootstrap alone cannot load a disabled job.
-	_ = run("launchctl", "enable", "system/"+launchdLabel)
-	if err := run("launchctl", "bootstrap", "system", launchdPlist); err != nil {
+	_ = run("launchctl", "enable", "system/"+label)
+	if err := run("launchctl", "bootstrap", "system", plist); err != nil {
 		return err
 	}
-	return launchdConfirmRunning()
+	return launchdConfirmJobRunning(label)
 }
 
 var launchdPidRE = regexp.MustCompile(`pid = \d+`)
@@ -215,8 +286,12 @@ var launchdPidRE = regexp.MustCompile(`pid = \d+`)
 // re-confirming after a beat so a start-then-crash (which flips to state=waiting)
 // is caught rather than mistaken for success.
 func launchdConfirmRunning() error {
+	return launchdConfirmJobRunning(launchdLabel)
+}
+
+func launchdConfirmJobRunning(label string) error {
 	running := func() bool {
-		out, _ := exec.Command("launchctl", "print", "system/"+launchdLabel).Output()
+		out, _ := exec.Command("launchctl", "print", "system/"+label).Output()
 		s := string(out)
 		return strings.Contains(s, "state = running") && launchdPidRE.MatchString(s)
 	}
@@ -230,7 +305,7 @@ func launchdConfirmRunning() error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("the launchd service did not stay running after load (inspect: sudo launchctl print system/%s)", launchdLabel)
+	return fmt.Errorf("the launchd service did not stay running after load (inspect: sudo launchctl print system/%s)", label)
 }
 
 // serviceInstalled reports whether cronova is installed as a native service on

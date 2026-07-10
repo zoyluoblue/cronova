@@ -336,3 +336,32 @@ notify:
 		t.Errorf("bad notify event should error, got %v", err)
 	}
 }
+
+func TestParseRejectsUnknownFieldsAndTaskTypes(t *testing.T) {
+	for name, raw := range map[string]string{
+		"dag field typo":  "dag_id: strict\nmax_active_run: 2\ntasks:\n  - id: a\n    command: echo ok\n",
+		"task field typo": "dag_id: strict\ntasks:\n  - id: a\n    command: echo ok\n    timeuot: 2\n",
+		"unknown type":    "dag_id: strict\ntasks:\n  - id: a\n    type: dockre\n    command: echo must-not-run\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(raw)); err == nil {
+				t.Fatal("malformed definition was accepted")
+			}
+		})
+	}
+}
+
+func TestParseRejectsMultipleDocumentsAndNegativeRetries(t *testing.T) {
+	for name, raw := range map[string]string{
+		"multiple documents": "dag_id: first\n---\ndag_id: second\n",
+		"default retries":    "dag_id: bad\ndefault_retries: -1\n",
+		"task retries":       "dag_id: bad\ntasks:\n  - id: a\n    command: echo ok\n    retries: -1\n",
+		"retry delay":        "dag_id: bad\ntasks:\n  - id: a\n    command: echo ok\n    retry_delay: -1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(raw)); err == nil {
+				t.Fatal("invalid definition was accepted")
+			}
+		})
+	}
+}

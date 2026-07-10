@@ -2,7 +2,13 @@
 
 The complete YAML schema for a cronova **DAG** (directed acyclic graph of tasks) — every DAG-level and task-level field, the five task types, trigger rules, and resource pools. For a hands-on introduction see [Getting Started](GETTING_STARTED.md); for the project overview see the [README](https://github.com/zoyluoblue/cronova#readme).
 
-A DAG is a single YAML file in the `dags/` directory (default `./dags`, or the service's data dir). cronova validates and cycle-checks every DAG on load; runnable examples live in [`dags/`](https://github.com/zoyluoblue/cronova/tree/main/dags).
+A DAG is a single YAML file in the `dags/` directory (default `./dags`, or the service's data dir). cronova validates and cycle-checks every DAG on load; runnable examples live in [`dags/`](https://github.com/zoyluoblue/cronova/tree/main/dags). Parsing is strict: unknown fields, unsupported task types, trailing YAML documents, invalid negative values, and out-of-range settings are rejected instead of ignored.
+
+Safety limits are enforced before a definition can enter the scheduler: 1 MiB
+per YAML document, 1,000 tasks, 10,000 dependency edges, 256 dependencies per
+task, 128-byte identifiers, 256 KiB commands, 100 retries, and one year for any
+configured delay/timeout/SLA. These bounds prevent a typo or oversized upload
+from turning validation into unbounded memory or scheduler work.
 
 ```yaml
 dag_id: daily_etl
@@ -56,6 +62,16 @@ schedule: "CRON_TZ=Asia/Shanghai 0 2 * * *"   # 02:00 Shanghai time, every day
 ```
 
 > `paused` is **not** a YAML field. Pausing is operational state managed from the console, CLI (`cronova pause <dag_id>`), or API, and is preserved across DAG reloads.
+
+## Definition snapshots
+
+Every run stores the exact canonical YAML and SHA-256 definition hash it started
+with. Editing a DAG while a run is active therefore changes future runs only;
+the active run keeps its original task graph and cannot be wedged by a removed
+or renamed task. An explicit retry is the exception: it intentionally adopts
+the latest DAG definition, records that definition hash on the new attempts,
+and leaves removed task instances as historical rows rather than dispatching
+them again.
 
 ## Task-level fields
 

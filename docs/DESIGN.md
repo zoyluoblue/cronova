@@ -159,7 +159,10 @@ Principles:
     concurrent cancel (row → terminal) or retry (ref cleared). **Retry is refused
     on a still-active run** (cancel first) — a terminal run has no in-flight task
     goroutines to race — and only reactivates tasks still present in the DAG (a
-    removed task has no dispatch path and would wedge the run). A run with a
+    removed task has no dispatch path and would wedge the run). Initial attempts
+    use the run's immutable DAG snapshot; an explicit retry deliberately adopts
+    the latest DAG and records its definition hash on reset/new task instances.
+    A run with a
     leftover `cancelled` task finalizes as **cancelled**, never a clean success,
     and does not trigger downstreams.
 - **Gantt honesty:** the Timeline tab positions one bar per task from its real

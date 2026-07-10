@@ -7,13 +7,13 @@ hide:
 
 # cronova
 
-**A lightweight, self-hosted workflow scheduler in a single Go binary — an open-source Airflow / Azkaban alternative you can install with one command.**
+**A lightweight, self-hosted Go workflow scheduler — an open-source Airflow / Azkaban alternative you can install with one command.**
 
 [![Release](https://img.shields.io/github/v/release/zoyluoblue/cronova?sort=semver&logo=github)](https://github.com/zoyluoblue/cronova/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/zoyluoblue/cronova/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/zoyluoblue/cronova?logo=github&color=1f6feb)](https://github.com/zoyluoblue/cronova/stargazers)
 
-cronova schedules **DAGs** — tasks with dependencies, retries, catchup and pools — and ships as **one static binary** with an **embedded SQLite** database. No JVM, no Python runtime, no external database, no message broker.
+cronova schedules **DAGs** — tasks with dependencies, retries, catchup and pools — and ships as a **static scheduler + executor** with an **embedded SQLite** database. No JVM, no Python runtime, no external database, no message broker.
 
 ```bash
 # Install the scheduler + web console + native service on Linux or macOS:
@@ -27,11 +27,11 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 <div class="grid cards" markdown>
 
--   :material-package-variant-closed:{ .lg .middle } **Single binary, zero dependencies**
+-   :material-package-variant-closed:{ .lg .middle } **Small native install, zero service dependencies**
 
     ---
 
-    Pure-Go build, embedded database, one process. `curl | bash` to install,
+    Pure-Go scheduler + executor, embedded database. `curl | bash` to install,
     `cronova update` to upgrade, `cronova uninstall` to remove.
 
     [:octicons-arrow-right-24: Quick start](GETTING_STARTED.md)
@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 ## What is cronova?
 
-cronova is an **open-source, self-hosted workflow scheduler** (job scheduler / task orchestrator / DAG scheduler) written in Go. It schedules DAGs on cron or interval triggers, runs each task as a subprocess with the host's own interpreters, and gives you a web console, a REST API, a CLI, and an MCP endpoint for AI agents. Think of it as a **cron replacement with dependencies, retries, backfill and observability**, or a **lightweight Airflow alternative** that fits in one binary.
+cronova is an **open-source, self-hosted workflow scheduler** (job scheduler / task orchestrator / DAG scheduler) written in Go. It schedules DAGs on cron or interval triggers, runs each task as a subprocess with the host's own interpreters, and gives you a web console, a REST API, a CLI, and an MCP endpoint for AI agents. Think of it as a **cron replacement with dependencies, retries, backfill and observability**, or a **lightweight Airflow alternative** with a compact native footprint.
 
 ## 30 seconds to a running DAG
 

@@ -64,6 +64,9 @@ func TestGetInfoReportsRuntime(t *testing.T) {
 	if m["executor"] != "in-process" || m["tick"] != "2s" {
 		t.Errorf("info executor/tick = %v/%v", m["executor"], m["tick"])
 	}
+	if m["version"] != "v9.9.9" {
+		t.Errorf("version = %v, want v9.9.9", m["version"])
+	}
 	if m["tz"] != "UTC" { // New() defaults an empty TZ label to UTC
 		t.Errorf("tz = %v, want UTC", m["tz"])
 	}
@@ -223,8 +226,8 @@ func TestCreateDAGFromYAML(t *testing.T) {
 	if rec2.Code != 400 {
 		t.Fatalf("rejected create = %d, want 400", rec2.Code)
 	}
-	if !strings.Contains(rec2.Body.String(), "boom") {
-		t.Errorf("error body should carry the engine message: %s", rec2.Body.String())
+	if !strings.Contains(rec2.Body.String(), "yaml") {
+		t.Errorf("error body should carry strict parser feedback: %s", rec2.Body.String())
 	}
 }
 

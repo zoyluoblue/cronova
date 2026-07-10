@@ -7,13 +7,13 @@ hide:
 
 # cronova
 
-**一个单二进制 Go 程序的轻量级自托管工作流调度器 —— 开源的 Airflow / Azkaban 替代品，一条命令即可安装。**
+**一个轻量级、自托管的 Go 工作流调度器 —— 开源的 Airflow / Azkaban 替代品，一条命令即可安装。**
 
 [![Release](https://img.shields.io/github/v/release/zoyluoblue/cronova?sort=semver&logo=github)](https://github.com/zoyluoblue/cronova/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/zoyluoblue/cronova/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/zoyluoblue/cronova?logo=github&color=1f6feb)](https://github.com/zoyluoblue/cronova/stargazers)
 
-cronova 用于调度 **DAG** —— 带依赖、重试、补跑（catchup）和资源池的任务集合 —— 并以**一个静态二进制**加**内嵌 SQLite** 数据库的形式交付。无需 JVM、无需 Python 运行时、无需外部数据库、无需消息中间件。
+cronova 用于调度 **DAG** —— 带依赖、重试、补跑（catchup）和资源池的任务集合 —— 并以**静态调度器 + executor**加**内嵌 SQLite** 数据库的形式交付。无需 JVM、无需 Python 运行时、无需外部数据库、无需消息中间件。
 
 ```bash
 # Install the scheduler + web console + native service on Linux or macOS:
@@ -27,11 +27,11 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 <div class="grid cards" markdown>
 
--   :material-package-variant-closed:{ .lg .middle } **单二进制，零依赖**
+-   :material-package-variant-closed:{ .lg .middle } **轻量原生安装，零服务依赖**
 
     ---
 
-    纯 Go 构建，内嵌数据库，只需一个进程。`curl | bash` 一键安装，
+    纯 Go 调度器 + executor，内嵌数据库。`curl | bash` 一键安装，
     `cronova update` 升级，`cronova uninstall` 卸载。
 
     [:octicons-arrow-right-24: 快速上手](GETTING_STARTED.md)

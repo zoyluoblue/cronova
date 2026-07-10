@@ -118,7 +118,7 @@ func setup(t *testing.T) (http.Handler, *sqlite.Store, *stubTrigger, string) {
 		t.Fatal(err)
 	}
 	trig := &stubTrigger{st: st}
-	return New(st, trig, dir, nil, Info{Executor: "in-process", Tick: "2s"}).Handler(), st, trig, logPath
+	return New(st, trig, dir, nil, Info{Version: "v9.9.9", Executor: "in-process", Tick: "2s"}).Handler(), st, trig, logPath
 }
 
 func get(t *testing.T, h http.Handler, method, path string) (*httptest.ResponseRecorder, any) {
@@ -275,7 +275,10 @@ func TestRunDetailAndLog(t *testing.T) {
 }
 
 func TestBuildDAG(t *testing.T) {
-	h, _, trig, _ := setup(t)
+	h, st, trig, _ := setup(t)
+	if err := st.UpsertDAG(context.Background(), &model.DAG{DagID: "build_test", DefinitionYAML: "dag_id: build_test\ntasks: []\n", MaxActiveRuns: 1}); err != nil {
+		t.Fatal(err)
+	}
 	body := `{"dag_id":"build_test","schedule":"@every 1m","catchup":true,"max_active_runs":2,
 	  "tasks":[{"id":"a","type":"shell","command":"echo a"},
 	           {"id":"b","command":"echo b","deps":["a"],"pool":"heavy"}],
@@ -292,6 +295,11 @@ func TestBuildDAG(t *testing.T) {
 		if !strings.Contains(y, want) {
 			t.Errorf("generated YAML missing %q:\n%s", want, y)
 		}
+	}
+	_, auditBody := get(t, h, "GET", "/api/audit?target=created_dag")
+	auditEntries := auditBody.([]any)
+	if len(auditEntries) != 1 || auditEntries[0].(map[string]any)["action"] != "update_dag" {
+		t.Fatalf("DAG update audit = %v, want one update_dag entry", auditBody)
 	}
 
 	// Malformed JSON -> 400.
@@ -462,6 +470,10 @@ func TestPools(t *testing.T) {
 	rec, body := get(t, h, "GET", "/api/pools")
 	if rec.Code != 200 || len(body.([]any)) < 2 {
 		t.Errorf("list pools: code=%d body=%v", rec.Code, body)
+	}
+	rec, body = get(t, h, "GET", "/api/audit?target=heavy")
+	if rec.Code != 200 || len(body.([]any)) != 1 || body.([]any)[0].(map[string]any)["action"] != "set_pool" {
+		t.Errorf("pool audit: code=%d body=%v", rec.Code, body)
 	}
 }
 

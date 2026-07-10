@@ -275,12 +275,17 @@ func cmdServe(args []string) error {
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
 	logDir := fs.String("logs", "logs", "directory for task log files")
 	projectsDir := fs.String("projects", "", "directory for uploaded project files (default ~/.cronova/projects)")
+	workspacesDir := fs.String("workspaces", "", "shared per-attempt project workspace directory")
 	tick := fs.Duration("tick", 2*time.Second, "scheduling loop interval")
 	executorAddr := fs.String("executor", "", "executor target (absolute unix:///path socket only); empty = in-process executor")
 	httpAddr := fs.String("http", "127.0.0.1:8090", "HTTP address for the console API + web UI (empty to disable)")
 	authFlag := fs.Bool("auth", false, "require login for the console/API (overrides config)")
 	allowUnauthenticatedRemote := fs.Bool("allow-unauthenticated-remote", false, "DANGEROUS: allow an unauthenticated console on a non-loopback address")
 	retention := fs.Duration("retention", 90*24*time.Hour, "delete finished runs + their logs older than this (0 = keep forever)")
+	auditRetention := fs.Duration("audit-retention", 365*24*time.Hour, "delete audit entries older than this (0 = keep forever)")
+	maxQueuedRuns := fs.Int("max-queued-runs", 10000, "global queued-run limit across all trigger sources")
+	maxActiveRuns := fs.Int("max-active-runs", 1000, "global running-run limit")
+	maxConcurrentTasks := fs.Int("max-concurrent-tasks", 64, "global queued/running task limit across all pools")
 	_ = fs.Parse(args)
 
 	// resolve settings: defaults <- config file <- CRONOVA_* env <- explicit flags
@@ -296,12 +301,16 @@ func cmdServe(args []string) error {
 	}
 	applyEnv(&cfg)
 	overlaySetFlags(&cfg, fs, map[string]any{
-		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "tick": tick,
-		"executor": executorAddr, "http": httpAddr, "auth": authFlag, "retention": retention,
+		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "workspaces": workspacesDir, "tick": tick,
+		"executor": executorAddr, "http": httpAddr, "auth": authFlag, "retention": retention, "audit-retention": auditRetention,
+		"max-queued-runs": maxQueuedRuns, "max-active-runs": maxActiveRuns, "max-concurrent-tasks": maxConcurrentTasks,
 		"allow-unauthenticated-remote": allowUnauthenticatedRemote,
 	})
 	if cfg.Projects == "" {
 		cfg.Projects = defaultProjectsDir() // ~/.cronova/projects (may be "" if no home)
+	}
+	if cfg.Workspaces == "" {
+		cfg.Workspaces = workspaceDirFor(cfg.DB)
 	}
 
 	tickDur, err := time.ParseDuration(cfg.Tick)
@@ -312,8 +321,15 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	auditRetentionDur, err := parseRetention(cfg.AuditRetention)
+	if err != nil {
+		return fmt.Errorf("audit retention: %w", err)
+	}
 	if err := validateHTTPExposure(cfg); err != nil {
 		return err
+	}
+	if cfg.MaxQueuedRunsGlobal <= 0 || cfg.MaxActiveRunsGlobal <= 0 || cfg.MaxConcurrentTasks <= 0 {
+		return fmt.Errorf("global run/task limits must be positive")
 	}
 
 	st, err := openStore(cfg.DB)
@@ -389,6 +405,12 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("secure projects dir %s: %w", cfg.Projects, err)
 		}
 	}
+	if err := os.MkdirAll(cfg.Workspaces, 0o700); err != nil {
+		return fmt.Errorf("create workspaces dir %s: %w", cfg.Workspaces, err)
+	}
+	if err := os.Chmod(cfg.Workspaces, 0o700); err != nil {
+		return fmt.Errorf("secure workspaces dir %s: %w", cfg.Workspaces, err)
+	}
 
 	sch := scheduler.New(st, exec, scheduler.Options{
 		DagDir:      cfg.Dags,
@@ -396,9 +418,14 @@ func cmdServe(args []string) error {
 		ProjectsDir: cfg.Projects,
 		// Per-DB workspace dir: two cronova instances on one host (e.g. an
 		// installed service + a dev run) must not GC each other's workspaces.
-		WorkspaceDir: workspaceDirFor(cfg.DB),
-		Tick:         tickDur,
-		Retention:    retentionDur,
+		WorkspaceDir:         cfg.Workspaces,
+		Tick:                 tickDur,
+		Retention:            retentionDur,
+		AuditRetention:       auditRetentionDur,
+		MaxManualQueueGlobal: cfg.MaxQueuedRunsGlobal,
+		MaxQueuedRunsGlobal:  cfg.MaxQueuedRunsGlobal,
+		MaxActiveRunsGlobal:  cfg.MaxActiveRunsGlobal,
+		MaxConcurrentTasks:   cfg.MaxConcurrentTasks,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -408,9 +435,15 @@ func cmdServe(args []string) error {
 	var httpSrv *http.Server
 	httpErrCh := make(chan error, 1)
 	if cfg.HTTP != "" {
-		apiSrv := api.New(st, sch, cfg.Logs, web.FS(), api.Info{Executor: executorLabel, Tick: tickDur.String()})
+		apiSrv := api.New(st, sch, cfg.Logs, web.FS(), api.Info{Executor: executorLabel, Tick: tickDur.String(), Version: version})
 		apiSrv.SetAuth(api.AuthConfig{Enabled: cfg.Auth.Enabled, SessionTTL: cfg.sessionTTL(), SecureCookie: cfg.Auth.SecureCookie})
+		if err := apiSrv.SetTrustedProxies(cfg.Auth.TrustedProxies); err != nil {
+			return err
+		}
 		apiSrv.SetProjectsDir(cfg.Projects)
+		if hc, ok := exec.(interface{ Health(context.Context) error }); ok {
+			apiSrv.SetReadinessCheck(hc.Health)
+		}
 		httpSrv = newConsoleHTTPServer(cfg.HTTP, apiSrv.Handler())
 		go func() {
 			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)
@@ -591,8 +624,8 @@ func cmdPools(args []string) error {
 		}
 		if isSet {
 			slots, err := strconv.Atoi(pos[2])
-			if err != nil || slots <= 0 {
-				return fmt.Errorf("slots must be a positive integer, got %q", pos[2])
+			if err != nil || slots <= 0 || slots > model.MaxPoolSlots {
+				return fmt.Errorf("slots must be between 1 and %d, got %q", model.MaxPoolSlots, pos[2])
 			}
 			// POST /api/pools/{name} takes slots as a QUERY param, not a body.
 			if _, err := c.Call(ctx, "POST", "/api/pools/{name}", client.Options{
@@ -625,8 +658,8 @@ func cmdPools(args []string) error {
 
 	if isSet {
 		slots, err := strconv.Atoi(pos[2])
-		if err != nil || slots <= 0 {
-			return fmt.Errorf("slots must be a positive integer, got %q", pos[2])
+		if err != nil || slots <= 0 || slots > model.MaxPoolSlots {
+			return fmt.Errorf("slots must be between 1 and %d, got %q", model.MaxPoolSlots, pos[2])
 		}
 		if err := st.UpsertPool(ctx, &model.Pool{Name: pos[1], Slots: slots}); err != nil {
 			return err
@@ -770,10 +803,19 @@ func envOr(key, def string) string {
 	return def
 }
 
-// seedAdmin creates an admin account if the username does not yet exist (idempotent).
+// seedAdmin creates an admin account or rotates its password when it changed.
+// Reusing the same bootstrap value is a no-op, so restarts do not revoke sessions.
 func seedAdmin(ctx context.Context, st *sqlite.Store, username, password string) error {
-	if _, err := st.GetUserByUsername(ctx, username); err == nil {
-		return nil // already present
+	if existing, err := st.GetUserByUsername(ctx, username); err == nil {
+		if auth.CheckPassword(existing.PasswordHash, password) {
+			return nil
+		}
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return err
+		}
+		log.Printf("cronova: rotating admin password for %q", username)
+		return st.UpdateUserPassword(ctx, existing.ID, hash)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}

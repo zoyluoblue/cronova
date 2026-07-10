@@ -5,6 +5,7 @@ async function loadDags() {
   overviewCache = await api("/api/overview");
   $("nav-dags").textContent = overviewCache.stats.total_dags;
   renderDags();
+  finishRouteRender();
 }
 function renderDags() {
   if (view !== "dags" || !overviewCache) return;
@@ -108,11 +109,12 @@ async function showDag(id, tab) {
   await flushPendingSaves(); // land any debounced edit before we refetch + replace D
   let dag, runs, allDags = [];
   try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=25`)]); }
-  catch (e) { D = null; view = "dag"; activeDag = id; setNav("dags", id); main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  catch (e) { D = null; view = "dag"; activeDag = id; setNav("dags", id); main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   if (dag.deleted_at) { // archived DAG: do NOT open the editor (a save would silently revive it)
     D = null; view = "dag"; activeDag = id; setNav("dags", id);
     main.innerHTML = `<div class="crumb-bar"><a id="back">${t("back_dags")}</a> / ${esc(id)}</div><div class="empty">${t("dag_archived")}</div>`;
     $("back").onclick = loadDags;
+    finishRouteRender();
     return;
   }
   try { allDags = (await api("/api/dags")).map((d) => d.dag_id); } catch (_) {}
@@ -138,6 +140,7 @@ async function showDag(id, tab) {
   setDagHash();
   setNav("dags", id);
   renderDagPage();
+  finishRouteRender();
 }
 // hash mirrors the active tab so every tab is linkable; Runs (default) stays clean
 function setDagHash() {
@@ -155,6 +158,7 @@ function gotoDagPage() {
   setDagHash();
   setNav("dags", D.dag.dag_id);
   renderDagPage();
+  finishRouteRender();
 }
 
 // one-line schedule summary for the hero + settings row (honest: only glosses
@@ -647,6 +651,7 @@ function showTask(dagID, taskID) {
   lastCmdField = null;
   setNav("dags", `${dagID} / ${taskID}`);
   renderTaskPage();
+  finishRouteRender();
 }
 
 // ---- typed command builder ------------------------------------------------
@@ -1463,7 +1468,7 @@ const runLive = (s) => s === "queued" || s === "running";
 async function showRun(runID) {
   view = "run"; currentRun = runID; closeLog(); stopDagRunsPoll(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
   let data;
-  try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   const r = data.run;
   runDag = await api(`/api/dags/${r.dag_id}`);
   setNav("dags", `${r.dag_id} / ${t("run_word")}`);
@@ -1510,6 +1515,7 @@ async function showRun(runID) {
   renderRunDynamic(data);
   openDefaultRunLog(data);
   if (runLive(r.state)) startRunPoll(runID, gen);
+  finishRouteRender();
 }
 let runDataCache = null;
 function startRunPoll(runID, gen) {
@@ -1715,6 +1721,7 @@ async function showPools() {
   const save = async (name, slots) => { if (!name || !(slots > 0)) { toast(t("p_need"), "warn"); return; } try { await api(`/api/pools/${encodeURIComponent(name)}?slots=${slots}`, { method: "POST" }); toast(t("toast_pool_saved"), "ok"); showPools(); } catch (e) { toast(e.message, "fail"); } };
   main.querySelectorAll("button[data-save]").forEach((b) => b.onclick = () => save(b.dataset.save, +main.querySelector(`input[data-pool="${CSS.escape(b.dataset.save)}"]`).value));
   $("addp").onclick = () => save($("np").value.trim(), +$("ns").value);
+  finishRouteRender();
 }
 
 // ---- audit trail (operations log) ----
@@ -1727,13 +1734,14 @@ function auditRows(entries) {
 async function showAudit() {
   view = "audit"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("audit"); setHash("#/audit");
   let entries = [];
-  try { entries = await api("/api/audit?limit=200"); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  try { entries = await api("/api/audit?limit=200"); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   main.innerHTML = `
     <div class="page-h"><h1>${t("nav_audit")}</h1><span class="num">${entries.length}</span></div>
     <div class="page-sub">${t("audit_sub")}</div>
     ${entries.length
       ? `<table class="tbl"><thead><tr><th style="width:180px">${t("au_time")}</th><th>${t("au_actor")}</th><th>${t("au_action")}</th><th>${t("au_target")}</th></tr></thead><tbody>${auditRows(entries)}</tbody></table>`
       : `<div class="empty">${t("audit_empty")}</div>`}`;
+  finishRouteRender();
 }
 
 // ---- API & integration (interactive docs + API tokens) ----
@@ -1741,8 +1749,9 @@ let TOKENS = null;
 async function showApi() {
   view = "api"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("api"); setHash("#/api");
   try { TOKENS = await api("/api/tokens"); }
-  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   renderApi();
+  finishRouteRender();
 }
 function roleLabel(role) { return role === "viewer" ? t("role_viewer_ro") : t("role_admin_full"); }
 function renderApi() {
@@ -1831,8 +1840,9 @@ let RES = null, resTab = "vars";
 async function showResources() {
   view = "resources"; activeDag = null; closeLog(); setNav("resources"); setHash("#/resources");
   try { const [vars, conns] = await Promise.all([api("/api/variables"), api("/api/connections")]); RES = { vars, conns }; }
-  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; return; }
+  catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   renderResources();
+  finishRouteRender();
 }
 function renderResources() {
   if (view !== "resources" || !RES) return;
@@ -1944,7 +1954,7 @@ function connDialog(conn) {
 async function showGraph() {
   view = "graph"; activeDag = null; closeLog(); setNav("graph"); setHash("#/graph");
   let g;
-  try { g = await api("/api/dag-graph"); } catch (e) { main.innerHTML = `<div class="empty">${esc(String(e))}</div>`; return; }
+  try { g = await api("/api/dag-graph"); } catch (e) { main.innerHTML = `<div class="empty">${esc(String(e))}</div>`; finishRouteRender(); return; }
   const nodes = g.nodes || [], edges = g.edges || [];
   // map each DAG to a graph node whose "deps" are its upstream DAGs (trigger_after)
   const depMap = {}; nodes.forEach((n) => depMap[n.dag_id] = []);
@@ -1963,4 +1973,5 @@ async function showGraph() {
     if (known.has(n.dataset.node)) n.onclick = () => showDag(n.dataset.node);
   });
   attachPanZoom(main.querySelector("#dag-graph .graph-wrap"));
+  finishRouteRender();
 }

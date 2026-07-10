@@ -8,26 +8,74 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write        # needed to create the GitHub Release
-
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Static analysis and module integrity
+        run: |
+          go mod verify
+          go vet ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Coverage floor
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); if ($3 + 0 < 55) { print "coverage " $3 "% is below 55%"; exit 1 } }'
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: Deployment script syntax
+        run: bash -n deploy/*.sh scripts/*.sh
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0   # full history so `git describe --tags` sees the tag
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
       - name: Build release tarballs (linux + macOS, amd64 + arm64)
         run: make package   # darwin cross-builds from Linux: pure Go, CGO disabled
 
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/cronova.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Include SBOM in release checksums
+        working-directory: dist
+        run: sha256sum cronova.spdx.json >> SHA256SUMS
+
+      - name: Sign build provenance with GitHub OIDC
+        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+
       - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           files: |
@@ -36,3 +84,4 @@ jobs:
             dist/cronova_darwin_amd64.tar.gz
             dist/cronova_darwin_arm64.tar.gz
             dist/SHA256SUMS
+            dist/cronova.spdx.json

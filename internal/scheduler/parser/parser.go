@@ -7,7 +7,9 @@
 package parser
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -21,6 +23,18 @@ import (
 // also prevents path traversal: dag_id is used as a filename when a DAG is
 // created via the API (see scheduler.CreateDAG).
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+const (
+	MaxDefinitionBytes = 1 << 20
+	MaxTasks           = 1000
+	MaxActiveRuns      = 1000
+	maxIdentifierBytes = 128
+	maxDependencies    = 10000
+	maxDepsPerTask     = 256
+	maxRetries         = 100
+	maxDurationSeconds = 365 * 24 * 3600
+	maxCommandBytes    = 256 << 10
+)
 
 type taskYAML struct {
 	ID            string   `yaml:"id"`
@@ -82,12 +96,30 @@ func ParseSchedule(spec string) (cron.Schedule, error) {
 // Parse parses and validates a DAG definition. The raw bytes are retained in
 // DefinitionYAML for UI round-tripping.
 func Parse(raw []byte) (*model.DAG, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("yaml: empty definition")
+	}
+	if len(raw) > MaxDefinitionBytes {
+		return nil, fmt.Errorf("yaml: definition exceeds %d bytes", MaxDefinitionBytes)
+	}
 	var y dagYAML
-	if err := yaml.Unmarshal(raw, &y); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&y); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("yaml: multiple documents are not allowed")
+		}
+		return nil, fmt.Errorf("yaml: trailing document: %w", err)
 	}
 	if y.DagID == "" {
 		return nil, fmt.Errorf("dag_id is required")
+	}
+	if len(y.DagID) > maxIdentifierBytes {
+		return nil, fmt.Errorf("dag_id exceeds %d bytes", maxIdentifierBytes)
 	}
 	if !idPattern.MatchString(y.DagID) {
 		return nil, fmt.Errorf("invalid dag_id %q: use letters, digits, '_', '-', '.'", y.DagID)
@@ -102,8 +134,11 @@ func Parse(raw []byte) (*model.DAG, error) {
 		}
 	}
 
+	if y.MaxActiveRuns < 0 || y.MaxActiveRuns > MaxActiveRuns {
+		return nil, fmt.Errorf("dag %q: max_active_runs must be between 1 and %d when set", y.DagID, MaxActiveRuns)
+	}
 	maxActive := y.MaxActiveRuns
-	if maxActive <= 0 {
+	if maxActive == 0 {
 		maxActive = 1
 	}
 
@@ -112,8 +147,20 @@ func Parse(raw []byte) (*model.DAG, error) {
 		return nil, fmt.Errorf("dag %q: %w", y.DagID, err)
 	}
 
-	if y.SLA < 0 || y.DagrunTimeout < 0 {
-		return nil, fmt.Errorf("dag %q: sla/dagrun_timeout must be >= 0 seconds", y.DagID)
+	if y.DefaultRetries < 0 || y.DefaultRetries > maxRetries {
+		return nil, fmt.Errorf("dag %q: default_retries must be between 0 and %d", y.DagID, maxRetries)
+	}
+	if y.DefaultRetryDelay < 0 || y.DefaultRetryDelay > maxDurationSeconds {
+		return nil, fmt.Errorf("dag %q: default_retry_delay must be between 0 and %d seconds", y.DagID, maxDurationSeconds)
+	}
+	if y.SLA < 0 || y.SLA > maxDurationSeconds || y.DagrunTimeout < 0 || y.DagrunTimeout > maxDurationSeconds {
+		return nil, fmt.Errorf("dag %q: sla/dagrun_timeout must be between 0 and %d seconds", y.DagID, maxDurationSeconds)
+	}
+	if len(y.Tasks) > MaxTasks {
+		return nil, fmt.Errorf("dag %q: task count exceeds %d", y.DagID, MaxTasks)
+	}
+	if len(y.TriggerAfter) > MaxTasks {
+		return nil, fmt.Errorf("dag %q: trigger_after count exceeds %d", y.DagID, MaxTasks)
 	}
 	d := &model.DAG{
 		DagID:          y.DagID,
@@ -126,13 +173,24 @@ func Parse(raw []byte) (*model.DAG, error) {
 		DagrunTimeout:  y.DagrunTimeout,
 		DefinitionYAML: string(raw),
 	}
+	seenTriggers := map[string]bool{}
 	for _, ta := range y.TriggerAfter {
 		if ta.DagID != "" {
+			if len(ta.DagID) > maxIdentifierBytes || !idPattern.MatchString(ta.DagID) {
+				return nil, fmt.Errorf("dag %q: invalid trigger_after dag_id %q", y.DagID, ta.DagID)
+			}
+			if seenTriggers[ta.DagID] {
+				return nil, fmt.Errorf("dag %q: duplicate trigger_after dag_id %q", y.DagID, ta.DagID)
+			}
+			seenTriggers[ta.DagID] = true
 			d.TriggerAfter = append(d.TriggerAfter, ta.DagID)
 		}
 	}
 	// notify: an outbound webhook fired when a run finishes in a listed state.
 	d.NotifyURL = strings.TrimSpace(y.Notify.URL)
+	if len(d.NotifyURL) > 8192 {
+		return nil, fmt.Errorf("dag %q: notify.url exceeds 8192 bytes", y.DagID)
+	}
 	for _, ev := range y.Notify.On {
 		ev = strings.TrimSpace(ev)
 		if ev == "failure" || ev == "success" {
@@ -156,11 +214,12 @@ func Parse(raw []byte) (*model.DAG, error) {
 	}
 
 	seen := make(map[string]bool, len(y.Tasks))
+	totalDeps := 0
 	for _, t := range y.Tasks {
 		if t.ID == "" {
 			return nil, fmt.Errorf("dag %q: a task has an empty id", y.DagID)
 		}
-		if !idPattern.MatchString(t.ID) {
+		if len(t.ID) > maxIdentifierBytes || !idPattern.MatchString(t.ID) {
 			return nil, fmt.Errorf("dag %q: invalid task id %q", y.DagID, t.ID)
 		}
 		if seen[t.ID] {
@@ -168,12 +227,32 @@ func Parse(raw []byte) (*model.DAG, error) {
 		}
 		seen[t.ID] = true
 
+		taskType := orDefault(strings.TrimSpace(t.Type), "shell")
+		switch taskType {
+		case "shell", "python", "sql", "jar", "http":
+		default:
+			return nil, fmt.Errorf("dag %q: task %q has unsupported type %q", y.DagID, t.ID, taskType)
+		}
+		if len(t.Deps) > maxDepsPerTask {
+			return nil, fmt.Errorf("dag %q: task %q has more than %d dependencies", y.DagID, t.ID, maxDepsPerTask)
+		}
+		totalDeps += len(t.Deps)
+		if totalDeps > maxDependencies {
+			return nil, fmt.Errorf("dag %q: dependency count exceeds %d", y.DagID, maxDependencies)
+		}
+		if len(t.Command) > maxCommandBytes {
+			return nil, fmt.Errorf("dag %q: task %q command exceeds %d bytes", y.DagID, t.ID, maxCommandBytes)
+		}
+		pool := orDefault(strings.TrimSpace(t.Pool), model.DefaultPoolName)
+		if len(pool) > maxIdentifierBytes || !idPattern.MatchString(pool) {
+			return nil, fmt.Errorf("dag %q: task %q has invalid pool %q", y.DagID, t.ID, pool)
+		}
 		task := model.Task{
 			ID:          t.ID,
-			Type:        orDefault(t.Type, "shell"),
+			Type:        taskType,
 			Command:     t.Command,
 			Deps:        t.Deps,
-			Pool:        orDefault(t.Pool, model.DefaultPoolName),
+			Pool:        pool,
 			Priority:    t.Priority,
 			Retries:     y.DefaultRetries,
 			RetryDelay:  y.DefaultRetryDelay,
@@ -186,8 +265,8 @@ func Parse(raw []byte) (*model.DAG, error) {
 		if !model.ValidTriggerRule(task.TriggerRule) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid trigger_rule %q", y.DagID, t.ID, t.TriggerRule)
 		}
-		if t.Timeout < 0 || t.SLA < 0 {
-			return nil, fmt.Errorf("dag %q: task %q timeout/sla must be >= 0 seconds", y.DagID, t.ID)
+		if t.Timeout < 0 || t.Timeout > maxDurationSeconds || t.SLA < 0 || t.SLA > maxDurationSeconds {
+			return nil, fmt.Errorf("dag %q: task %q timeout/sla must be between 0 and %d seconds", y.DagID, t.ID, maxDurationSeconds)
 		}
 		if !model.ValidRetryBackoff(t.RetryBackoff) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid retry_backoff %q (use fixed or exponential)", y.DagID, t.ID, t.RetryBackoff)
@@ -209,6 +288,12 @@ func Parse(raw []byte) (*model.DAG, error) {
 		if t.RetryDelay != nil {
 			task.RetryDelay = *t.RetryDelay
 		}
+		if task.Retries < 0 || task.Retries > maxRetries {
+			return nil, fmt.Errorf("dag %q: task %q retries must be between 0 and %d", y.DagID, t.ID, maxRetries)
+		}
+		if task.RetryDelay < 0 {
+			return nil, fmt.Errorf("dag %q: task %q retry_delay must be >= 0 seconds", y.DagID, t.ID)
+		}
 		if task.Type == "http" {
 			// an http task carries a request spec instead of a shell command.
 			if t.HTTP == nil || strings.TrimSpace(t.HTTP.URL) == "" {
@@ -219,10 +304,15 @@ func Parse(raw []byte) (*model.DAG, error) {
 					return nil, fmt.Errorf("dag %q: task %q invalid expected_status %d", y.DagID, t.ID, code)
 				}
 			}
+			if len(t.HTTP.URL) > 8192 || len(t.HTTP.Body) > maxCommandBytes || len(t.HTTP.Headers) > 100 || len(t.HTTP.ExpectedStatus) > 100 {
+				return nil, fmt.Errorf("dag %q: task %q http specification exceeds limits", y.DagID, t.ID)
+			}
 			task.HTTP = &model.HTTPSpec{
 				Method: t.HTTP.Method, URL: strings.TrimSpace(t.HTTP.URL),
 				Headers: t.HTTP.Headers, Body: t.HTTP.Body, ExpectedStatus: t.HTTP.ExpectedStatus,
 			}
+		} else if t.HTTP != nil {
+			return nil, fmt.Errorf("dag %q: non-http task %q cannot define http", y.DagID, t.ID)
 		} else if task.Command == "" {
 			// shell/python/sql/jar all carry code/query/command in Command.
 			return nil, fmt.Errorf("dag %q: task %q has empty command", y.DagID, t.ID)
@@ -235,7 +325,12 @@ func Parse(raw []byte) (*model.DAG, error) {
 
 	// deps must reference existing tasks
 	for _, t := range d.Tasks {
+		seenDeps := map[string]bool{}
 		for _, dep := range t.Deps {
+			if seenDeps[dep] {
+				return nil, fmt.Errorf("dag %q: task %q has duplicate dependency %q", y.DagID, t.ID, dep)
+			}
+			seenDeps[dep] = true
 			if !seen[dep] {
 				return nil, fmt.Errorf("dag %q: task %q depends on unknown task %q", y.DagID, t.ID, dep)
 			}

@@ -24,6 +24,13 @@ func TestVariablesCRUD(t *testing.T) {
 	if rec := do(h, "DELETE", "/api/variables/db_host", "", nil); rec.Code != http.StatusOK {
 		t.Fatalf("delete var = %d", rec.Code)
 	}
+	audit := do(h, "GET", "/api/audit", "", nil).Body.String()
+	if !strings.Contains(audit, `"action":"set_variable"`) || !strings.Contains(audit, `"action":"delete_variable"`) {
+		t.Fatalf("variable mutations missing from audit: %s", audit)
+	}
+	if strings.Contains(audit, "10.0.0.1") {
+		t.Fatalf("variable value leaked into audit: %s", audit)
+	}
 }
 
 func TestConnectionPasswordMaskedAndWriteOnly(t *testing.T) {
@@ -73,5 +80,12 @@ func TestConnectionPasswordMaskedAndWriteOnly(t *testing.T) {
 
 	if rec := do(h, "DELETE", "/api/connections/mysql", "", nil); rec.Code != http.StatusOK {
 		t.Fatalf("delete conn = %d", rec.Code)
+	}
+	audit := do(h, "GET", "/api/audit", "", nil).Body.String()
+	if !strings.Contains(audit, `"action":"set_connection"`) || !strings.Contains(audit, `"action":"delete_connection"`) {
+		t.Fatalf("connection mutations missing from audit: %s", audit)
+	}
+	if strings.Contains(audit, "s3cret") {
+		t.Fatalf("connection password leaked into audit: %s", audit)
 	}
 }

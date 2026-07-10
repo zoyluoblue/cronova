@@ -157,6 +157,97 @@ func TestPoolLimitsConcurrency(t *testing.T) {
 	}
 }
 
+func TestGlobalTaskConcurrencyLimitAcrossPools(t *testing.T) {
+	st := newStore(t)
+	mock := newMockExecutor()
+	s := New(st, mock, Options{
+		LogDir: filepath.Join(t.TempDir(), "logs"), PollInterval: 5 * time.Millisecond,
+		MaxConcurrentTasks: 2,
+	})
+	ctx := context.Background()
+	for _, pool := range []string{"p1", "p2", "p3", "p4"} {
+		if err := st.UpsertPool(ctx, &model.Pool{Name: pool, Slots: 16}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yamlText := "dag_id: global_cap\nmax_active_runs: 1\ntasks:\n" +
+		"  - {id: a, command: echo a, pool: p1}\n" +
+		"  - {id: b, command: echo b, pool: p2}\n" +
+		"  - {id: c, command: echo c, pool: p3}\n" +
+		"  - {id: d, command: echo d, pool: p4}\n"
+	if _, err := s.CreateDAG(ctx, yamlText); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := s.TriggerManual(ctx, "global_cap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tickOnce(ctx)
+	waitMockCur(t, mock, 2, time.Second)
+	if _, max := mock.snapshot(); max > 2 {
+		t.Fatalf("global concurrent tasks = %d, want <= 2", max)
+	}
+	mock.finishAll(0)
+	s.WaitInflight()
+	s.tickOnce(ctx)
+	waitMockCur(t, mock, 2, time.Second)
+	mock.finishAll(0)
+	s.WaitInflight()
+	run := s.driveToTerminal(t, ctx, runID, 5)
+	if run.State != model.RunSuccess {
+		t.Fatalf("run = %s, want success", run.State)
+	}
+	if _, max := mock.snapshot(); max > 2 {
+		t.Fatalf("global concurrent tasks peaked at %d", max)
+	}
+}
+
+func TestActiveRunUsesImmutableDefinitionSnapshot(t *testing.T) {
+	st := newStore(t)
+	mock := newMockExecutor()
+	s := New(st, mock, Options{LogDir: filepath.Join(t.TempDir(), "logs"), PollInterval: 5 * time.Millisecond})
+	ctx := context.Background()
+	original := "dag_id: snap\ntasks:\n" +
+		"  - {id: first, command: echo first}\n" +
+		"  - {id: second, command: echo second, deps: [first]}\n"
+	if _, err := s.CreateDAG(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := s.TriggerManual(ctx, "snap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tickOnce(ctx)
+	waitMockCur(t, mock, 1, time.Second)
+
+	// Remove the downstream task while the first task is in flight. The active
+	// run must still dispatch second from its captured definition.
+	if _, err := s.CreateDAG(ctx, "dag_id: snap\ntasks:\n  - {id: first, command: echo changed}\n"); err != nil {
+		t.Fatal(err)
+	}
+	mock.finishAll(0)
+	s.WaitInflight()
+	s.tickOnce(ctx)
+	waitMockCur(t, mock, 1, time.Second)
+	mock.finishAll(0)
+	s.WaitInflight()
+	run := s.driveToTerminal(t, ctx, runID, 5)
+	if run.State != model.RunSuccess {
+		t.Fatalf("run = %s, want success", run.State)
+	}
+	states := s.tiStates(t, ctx, runID)
+	if states["second"] != model.TaskSuccess {
+		t.Fatalf("snapshot task second = %s, want success", states["second"])
+	}
+	stored, err := st.GetDagRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DefinitionYAML != original || stored.DefinitionHash == "" {
+		t.Fatalf("run snapshot was replaced by live edit: hash=%q yaml=%q", stored.DefinitionHash, stored.DefinitionYAML)
+	}
+}
+
 func TestRetryExhausted(t *testing.T) {
 	s := newTestScheduler(t)
 	ctx := context.Background()

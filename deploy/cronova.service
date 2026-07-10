@@ -2,8 +2,9 @@
 Description=cronova workflow scheduler
 Documentation=https://github.com/zoyluo/cronova
 # tasks may reach the network (http operator, remote DBs); wait for it
-After=network-online.target
+After=network-online.target cronova-executor.service
 Wants=network-online.target
+Requires=cronova-executor.service
 
 [Service]
 Type=simple
@@ -29,7 +30,10 @@ ExecStart=/usr/local/bin/cronova serve \
     -config /etc/cronova/cronova.yaml \
     -db /var/lib/cronova/cronova.db \
     -dags /var/lib/cronova/dags \
-    -logs /var/log/cronova
+    -logs /var/log/cronova \
+    -projects /var/lib/cronova/projects \
+    -workspaces /var/lib/cronova/workspaces \
+    -executor unix:///run/cronova/executor.sock
 
 # cronova only SCHEDULES; each task is a subprocess run with the HOST's own
 # interpreters (sh, python3, java, psql, ...). systemd hands services a minimal
@@ -37,7 +41,8 @@ ExecStart=/usr/local/bin/cronova serve \
 # dirs here if your tasks use tools from e.g. /opt/<tool>/bin.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Optional secrets (first-admin seed, etc.) from a root-only file (chmod 600).
+# Optional environment overrides from a root-only file (chmod 600). Admin
+# credentials are managed by `cronova init` and are not stored here.
 # The leading '-' makes the file optional. See cronova.env.example.
 EnvironmentFile=-/etc/cronova/cronova.env
 

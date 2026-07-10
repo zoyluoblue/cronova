@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"flag"
 	"fmt"
@@ -10,17 +11,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // cmdInit is the first-time setup wizard. Interactively (when stdin is a
 // terminal) it walks through port, bind scope, admin account and auth, each with
 // a default that Enter accepts; otherwise it takes defaults + CRONOVA_* env. It
-// writes the server config (cronova.yaml) and a 0600 secrets file (cronova.env)
-// holding the seed admin — `serve` creates that admin idempotently on first start.
+// writes the server config (cronova.yaml), seeds or rotates the admin directly
+// in SQLite, and writes a 0600 env-override template without credentials.
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	configPath := fs.String("config", envOr("CRONOVA_CONFIG", "cronova.yaml"), "config file to write")
-	envPath := fs.String("env", envOr("CRONOVA_ENV_FILE", "cronova.env"), "secrets file to write (admin seed)")
+	envPath := fs.String("env", envOr("CRONOVA_ENV_FILE", "cronova.env"), "0600 environment-override template to write")
 	yes := fs.Bool("yes", false, "non-interactive: accept defaults / env without prompting")
 	_ = fs.Parse(args)
 
@@ -34,11 +37,15 @@ func cmdInit(args []string) error {
 	// CRONOVA_* overlays the file/defaults for the fields written to cronova.yaml
 	// (http, tick, executor, auth.session_ttl, auth.secure_cookie), so a
 	// non-interactive install can preset them; interactive prompts still override
-	// the ones they cover. Storage paths (db/dags/logs) are intentionally left to
-	// the service unit/plist flags, so they are not applied here.
+	// the ones they cover. Every field is rendered back so reconfiguration is
+	// lossless.
 	applyEnv(&cfg)
 	port, bindAll := splitHTTP(cfg.HTTP)
-	adminUser := envOr("CRONOVA_ADMIN_USER", "admin")
+	adminDefault := strings.TrimSpace(cfg.Auth.AdminUser)
+	if adminDefault == "" {
+		adminDefault = "admin"
+	}
+	adminUser := envOr("CRONOVA_ADMIN_USER", adminDefault)
 	adminPass := os.Getenv("CRONOVA_ADMIN_PASSWORD")
 
 	// Resolve auth: a FRESH install defaults to on (secure); a re-run keeps the
@@ -69,9 +76,17 @@ func cmdInit(args []string) error {
 		adminUser = promptLine(in, "Admin username", adminUser)
 
 		for {
-			p1 := promptSecret(in, "Admin password (blank = generate a strong one)")
+			passwordPrompt := "Admin password (blank = generate a strong one)"
+			if fileExisted {
+				passwordPrompt = "Admin password (blank = keep current)"
+			}
+			p1 := promptSecret(in, passwordPrompt)
 			if p1 == "" {
-				adminPass, genPW = randPassword(24), true
+				if !fileExisted {
+					adminPass, genPW = randPassword(24), true
+				} else {
+					adminPass = ""
+				}
 				break
 			}
 			if p2 := promptSecret(in, "Confirm password"); p1 == p2 {
@@ -89,7 +104,7 @@ func cmdInit(args []string) error {
 			bind = "127.0.0.1"
 		}
 		cfg.HTTP = bind + ":" + port
-	} else if adminPass == "" {
+	} else if adminPass == "" && !fileExisted {
 		adminPass, genPW = randPassword(24), true
 	}
 
@@ -97,13 +112,33 @@ func cmdInit(args []string) error {
 	if err := validateHTTPExposure(cfg); err != nil {
 		return fmt.Errorf("unsafe setup: %w", err)
 	}
+	// Seed or rotate the admin directly. The daemon never needs the plaintext in
+	// its environment, so arbitrary trusted-host tasks cannot read a bootstrap
+	// credential file. On a re-run with no password, leave the account untouched.
+	if adminPass != "" {
+		st, err := openStore(cfg.DB)
+		if err != nil {
+			return fmt.Errorf("initialize admin database: %w", err)
+		}
+		if err := seedAdmin(context.Background(), st, adminUser, adminPass); err != nil {
+			_ = st.Close()
+			return fmt.Errorf("initialize admin: %w", err)
+		}
+		if err := st.Close(); err != nil {
+			return err
+		}
+	}
+	cfg.Auth.AdminUser = adminUser // non-secret default for the next init run
+	cfg.Auth.AdminPassword = ""
 
 	if err := writeFileMode(*configPath, renderConfigYAML(cfg), 0o644); err != nil {
 		return err
 	}
-	envBody := fmt.Sprintf("# cronova secrets — loaded by systemd (EnvironmentFile). Keep 0600.\n"+
-		"CRONOVA_ADMIN_USER=%s\nCRONOVA_ADMIN_PASSWORD=%s\n"+
-		"# CRONOVA_SECURE_COOKIE=true   # set when serving behind HTTPS\n", adminUser, adminPass)
+	existingEnv, err := os.ReadFile(*envPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", *envPath, err)
+	}
+	envBody := renderEnvOverrides(string(existingEnv))
 	if err := writeFileMode(*envPath, envBody, 0o600); err != nil {
 		return err
 	}
@@ -121,6 +156,33 @@ func cmdInit(args []string) error {
 		fmt.Printf("  password: %s   (generated — save it)\n", adminPass)
 	}
 	return nil
+}
+
+func renderEnvOverrides(existing string) string {
+	if strings.TrimSpace(existing) == "" {
+		return "# Optional cronova environment overrides. Keep this file 0600.\n" +
+			"# The admin password is seeded directly into the database by `cronova init`\n" +
+			"# and is intentionally never stored here.\n" +
+			"# CRONOVA_SECURE_COOKIE=true   # set when serving behind HTTPS\n"
+	}
+	lines := strings.Split(existing, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		candidate := strings.TrimSpace(line)
+		candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "export "))
+		if i := strings.IndexByte(candidate, '='); i >= 0 {
+			switch strings.TrimSpace(candidate[:i]) {
+			case "CRONOVA_ADMIN_USER", "CRONOVA_ADMIN_PASSWORD":
+				continue // scrub legacy long-lived bootstrap credentials
+			}
+		}
+		kept = append(kept, line)
+	}
+	body := strings.TrimRight(strings.Join(kept, "\n"), "\n")
+	if strings.TrimSpace(body) == "" {
+		return renderEnvOverrides("")
+	}
+	return body + "\n"
 }
 
 // splitHTTP turns a listen address (":8090", "127.0.0.1:8090", "0.0.0.0:8090")
@@ -234,48 +296,46 @@ func randPassword(n int) string {
 }
 
 func writeFileMode(path, body string, mode os.FileMode) error {
-	if dir := filepath.Dir(path); dir != "" {
+	dir := filepath.Dir(path)
+	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(path, []byte(body), mode)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
-// renderConfigYAML produces a fully-commented cronova.yaml with the wizard's
-// choices baked in. Paths (db/dags/logs) are intentionally left as comments:
-// under systemd they are set by the unit's flags, which win over the file.
+// renderConfigYAML serializes every supported field. Re-running init is a
+// lossless reconfiguration: storage, retention, key, executor, and resource
+// bounds are not silently reset. The non-secret admin username is retained as
+// the next wizard default; the password is always omitted.
 func renderConfigYAML(c Config) string {
-	return fmt.Sprintf(`# cronova configuration — written by 'cronova init'.
-# Precedence, highest first:  flag  >  CRONOVA_* env  >  this file  >  built-in default.
-
-# HTTP address for the console + API. ":8090" = all interfaces;
-# "127.0.0.1:8090" = this machine only (front with a reverse proxy for remote access).
-http: "%s"
-
-# DANGEROUS escape hatch. Required only when auth is disabled and http binds a
-# non-loopback address. Keep false for normal deployments.
-allow_unauthenticated_remote: %t
-
-# Scheduler tick — how often the loop wakes to schedule/poll work.
-tick: %s
-
-# Task executor. Empty = in-process (tasks die on restart). A gRPC target such as
-# "unix:///run/cronova/executor.sock" survives scheduler restarts (crash recovery).
-# The socket's parent directory must be private (mode 0700).
-executor: "%s"
-
-auth:
-  enabled: %t              # require login for the console + API
-  session_ttl: %s          # how long a login session stays valid
-  secure_cookie: %t        # set true when served over HTTPS (marks the cookie Secure)
-  # Seed admin credentials live in the secrets file (cronova.env / CRONOVA_ADMIN_*),
-  # not here, so this file can stay world-readable.
-
-# Storage paths. Under systemd these are set by the service unit and this section
-# is ignored; uncomment only for a manual (non-systemd) run.
-# db:   /var/lib/cronova/cronova.db
-# dags: /var/lib/cronova/dags
-# logs: /var/log/cronova
-`, c.HTTP, c.AllowUnauthenticatedRemote, c.Tick, c.Executor, c.Auth.Enabled, c.Auth.SessionTTL, c.Auth.SecureCookie)
+	c.Auth.AdminPassword = ""
+	b, err := yaml.Marshal(c)
+	if err != nil {
+		panic("render config: " + err.Error())
+	}
+	return "# cronova configuration - written by 'cronova init'.\n" +
+		"# Precedence: flag > CRONOVA_* env > this file > built-in default.\n\n" + string(b)
 }

@@ -144,7 +144,7 @@ func cmdUpdate(args []string) error {
 	// Success — drop the .bak backups.
 	commitSwap(binDst)
 	commitSwap(binExecutor)
-	if p := serviceDefPath(); p != "" {
+	for _, p := range serviceDefPaths() {
 		commitSwap(p)
 	}
 
@@ -377,7 +377,7 @@ func extractReleaseBinaries(r io.Reader) (map[string][]byte, string, error) {
 				return nil, "", fmt.Errorf("extract %s: %w", path.Base(h.Name), err)
 			}
 			out[path.Base(h.Name)] = b
-		case "com.cronova.plist", "cronova.service": // service definition, refreshed on update
+		case "com.cronova.plist", "com.cronova.executor.plist", "cronova.service", "cronova-executor.service":
 			if h.Size < 0 || h.Size > 1<<20 {
 				return nil, "", fmt.Errorf("release file %s is too large: %d bytes", path.Base(h.Name), h.Size)
 			}
@@ -448,15 +448,66 @@ func swapBinary(dst string, data []byte) (restore func() error, err error) {
 // commitSwap drops the backup left by swapBinary/swapFile (best-effort).
 func commitSwap(dst string) { _ = os.Remove(dst + ".bak") }
 
-// serviceDefPath is the installed service-definition file for this host, or "".
-func serviceDefPath() string {
+func serviceDefPaths() []string {
 	switch runtime.GOOS {
 	case "darwin":
-		return launchdPlist
+		return []string{launchdPlist, launchdExecutorPlist, serviceDefManifestPath()}
 	case "linux":
-		return systemdUnitPath
+		return []string{systemdUnitPath, systemdExecutorUnitPath, serviceDefManifestPath()}
+	}
+	return nil
+}
+
+func serviceDefManifestPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "/usr/local/etc/cronova/service-def.sha256"
+	case "linux":
+		return "/etc/cronova/service-def.sha256"
 	}
 	return ""
+}
+
+type serviceFile struct {
+	path string
+	data []byte
+}
+
+func serviceManifest(files []serviceFile) []byte {
+	var b strings.Builder
+	for _, f := range files {
+		sum := sha256.Sum256(f.data)
+		fmt.Fprintf(&b, "%x  %s\n", sum, f.path)
+	}
+	return []byte(b.String())
+}
+
+func serviceFilesMatchManifest(files []serviceFile, manifestPath string) (bool, error) {
+	b, err := os.ReadFile(manifestPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	want := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 {
+			want[fields[1]] = strings.ToLower(fields[0])
+		}
+	}
+	for _, f := range files {
+		current, err := os.ReadFile(f.path)
+		if err != nil {
+			return false, err
+		}
+		sum := fmt.Sprintf("%x", sha256.Sum256(current))
+		if want[f.path] == "" || want[f.path] != sum {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // refreshServiceDef installs the service definition (launchd plist / systemd
@@ -466,13 +517,21 @@ func serviceDefPath() string {
 // definition / there's nothing installed to replace. The macOS plist is
 // re-templated with the CURRENT service user so the daemon keeps its account.
 func refreshServiceDef(bins map[string][]byte) (func() error, error) {
+	var files []serviceFile
+	var after func() error
 	switch runtime.GOOS {
 	case "linux":
 		def, ok := bins["cronova.service"]
 		if !ok {
 			return nil, nil
 		}
-		return swapFile(systemdUnitPath, def, 0o644, func() error { return run("systemctl", "daemon-reload") })
+		files = append(files, serviceFile{systemdUnitPath, def})
+		if execDef, ok := bins["cronova-executor.service"]; ok {
+			if _, err := os.Stat(systemdExecutorUnitPath); err == nil {
+				files = append(files, serviceFile{systemdExecutorUnitPath, execDef})
+			}
+		}
+		after = func() error { return run("systemctl", "daemon-reload") }
 	case "darwin":
 		def, ok := bins["com.cronova.plist"]
 		if !ok {
@@ -483,9 +542,62 @@ func refreshServiceDef(bins map[string][]byte) (func() error, error) {
 			return nil, err
 		}
 		rendered := []byte(strings.NewReplacer("__USER__", user, "__GROUP__", group).Replace(string(def)))
-		return swapFile(launchdPlist, rendered, 0o644, nil)
+		files = append(files, serviceFile{launchdPlist, rendered})
+		if execDef, ok := bins["com.cronova.executor.plist"]; ok {
+			if _, err := os.Stat(launchdExecutorPlist); err == nil {
+				execRendered := []byte(strings.NewReplacer("__USER__", user, "__GROUP__", group).Replace(string(execDef)))
+				files = append(files, serviceFile{launchdExecutorPlist, execRendered})
+			}
+		}
+	default:
+		return nil, nil
 	}
-	return nil, nil
+	manifestPath := serviceDefManifestPath()
+	managed, err := serviceFilesMatchManifest(files, manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	if !managed {
+		var candidates []string
+		for _, f := range files {
+			candidate := f.path + ".dist"
+			if err := os.WriteFile(candidate, f.data, 0o644); err != nil {
+				return nil, err
+			}
+			candidates = append(candidates, candidate)
+		}
+		return nil, fmt.Errorf("installed service definition is locally modified or has no managed checksum; preserved it and wrote %s", strings.Join(candidates, ", "))
+	}
+	files = append(files, serviceFile{path: manifestPath, data: serviceManifest(files)})
+
+	var restores []func() error
+	restoreAll := func() error {
+		var first error
+		for i := len(restores) - 1; i >= 0; i-- {
+			if err := restores[i](); err != nil && first == nil {
+				first = err
+			}
+		}
+		if after != nil {
+			_ = after()
+		}
+		return first
+	}
+	for _, f := range files {
+		restore, err := swapFile(f.path, f.data, 0o644, nil)
+		if err != nil {
+			_ = restoreAll()
+			return nil, err
+		}
+		restores = append(restores, restore)
+	}
+	if after != nil {
+		if err := after(); err != nil {
+			_ = restoreAll()
+			return nil, fmt.Errorf("service definition rejected on reload: %w", err)
+		}
+	}
+	return restoreAll, nil
 }
 
 // swapFile atomically replaces dst with data (backing dst up to dst.bak) and runs

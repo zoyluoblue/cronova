@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,35 +16,43 @@ import (
 // Config mirrors the `serve` settings. Precedence (highest first):
 // explicit flag > CRONOVA_* env > config file > built-in default.
 type Config struct {
-	DB       string `yaml:"db"`
-	Dags     string `yaml:"dags"`
-	Logs     string `yaml:"logs"`
-	Projects string `yaml:"projects"` // dir of uploaded project files ("" = ~/.cronova/projects)
-	Tick     string `yaml:"tick"`
-	Executor string `yaml:"executor"`
-	HTTP     string `yaml:"http"`
+	DB         string `yaml:"db"`
+	Dags       string `yaml:"dags"`
+	Logs       string `yaml:"logs"`
+	Projects   string `yaml:"projects"`   // dir of uploaded project files ("" = ~/.cronova/projects)
+	Workspaces string `yaml:"workspaces"` // shared per-attempt project copies
+	Tick       string `yaml:"tick"`
+	Executor   string `yaml:"executor"`
+	HTTP       string `yaml:"http"`
 	// AllowUnauthenticatedRemote is an explicit escape hatch for binding the
 	// unauthenticated console to a non-loopback address.
 	AllowUnauthenticatedRemote bool `yaml:"allow_unauthenticated_remote"`
 	// Retention deletes finished runs (DB rows + log dirs) older than this
 	// duration, e.g. "2160h" for 90 days. "0" keeps everything forever.
-	Retention string `yaml:"retention"`
+	Retention      string `yaml:"retention"`
+	AuditRetention string `yaml:"audit_retention"`
+	// Global admission and execution bounds keep all trigger sources and pools
+	// within predictable memory/process limits.
+	MaxQueuedRunsGlobal int `yaml:"max_queued_runs_global"`
+	MaxActiveRunsGlobal int `yaml:"max_active_runs_global"`
+	MaxConcurrentTasks  int `yaml:"max_concurrent_tasks"`
 	// KeyFile holds the hex key that encrypts connection passwords at rest.
 	// Auto-generated (0600) on first serve. "none" disables encryption.
 	KeyFile string `yaml:"key_file"`
 	Auth    struct {
-		Enabled       bool   `yaml:"enabled"`
-		SessionTTL    string `yaml:"session_ttl"`
-		SecureCookie  bool   `yaml:"secure_cookie"`
-		AdminUser     string `yaml:"admin_user"`     // seed admin on first run (empty = skip)
-		AdminPassword string `yaml:"admin_password"` // prefer the env var over a file
+		Enabled        bool     `yaml:"enabled"`
+		SessionTTL     string   `yaml:"session_ttl"`
+		SecureCookie   bool     `yaml:"secure_cookie"`
+		AdminUser      string   `yaml:"admin_user,omitempty"`     // non-secret init default; legacy bootstrap username
+		AdminPassword  string   `yaml:"admin_password,omitempty"` // legacy only; init never writes this
+		TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 	} `yaml:"auth"`
 }
 
 func defaultConfig() Config {
 	c := Config{DB: "data/cronova.db", Dags: "dags", Logs: "logs", Tick: "2s", HTTP: "127.0.0.1:8090",
-		Retention: "2160h", // 90 days; "0" = keep forever
-		KeyFile:   "cronova.key"}
+		Retention: "2160h", AuditRetention: "8760h", // runs 90 days; audit 365 days
+		KeyFile: "cronova.key", MaxQueuedRunsGlobal: 10000, MaxActiveRunsGlobal: 1000, MaxConcurrentTasks: 64}
 	c.Auth.SessionTTL = "24h"
 	return c
 }
@@ -90,6 +99,7 @@ func applyEnv(c *Config) {
 	env("CRONOVA_DAGS", &c.Dags)
 	env("CRONOVA_LOGS", &c.Logs)
 	env("CRONOVA_PROJECTS", &c.Projects)
+	env("CRONOVA_WORKSPACES", &c.Workspaces)
 	env("CRONOVA_TICK", &c.Tick)
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
@@ -99,7 +109,18 @@ func applyEnv(c *Config) {
 		}
 	}
 	env("CRONOVA_RETENTION", &c.Retention)
+	env("CRONOVA_AUDIT_RETENTION", &c.AuditRetention)
 	env("CRONOVA_KEY_FILE", &c.KeyFile)
+	envInt := func(key string, dst *int) {
+		if v, ok := os.LookupEnv(key); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+				*dst = n
+			}
+		}
+	}
+	envInt("CRONOVA_MAX_QUEUED_RUNS_GLOBAL", &c.MaxQueuedRunsGlobal)
+	envInt("CRONOVA_MAX_ACTIVE_RUNS_GLOBAL", &c.MaxActiveRunsGlobal)
+	envInt("CRONOVA_MAX_CONCURRENT_TASKS", &c.MaxConcurrentTasks)
 	if v, ok := os.LookupEnv("CRONOVA_AUTH"); ok {
 		// Only a RECOGNIZED value flips the control; an unknown/blank value keeps
 		// the current setting rather than failing open (auth defaults on for a
@@ -116,6 +137,9 @@ func applyEnv(c *Config) {
 	}
 	env("CRONOVA_ADMIN_USER", &c.Auth.AdminUser)
 	env("CRONOVA_ADMIN_PASSWORD", &c.Auth.AdminPassword)
+	if v, ok := os.LookupEnv("CRONOVA_TRUSTED_PROXIES"); ok {
+		c.Auth.TrustedProxies = strings.Split(v, ",")
+	}
 }
 
 // parseBool parses a boolean-ish env value leniently (case-insensitive, trimmed).
@@ -154,6 +178,7 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	str("dags", &c.Dags)
 	str("logs", &c.Logs)
 	str("projects", &c.Projects)
+	str("workspaces", &c.Workspaces)
 	str("executor", &c.Executor)
 	str("http", &c.HTTP)
 	if set["tick"] {
@@ -162,6 +187,17 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	if set["retention"] {
 		c.Retention = vals["retention"].(*time.Duration).String()
 	}
+	if set["audit-retention"] {
+		c.AuditRetention = vals["audit-retention"].(*time.Duration).String()
+	}
+	integer := func(name string, dst *int) {
+		if set[name] {
+			*dst = *vals[name].(*int)
+		}
+	}
+	integer("max-queued-runs", &c.MaxQueuedRunsGlobal)
+	integer("max-active-runs", &c.MaxActiveRunsGlobal)
+	integer("max-concurrent-tasks", &c.MaxConcurrentTasks)
 	if set["auth"] {
 		c.Auth.Enabled = *vals["auth"].(*bool)
 	}

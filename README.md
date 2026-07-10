@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 ## Why cronova?
 
-- 🟢 **Single binary, zero dependencies.** Pure-Go build (`modernc.org/sqlite`, CGO-free), embedded database, one process. `curl | bash` to install, `cronova update` to upgrade, `cronova uninstall` to remove — no Airflow-style stack to babysit.
+- 🟢 **Small native install, zero service dependencies.** Pure-Go, CGO-free scheduler + standalone executor with embedded SQLite. `curl | bash` to install, `cronova update` to upgrade, `cronova uninstall` to remove — no Airflow-style stack to babysit.
 - 🗂️ **Airflow / Azkaban-style DAGs.** Declarative YAML DAGs with dependency edges, cron / `@every` schedules, cross-DAG triggers, catchup / backfill, per-task retries & timeouts, resource pools, and trigger rules — the orchestration primitives you already know.
 - 🌐 **Polyglot tasks + project upload.** Every task runs as an OS subprocess, so write tasks in **shell, Python, SQL, a JAR, or HTTP** — any language on the host. Drag-and-drop a script, a whole project folder, or a `.zip` in the console and cronova runs it in an isolated working copy.
 - 🤖 **AI-native.** A built-in **[Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server** and a remote JSON CLI let AI agents (Claude, and any MCP client) list, create, validate, trigger, and inspect DAGs through the same token-authenticated, role-gated API.
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/zoyluoblue/cronova/main/deploy/boot
 
 ## What is cronova?
 
-**cronova is an open-source, self-hosted workflow scheduler** (a.k.a. job scheduler / task orchestrator / DAG scheduler) written in Go. It schedules **DAGs** — directed acyclic graphs of tasks — on cron or interval triggers, runs each task as a subprocess using the host's own interpreters, and gives you a web console, a REST API, a CLI, and an MCP endpoint for AI agents. Think of it as a **cron replacement with dependencies, retries, backfill, and observability**, or a **lightweight Airflow alternative** that fits in one binary.
+**cronova is an open-source, self-hosted workflow scheduler** (a.k.a. job scheduler / task orchestrator / DAG scheduler) written in Go. It schedules **DAGs** — directed acyclic graphs of tasks — on cron or interval triggers, runs each task as a subprocess using the host's own interpreters, and gives you a web console, a REST API, a CLI, and an MCP endpoint for AI agents. Think of it as a **cron replacement with dependencies, retries, backfill, and observability**, or a **lightweight Airflow alternative** shipped as a compact native service pair.
 
 ## Quick start
 
@@ -71,7 +71,7 @@ new deployed instance; it enables authentication by default.
 
 | | **cronova** | Apache Airflow | Azkaban | plain cron |
 |---|:---:|:---:|:---:|:---:|
-| Install | **one binary / `curl \| bash`** | Python stack + DB + broker | JVM + MySQL | built-in |
+| Install | **one archive / `curl \| bash`** | Python stack + DB + broker | JVM + MySQL | built-in |
 | Runtime deps | **none** (embedded SQLite) | Python, Postgres, Redis/Celery | Java, MySQL | none |
 | DAGs & dependencies | ✅ | ✅ | ✅ | ❌ |
 | Cron + interval + cross-DAG triggers | ✅ | ✅ | partial | cron only |
@@ -82,7 +82,7 @@ new deployed instance; it enables authentication by default.
 | Web console + live logs | ✅ | ✅ | ✅ | ❌ |
 | REST API + OpenAPI | ✅ | ✅ | partial | ❌ |
 | AI agent / MCP integration | ✅ **built-in** | ❌ | ❌ | ❌ |
-| Footprint | **~single process, tens of MB** | heavy | heavy (JVM) | tiny |
+| Footprint | **two small native processes, tens of MB** | heavy | heavy (JVM) | tiny |
 
 cronova targets the sweet spot between a bare `crontab` and a full Airflow deployment: **real DAG orchestration with almost no operational overhead.**
 
@@ -148,7 +148,7 @@ cronova api POST /api/dags/validate '{"dag_id":"x","tasks":[…]}'   # dry-run v
 
 ## Deploy in production
 
-cronova is a **scheduler, not a runtime**: it launches each task as a subprocess using the **host's own interpreters** (`sh`, `python3`, `java`, `psql`, …), Azkaban-style — so it deploys as a single static binary under **systemd (Linux)** or **launchd (macOS)**, no container or bundled runtime.
+cronova is a **scheduler, not a runtime**: it launches each task using the **host's own interpreters** (`sh`, `python3`, `java`, `psql`, …), Azkaban-style. Managed installs run a static scheduler plus a static standalone executor under **systemd (Linux)** or **launchd (macOS)**, with no container or bundled runtime.
 
 ```bash
 cronova start | stop | restart | status   # manage the service (auto-elevates via sudo)
@@ -180,10 +180,10 @@ The one-line installer runs an interactive setup wizard (port, bind scope, admin
 ## FAQ
 
 **Is cronova an Airflow alternative?**
-Yes — for teams who want DAG scheduling (dependencies, retries, catchup, pools, a web UI, a REST API) without running a Python stack, a separate database, and a message broker. cronova is one binary with an embedded database. For very large, plugin-heavy data platforms, Airflow remains the richer ecosystem.
+Yes — for teams who want DAG scheduling (dependencies, retries, catchup, pools, a web UI, a REST API) without running a Python stack, a separate database, and a message broker. cronova is a compact native service pair with an embedded database. For very large, plugin-heavy data platforms, Airflow remains the richer ecosystem.
 
 **Does cronova need a database, JVM, or Python?**
-No. The scheduler and web console are a single Go binary with an **embedded SQLite** database. Python/Java/psql are only needed on the host if *your tasks* invoke them.
+No. The scheduler and web console use an **embedded SQLite** database; the managed install adds a small standalone executor so scheduler restarts do not kill tasks. Python/Java/psql are only needed on the host if *your tasks* invoke them.
 
 **What languages can tasks be written in?**
 Any. Tasks are `shell`, `python`, `sql`, `jar`, or `http`; a shell task can invoke anything on the host (Node, Go, Rust binaries, …). The framework (Go) is fully decoupled from the task language.
@@ -198,7 +198,7 @@ Yes. It ships a built-in **MCP server** (`cronova mcp`) and a remote JSON CLI, s
 Linux and macOS, on both amd64 and arm64. Prebuilt binaries are on the [Releases](https://github.com/zoyluoblue/cronova/releases) page.
 
 **Is it production-ready / crash-safe?**
-Run tasks in the decoupled gRPC executor and the scheduler can restart or upgrade without killing running jobs; on recovery it re-attaches to in-flight tasks with no double execution.
+Managed installs use the decoupled gRPC executor by default, so the scheduler can restart or upgrade without killing running jobs; on recovery it re-attaches to in-flight tasks with no double execution.
 
 ## Development
 

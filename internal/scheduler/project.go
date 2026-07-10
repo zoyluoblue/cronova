@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zoyluo/cronova/internal/model"
+	"github.com/zoyluo/cronova/internal/projectfs"
 )
 
 // Per-task project staging. When a shell task sets Project, the scheduler copies
@@ -49,6 +50,10 @@ func (s *Scheduler) stageProject(name, ref string) (string, error) {
 	if name == "." || name == ".." || !validProjectName.MatchString(name) {
 		return "", fmt.Errorf("invalid project name %q", name)
 	}
+	lock := projectfs.Lock(s.opts.ProjectsDir)
+	lock.RLock()
+	defer lock.RUnlock()
+
 	src := filepath.Join(s.opts.ProjectsDir, name)
 	info, err := os.Stat(src)
 	if err != nil {

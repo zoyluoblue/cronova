@@ -1,6 +1,6 @@
 # Getting Started with cronova
 
-Install cronova, start the scheduler and web console, write and trigger your first DAG, and wire your own scripts into a workflow — the hands-on path for the single-binary, self-hosted **workflow scheduler** and open-source [Apache Airflow](https://airflow.apache.org/) / Azkaban alternative.
+Install cronova, start the scheduler and web console, write and trigger your first DAG, and wire your own scripts into a workflow — the hands-on path for the lightweight, self-hosted **workflow scheduler** and open-source [Apache Airflow](https://airflow.apache.org/) / Azkaban alternative.
 
 This guide is task-oriented. For the full field-by-field DAG spec see the [DAG Reference](DAG_REFERENCE.md); for every command and flag see the [CLI Reference](CLI.md); for production install see [Deployment](DEPLOY.md). New to cronova? Start with the [README](https://github.com/zoyluoblue/cronova#readme).
 
@@ -58,6 +58,7 @@ By default `serve` uses relative working-directory paths and the in-process exec
 | SQLite database | `-db` | `CRONOVA_DB` | `data/cronova.db` |
 | Task log directory | `-logs` | `CRONOVA_LOGS` | `logs` |
 | Uploaded projects | `-projects` | `CRONOVA_PROJECTS` | `~/.cronova/projects` |
+| Attempt workspaces | `-workspaces` | `CRONOVA_WORKSPACES` | system temp directory |
 | Scheduler tick | `-tick` | `CRONOVA_TICK` | `2s` |
 | gRPC executor target | `-executor` | `CRONOVA_EXECUTOR` | *(empty = in-process)* |
 | Require login | `-auth` | `CRONOVA_AUTH` | *(off for local `serve`; `init` defaults on)* |
@@ -65,7 +66,7 @@ By default `serve` uses relative working-directory paths and the in-process exec
 
 Settings resolve in this precedence, highest first: **explicit flag → `CRONOVA_*` env → `cronova.yaml` config file → built-in default**. The config file is optional; `serve` only errors on a missing config if you pass `-config` explicitly.
 
-> The default in-process executor runs tasks inside the `serve` process, so a restart ends running tasks. For crash-recoverable execution that survives a scheduler restart or upgrade, run tasks in the decoupled gRPC executor via an absolute `unix:///...` socket in a private (`0700`) directory. TCP executor targets are rejected. See [Deployment](DEPLOY.md).
+> The default in-process executor runs tasks inside a manual `serve` process, so a restart ends running tasks. Managed installs use the decoupled gRPC executor by default. For a manual pair, use an absolute `unix:///...` socket in a private (`0700`) directory and an explicit shared workspace path. TCP executor targets are rejected. See [Deployment](DEPLOY.md).
 
 Drive the same server from another terminal with the CLI:
 
@@ -80,10 +81,14 @@ Drive the same server from another terminal with the CLI:
 Authentication is off for a plain development `serve`, but the listener is loopback-only. Cronova refuses an unauthenticated non-loopback bind unless the explicit dangerous override is set. Enable login and seed an admin before exposing the console:
 
 ```bash
-CRONOVA_ADMIN_USER=admin CRONOVA_ADMIN_PASSWORD=... ./cronova serve -auth
+./cronova init                 # seeds the admin hash directly in SQLite
+./cronova serve -auth
 ```
 
-The admin is created idempotently on first start. You can also manage accounts with `cronova users add|list|passwd|delete`, or let the `cronova init` wizard write `cronova.yaml` + a `0600` secrets file for you. Details in the [CLI Reference](CLI.md).
+You can also manage accounts with `cronova users add|list|passwd|delete`.
+`cronova init` writes `cronova.yaml` plus a credential-free `0600` environment
+override template; it never leaves the admin password in a long-lived file.
+Details in the [CLI Reference](CLI.md).
 
 ## 3. Write your first DAG and trigger it
 
@@ -193,6 +198,7 @@ How project attach works:
 - Each attempt gets a **fresh isolated copy** of the uploaded project as its `cwd`. Attempts never interfere, and a re-upload takes effect on the next run.
 - The copy's path is exported as **`CRONOVA_PROJECT_DIR`**, so a script can locate its own bundled data files.
 - Project names allow letters, digits, and `. _ -`. Uploads are size-capped (per file and per project) and guarded against path traversal / zip-slip.
+- Multi-file changes are staged and swapped atomically; a rejected upload leaves the previous project tree intact.
 - The projects directory defaults to `~/.cronova/projects`; override it with `-projects` / `CRONOVA_PROJECTS`. If no projects directory is configured, uploads are disabled and a task that references a project will fail at run time — `cronova api POST /api/dags/validate` surfaces a warning for a project that isn't uploaded yet.
 
 ### Common questions

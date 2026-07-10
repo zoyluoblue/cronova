@@ -45,6 +45,7 @@ func (s *Server) setVariable(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "set_variable", key, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -53,6 +54,7 @@ func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "delete_variable", r.PathValue("key"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
@@ -120,6 +122,7 @@ func (s *Server) setConnection(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "set_connection", id, "type="+truncate(req.Type, 32))
 	writeJSON(w, http.StatusOK, toConnResp(c))
 }
 
@@ -128,5 +131,6 @@ func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, err)
 		return
 	}
+	s.audit(r, "delete_connection", r.PathValue("id"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }

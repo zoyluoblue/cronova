@@ -3,8 +3,8 @@
 <!--
   cronova launchd LaunchDaemon — the macOS counterpart of deploy/cronova.service.
   install-macos.sh substitutes __USER__/__GROUP__ with the invoking (sudo) user so
-  tasks run unprivileged, not as root. Secrets (the admin seed) are sourced from
-  the 0600 cronova.env by the sh wrapper — launchd has no EnvironmentFile.
+  tasks run unprivileged, not as root. The setup command seeds the admin directly
+  into SQLite, so this job never needs a plaintext bootstrap password.
 -->
 <plist version="1.0">
 <dict>
@@ -20,13 +20,26 @@
   <key>WorkingDirectory</key>
   <string>/usr/local/var/cronova</string>
 
-  <!-- source cronova.env (admin seed etc.) then exec serve, mirroring the
-       systemd unit's EnvironmentFile + ExecStart -->
+  <!-- Admin credentials are seeded directly by `cronova init`; no shell sources
+       a task-readable plaintext env file. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>set -a; [ -f /usr/local/etc/cronova/cronova.env ] &amp;&amp; . /usr/local/etc/cronova/cronova.env; set +a; exec /usr/local/bin/cronova serve -config /usr/local/etc/cronova/cronova.yaml -db /usr/local/var/cronova/cronova.db -dags /usr/local/var/cronova/dags -logs /usr/local/var/log/cronova</string>
+    <string>/usr/local/bin/cronova</string>
+    <string>serve</string>
+    <string>-config</string>
+    <string>/usr/local/etc/cronova/cronova.yaml</string>
+    <string>-db</string>
+    <string>/usr/local/var/cronova/cronova.db</string>
+    <string>-dags</string>
+    <string>/usr/local/var/cronova/dags</string>
+    <string>-logs</string>
+    <string>/usr/local/var/log/cronova</string>
+    <string>-projects</string>
+    <string>/usr/local/var/cronova/projects</string>
+    <string>-workspaces</string>
+    <string>/usr/local/var/cronova/workspaces</string>
+    <string>-executor</string>
+    <string>unix:///usr/local/var/cronova/run/executor.sock</string>
   </array>
 
   <!-- cronova only SCHEDULES; each task runs with the host's own interpreters.

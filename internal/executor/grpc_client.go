@@ -10,14 +10,16 @@ import (
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // GRPCClient is an Executor backed by a remote cronova-executor process. The
 // scheduler uses it so that a scheduler restart leaves running tasks untouched
 // (they belong to the executor process) and can be re-attached via Probe.
 type GRPCClient struct {
-	conn *grpc.ClientConn
-	cli  pb.ExecutorClient
+	conn   *grpc.ClientConn
+	cli    pb.ExecutorClient
+	health healthpb.HealthClient
 }
 
 var _ Executor = (*GRPCClient)(nil)
@@ -34,12 +36,44 @@ func Dial(target string) (*GRPCClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial executor %q: %w", target, err)
 	}
-	return &GRPCClient{conn: conn, cli: pb.NewExecutorClient(conn)}, nil
+	c := &GRPCClient{conn: conn, cli: pb.NewExecutorClient(conn), health: healthpb.NewHealthClient(conn)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Health(ctx); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("executor %q is not ready: %w", target, err)
+	}
+	return c, nil
 }
 
 func (c *GRPCClient) Close() error { return c.conn.Close() }
 
+const executorRPCTimeout = 5 * time.Second
+
+func rpcContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, executorRPCTimeout)
+}
+
+// Health verifies that the remote executor process is reachable and serving.
+func (c *GRPCClient) Health(ctx context.Context) error {
+	ctx, cancel := rpcContext(ctx)
+	defer cancel()
+	resp, err := c.health.Check(ctx, &healthpb.HealthCheckRequest{}, grpc.WaitForReady(true))
+	if err != nil {
+		return err
+	}
+	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		return fmt.Errorf("health status is %s", resp.GetStatus())
+	}
+	return nil
+}
+
 func (c *GRPCClient) Launch(ctx context.Context, spec Spec) (string, error) {
+	ctx, cancel := rpcContext(ctx)
+	defer cancel()
 	resp, err := c.cli.Launch(ctx, &pb.LaunchRequest{
 		TaskRunId:      spec.TaskRunID,
 		Type:           spec.Type,
@@ -57,6 +91,8 @@ func (c *GRPCClient) Launch(ctx context.Context, spec Spec) (string, error) {
 }
 
 func (c *GRPCClient) Probe(ctx context.Context, ref string) (Status, error) {
+	ctx, cancel := rpcContext(ctx)
+	defer cancel()
 	resp, err := c.cli.Probe(ctx, &pb.ProbeRequest{Ref: ref})
 	if err != nil {
 		return Status{}, err
@@ -65,6 +101,8 @@ func (c *GRPCClient) Probe(ctx context.Context, ref string) (Status, error) {
 }
 
 func (c *GRPCClient) Cancel(ctx context.Context, ref string) error {
+	ctx, cancel := rpcContext(ctx)
+	defer cancel()
 	_, err := c.cli.Cancel(ctx, &pb.CancelRequest{Ref: ref})
 	return err
 }

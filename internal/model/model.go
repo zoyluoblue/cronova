@@ -161,31 +161,48 @@ type HTTPSpec struct {
 
 // DagRun is one concrete execution of a DAG, keyed by its logical period.
 type DagRun struct {
-	RunID       string            `json:"run_id"`
-	DagID       string            `json:"dag_id"`
-	LogicalDate time.Time         `json:"logical_date"`
-	State       RunState          `json:"state"`
-	TriggerType TriggerType       `json:"trigger_type"`
-	StartedAt   *time.Time        `json:"started_at,omitempty"`
-	FinishedAt  *time.Time        `json:"finished_at,omitempty"`
-	Params      map[string]string `json:"params,omitempty"` // trigger-time params, injected as CRONOVA_PARAM_* + {{ params.KEY }}
+	RunID          string            `json:"run_id"`
+	DagID          string            `json:"dag_id"`
+	LogicalDate    time.Time         `json:"logical_date"`
+	State          RunState          `json:"state"`
+	TriggerType    TriggerType       `json:"trigger_type"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	FinishedAt     *time.Time        `json:"finished_at,omitempty"`
+	Params         map[string]string `json:"params,omitempty"` // trigger-time params, injected as CRONOVA_PARAM_* + {{ params.KEY }}
+	DefinitionYAML string            `json:"-"`                // immutable definition used by this run
+	DefinitionHash string            `json:"definition_hash,omitempty"`
 }
+
+// Event is a durable scheduler signal. The dependency source uses a DagRun's
+// run_id as EventKey so finalizing the run and publishing its success can be
+// committed atomically and replayed safely after a restart.
+type Event struct {
+	ID        int64     `json:"id"`
+	Source    string    `json:"source"`
+	EventKey  string    `json:"event_key"`
+	Payload   string    `json:"payload,omitempty"`
+	Consumed  bool      `json:"consumed"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+const EventSourceDependency = "dependency"
 
 // TaskInstance is the execution of one Task within one DagRun. It is the
 // smallest unit tracked by the state machine.
 type TaskInstance struct {
-	ID          int64      `json:"id"`
-	RunID       string     `json:"run_id"`
-	TaskID      string     `json:"task_id"`
-	State       TaskState  `json:"state"`
-	TryNumber   int        `json:"try_number"`
-	MaxRetries  int        `json:"max_retries"`
-	Pool        string     `json:"pool"`
-	Priority    int        `json:"priority"`
-	ExecutorRef string     `json:"executor_ref,omitempty"`
-	LogPath     string     `json:"log_path,omitempty"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	ID             int64      `json:"id"`
+	RunID          string     `json:"run_id"`
+	TaskID         string     `json:"task_id"`
+	State          TaskState  `json:"state"`
+	TryNumber      int        `json:"try_number"`
+	MaxRetries     int        `json:"max_retries"`
+	Pool           string     `json:"pool"`
+	Priority       int        `json:"priority"`
+	DefinitionHash string     `json:"definition_hash,omitempty"`
+	ExecutorRef    string     `json:"executor_ref,omitempty"`
+	LogPath        string     `json:"log_path,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
 // Pool is a named set of concurrency slots.
@@ -196,6 +213,10 @@ type Pool struct {
 
 // DefaultPoolName is the pool tasks land in when none is specified.
 const DefaultPoolName = "default"
+
+// MaxPoolSlots is the largest operator-configurable pool. A scheduler-wide
+// concurrency cap remains the final bound even when many pools exist.
+const MaxPoolSlots = 1024
 
 // Role is a console/API authorization level.
 type Role string
@@ -234,9 +255,9 @@ type Connection struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// AuditEntry records one operator action (trigger/cancel/retry/mark/create/
-// delete/pause) for the operations audit trail. Actor is a username, or
-// "anonymous" when auth is disabled.
+// AuditEntry records one operator mutation for the operations audit trail.
+// Actor is a username, or "anonymous" when auth is disabled. Detail must never
+// contain credentials or variable/connection values.
 type AuditEntry struct {
 	ID     int64     `json:"id"`
 	TS     time.Time `json:"ts"`
