@@ -83,10 +83,13 @@ func cmdPrune(args []string) error {
 	// Deleting rows alone leaves the DB file at its high-water mark; VACUUM
 	// rewrites it and returns the space. Only worth the rewrite when rows went.
 	if len(pruned) > 0 && !*noVacuum {
-		if err := st.Vacuum(ctx); err != nil {
-			return fmt.Errorf("vacuum after prune: %w", err)
+		// SQLite only: PostgreSQL's autovacuum manages space on its own.
+		if v, ok := st.(interface{ Vacuum(context.Context) error }); ok {
+			if err := v.Vacuum(ctx); err != nil {
+				return fmt.Errorf("vacuum after prune: %w", err)
+			}
+			fmt.Println("vacuumed — freed space returned to the filesystem")
 		}
-		fmt.Println("vacuumed — freed space returned to the filesystem")
 	}
 	return nil
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/zoyluo/cronova/internal/scheduler"
 	"github.com/zoyluo/cronova/internal/secrets"
 	"github.com/zoyluo/cronova/internal/store"
+	"github.com/zoyluo/cronova/internal/store/postgres"
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 	"github.com/zoyluo/cronova/internal/web"
 )
@@ -245,7 +246,36 @@ func leaseHolderID() string {
 	return fmt.Sprintf("%s:pid-%d:%d", host, os.Getpid(), time.Now().UnixNano())
 }
 
-func openStore(dbPath string) (*sqlite.Store, error) {
+// serverStore is what the CLI/server needs beyond store.Store: the secrets
+// cipher hooks and the scheduler lease. Both the sqlite and postgres stores
+// implement it; sqlite-only extras (Vacuum, BackupTo) are reached by optional
+// type assertion where used.
+type serverStore interface {
+	store.Store
+	SetSecretCipher(*secrets.Cipher)
+	MigrateConnectionSecrets(context.Context) (int, error)
+	AcquireLease(ctx context.Context, holder string, ttl time.Duration) error
+	RenewLease(ctx context.Context, holder string, ttl time.Duration) error
+	ReleaseLease(ctx context.Context, holder string) error
+	Close() error
+}
+
+// openStore opens the metadata store selected by the -db value: a
+// postgres:// / postgresql:// DSN uses the PostgreSQL store (client/server —
+// the path to HA and bigger deployments), anything else is a SQLite file path
+// (the zero-dependency default).
+func openStore(dbPath string) (serverStore, error) {
+	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
+		st, err := postgres.New(dbPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := st.Migrate(context.Background()); err != nil {
+			_ = st.Close()
+			return nil, err
+		}
+		return st, nil
+	}
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir: %w", err)
@@ -910,7 +940,7 @@ func envOr(key, def string) string {
 
 // seedAdmin creates an admin account or rotates its password when it changed.
 // Reusing the same bootstrap value is a no-op, so restarts do not revoke sessions.
-func seedAdmin(ctx context.Context, st *sqlite.Store, username, password string) error {
+func seedAdmin(ctx context.Context, st store.Store, username, password string) error {
 	if existing, err := st.GetUserByUsername(ctx, username); err == nil {
 		if auth.CheckPassword(existing.PasswordHash, password) {
 			return nil
