@@ -15,6 +15,15 @@
         "CRONOVA_WEB_DIR=internal/web/static exec go run ./cmd/cronova serve -http :8091"
       ],
       "port": 8091
+    },
+    {
+      "name": "cronova-fresh",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "D=/private/tmp/claude-501/-Users-zoyluo-codes-zoyprojects-github-cronova/6e5feb88-3e4e-4920-8c11-f6923c93653f/scratchpad/run; mkdir -p $D/dags $D/logs; CRONOVA_WEB_DIR=internal/web/static exec go run ./cmd/cronova serve -db $D/cronova.db -dags $D/dags -logs $D/logs -http 127.0.0.1:8092"
+      ],
+      "port": 8092
     }
   ]
 }

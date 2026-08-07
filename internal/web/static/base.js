@@ -16,6 +16,13 @@ let logES = null;
 const _urlLang = new URLSearchParams(location.search).get("lang");
 let lang = (_urlLang === "en" || _urlLang === "zh") ? _urlLang : (localStorage.getItem("cnv_lang") || "zh");
 let theme = localStorage.getItem("cnv_theme") || "dark";
+// uiMode: "novice" | "expert". A saved preference wins; otherwise resolveMode()
+// infers a default from the instance (empty => novice onboarding, has DAGs =>
+// expert, so existing users never get their console flipped under them). Only an
+// explicit toggle click persists — the inferred default stays adaptive.
+let uiMode = null;
+const nvMode = () => uiMode === "novice";
+const DOCS_URL = "https://zoyluoblue.github.io/cronova/";
 
 // D: in-memory editable spec for the active DAG operation page (immediate-save).
 let D = null;
@@ -160,6 +167,75 @@ const DICT = {
     gs_title: "快速上手", gs_create: "创建第一个 DAG", gs_trigger: "触发一次运行", gs_green: "拿到一次成功运行",
     adv_options: "高级选项", log_find_ph: "在日志中查找…", log_download: "下载完整日志", log_matches: (n) => `${n} 行匹配`, log_capped: (n) => `仅显示最近 ${n} 行`,
     back_dag: (d) => `← 返回 ${d}`, confirm_del_task_title: (id) => `删除任务 “${id}”？`,
+    // ---- novice mode ----
+    mode_novice: "新手", mode_expert: "专家",
+    mode_toggle_title: "界面模式：新手默认只保留必需信息，专家显示全部指标与操作",
+    nv_workbench: "工作台", nv_myflows: "我的工作流", nv_shared: "共享配置", nv_help: "帮助中心",
+    nv_sys_ok: "系统运行正常", nv_newflow: "＋ 新建工作流",
+    s0_title: "把重复的脚本，交给 cronova 定时跑",
+    s0_sub: "按时执行、失败自动重试、随时查看日志。",
+    s0_sub2: "三步建好第一条工作流，大约需要 1 分钟。",
+    s0_step1: "选一个起点", s0_step2: "确认要执行的命令", s0_step3: "试跑一次，看它变绿",
+    s0_cta: "创建我的第一个工作流 →",
+    s0_expert_link: "我用过 Airflow / Azkaban，直接进专家模式 →",
+    s0_term_hint: "「工作流」= 按顺序执行的一组命令，专业术语叫 DAG。切到专家模式会看到完整术语。",
+    wz_crumb: "新建工作流", wz_back: "← 返回", wz_stepof: (n) => `第 ${n} 步 / 共 3 步`,
+    wz1_title: "选一个和你最像的场景", wz1_sub: "之后每一步都可以改，这只是一个起点。",
+    wz_tpl_etl: "每日数据处理", wz_tpl_etl_d: "先取数、再加工、最后写入 —— 三步依次执行", wz_tpl_etl_m: "3 个步骤 · 上一步成功才执行下一步",
+    wz_tpl_report: "定时报表", wz_tpl_report_d: "取数、生成报表并发送 —— 适合每天早上自动发日报", wz_tpl_report_m: "2 个步骤 · 预设每天 08:00",
+    wz_tpl_blank: "从零开始", wz_tpl_blank_d: "只有一个步骤，跑你自己的任意命令或脚本", wz_tpl_blank_m: "1 个步骤 · 最简单", wz_tpl_blank_chip: "你的命令",
+    wz1_next: "下一步：确认命令 →",
+    wz2_title: "这些步骤会依次执行",
+    wz2_sub: "命令就是你平时在终端里敲的那一行。上一步成功，才会开始下一步；失败会自动重试。",
+    wz2_name_label: "给工作流起个名字", wz2_name_hint: "用英文、数字或下划线，例如 daily_report",
+    wz2_adv: "进阶（可跳过）：命令里可以插入运行时变量，跑的时候自动替换成真实值。点一下试试——",
+    wz2_datevar: "＋ 今天的日期",
+    wz2_datevar_note: "会在第 1 步命令末尾加上",
+    wz2_inserted: (d) => `已插入 ✓ 运行时会替换成实际日期，例如 --date ${d}（可在上面的输入框里直接改）`,
+    wz2_next: "下一步：什么时候运行 →", wz_prev: "← 上一步",
+    wz3_title: "它应该什么时候运行？", wz3_sub: "现在选个大概就行，之后随时能改。",
+    wz3_daily: "每天固定时间", wz3_daily_d: "最常见：夜里跑数据、早上发报表",
+    wz3_interval: "每隔一段时间", wz3_interval_d: "适合轮询、同步类任务", wz3_every: "每", wz3_minutes: "分钟",
+    wz3_manual: "只在我手动点击时运行", wz3_manual_d: "先手动跑熟了，再设成自动也不迟",
+    wz3_note: "创建后会立刻带你手动试跑一次，确认一切正常。",
+    wz3_cron_hint: "专家模式里这里是 cron 表达式（如 0 2 * * *），支持更复杂的规则。",
+    wz3_create: "▶ 创建并试跑一次",
+    nv_sched_daily: (h) => `将于每天 ${h} 自动运行。`, nv_sched_interval: (n) => `将每隔 ${n} 分钟自动运行一次。`,
+    nv_sched_manual: "只在你手动点击「运行」时执行，不会自动触发。",
+    nv_gloss_daily: (h) => `每天 ${h} 自动运行`, nv_gloss_every: (n, u) => `每 ${n} ${u}自动运行`, nv_gloss_manual: "仅手动运行",
+    nvr_running_title: (d) => `正在运行 ${d} …`, nvr_sub: "每个步骤跑完会自动进入下一步，不用刷新。",
+    nvr_done_title: (d) => `运行成功，用时 ${d}`, nvr_done_sub: "失败时它会自动重试，并把日志留在这里。",
+    nvr_done_home: "完成，回到首页", nvr_detail: "查看详情",
+    nvr_failed_title: (n, id) => `第 ${n} 步 ${id} 失败了`,
+    nvr_failed_generic: "运行失败了",
+    nvr_failed_sub: "前面的步骤已成功，后面的没有执行。错误原因见日志最后几行。",
+    nvr_retried: (n) => `已自动重试 ${n} 次仍失败。`,
+    nvr_cancelled_title: "运行已取消", nvr_timeout_title: "运行超时，已强制停止",
+    nvr_rerun: "修复后重跑 ▶", nvr_rerun2: "再次运行 ▶", nvr_edit_steps: "编辑步骤", nvr_home: "回首页",
+    nvr_waiting: "等待中", nvr_notrun: "未执行", nvr_running_dur: "运行中…",
+    nvr_retry_n: (n) => `重试 ${n} 次`,
+    nv_health_ok: "一切正常",
+    nv_health_line: (n) => `${n} 个工作流 · 最近运行没有失败`,
+    nv_health_bad_title: (n) => `有 ${n} 个工作流需要处理`,
+    nv_health_bad_line: (id) => `${id} 的最近一次运行失败 · 修复后可一键重跑`,
+    nv_fix: "去处理 →", nv_metrics_link: "查看完整指标 →",
+    nv_run_btn: "▶ 运行", nv_view_btn: "查看 →",
+    nv_next_hints: "下一步可以：", nv_hint_another: "再建一个工作流", nv_hint_expert: "切到专家模式看全部功能",
+    nv_never_ran: "还没有运行过", nv_last_run: (s) => `上次运行${s}`,
+    nv_enabled: "已启用",
+    nv_run_now: "▶ 立即运行", nv_more: "更多 ⋯", nv_more_title: "暂停 / 复制 / 删除等更多操作",
+    nv_more_q: (id) => `对 ${id} 做什么？`, nv_more_expert: "切到专家模式编辑",
+    nv_steps_h: "步骤", nv_steps_hint: "（专家模式里叫「任务 / task」）",
+    nv_edit: "编辑", nv_add_step: "+ 添加步骤",
+    nv_edit_step_title: (id) => `编辑步骤 ${id}`, nv_del_step: "删除此步骤",
+    nv_recent_h: "最近运行", nv_view_log: "查看日志 →",
+    nv_adv_summary: "更多设置（并发、重试、超时、失败通知……）",
+    nv_adv_body: (r, m) => `这些默认值已经够用：${r > 0 ? `失败自动重试 ${r} 次、` : ""}同一时间只跑 ${m} 份。`,
+    nv_adv_body2: "需要精细控制时再展开，或", nv_adv_body3: "查看全部设置项。", nv_to_expert: "切到专家模式",
+    nv_fail_ribbon: (n, id) => `第 ${n} 步 ${id} 失败`, nv_fail_ribbon_generic: "最近一次运行失败",
+    nv_see_log: "看日志",
+    nv_step_extract: "抽取数据", nv_step_transform: "加工处理", nv_step_load: "写入结果",
+    nv_step_fetch: "取数", nv_step_render: "生成并发送报表", nv_step_1: "第一步",
   },
   en: {
     workspace: "Workspace", newdag: "+ New DAG", search_ph: "Filter DAGs…",
@@ -292,6 +368,75 @@ const DICT = {
     gs_title: "Getting started", gs_create: "Create your first DAG", gs_trigger: "Trigger a run", gs_green: "Get a green run",
     adv_options: "Advanced options", log_find_ph: "Find in log…", log_download: "Download full log", log_matches: (n) => `${n} matching lines`, log_capped: (n) => `showing last ${n} lines`,
     back_dag: (d) => `← Back to ${d}`, confirm_del_task_title: (id) => `Delete task “${id}”?`,
+    // ---- novice mode ----
+    mode_novice: "Simple", mode_expert: "Expert",
+    mode_toggle_title: "Interface mode: Simple keeps only the essentials; Expert shows every metric and action",
+    nv_workbench: "Workbench", nv_myflows: "My workflows", nv_shared: "Shared config", nv_help: "Help center",
+    nv_sys_ok: "System healthy", nv_newflow: "+ New workflow",
+    s0_title: "Hand your repetitive scripts to cronova",
+    s0_sub: "Runs on schedule, retries on failure, logs always at hand.",
+    s0_sub2: "Three steps to your first workflow — about a minute.",
+    s0_step1: "Pick a starting point", s0_step2: "Confirm the commands", s0_step3: "Run once, watch it go green",
+    s0_cta: "Create my first workflow →",
+    s0_expert_link: "I've used Airflow / Azkaban — take me to expert mode →",
+    s0_term_hint: "A “workflow” is a set of commands run in order — the technical term is DAG. Expert mode uses the full terminology.",
+    wz_crumb: "New workflow", wz_back: "← Back", wz_stepof: (n) => `Step ${n} of 3`,
+    wz1_title: "Pick the scenario closest to yours", wz1_sub: "Everything can be changed later — this is just a starting point.",
+    wz_tpl_etl: "Daily data pipeline", wz_tpl_etl_d: "Fetch, transform, then load — three steps in order", wz_tpl_etl_m: "3 steps · each waits for the previous to succeed",
+    wz_tpl_report: "Scheduled report", wz_tpl_report_d: "Fetch data and send a report — great for a daily 8am digest", wz_tpl_report_m: "2 steps · preset daily 08:00",
+    wz_tpl_blank: "From scratch", wz_tpl_blank_d: "A single step running any command or script of yours", wz_tpl_blank_m: "1 step · simplest", wz_tpl_blank_chip: "your command",
+    wz1_next: "Next: confirm commands →",
+    wz2_title: "These steps run one after another",
+    wz2_sub: "A command is the line you'd type in a terminal. Each step starts only after the previous succeeds; failures retry automatically.",
+    wz2_name_label: "Name your workflow", wz2_name_hint: "Letters, digits or underscores — e.g. daily_report",
+    wz2_adv: "Optional: commands can embed runtime variables, replaced with real values at run time. Try it —",
+    wz2_datevar: "+ Today's date",
+    wz2_datevar_note: "appends to the end of step 1's command:",
+    wz2_inserted: (d) => `Inserted ✓ replaced with the actual date at run time, e.g. --date ${d} (editable in the input above)`,
+    wz2_next: "Next: when should it run →", wz_prev: "← Previous",
+    wz3_title: "When should it run?", wz3_sub: "A rough choice is fine — change it any time later.",
+    wz3_daily: "Every day at a fixed time", wz3_daily_d: "Most common: crunch data at night, send reports in the morning",
+    wz3_interval: "At a regular interval", wz3_interval_d: "Good for polling and sync jobs", wz3_every: "every", wz3_minutes: "minutes",
+    wz3_manual: "Only when I trigger it", wz3_manual_d: "Run it by hand first — automate once you trust it",
+    wz3_note: "After creating, we'll take you straight to a trial run to confirm everything works.",
+    wz3_cron_hint: "In expert mode this is a cron expression (e.g. 0 2 * * *) with more powerful rules.",
+    wz3_create: "▶ Create & run once",
+    nv_sched_daily: (h) => `It will run automatically every day at ${h}.`, nv_sched_interval: (n) => `It will run automatically every ${n} minutes.`,
+    nv_sched_manual: "It only runs when you click “Run” — never automatically.",
+    nv_gloss_daily: (h) => `daily at ${h}`, nv_gloss_every: (n, u) => `every ${n} ${u}`, nv_gloss_manual: "manual only",
+    nvr_running_title: (d) => `Running ${d} …`, nvr_sub: "Steps advance automatically — no need to refresh.",
+    nvr_done_title: (d) => `Run succeeded in ${d}`, nvr_done_sub: "On failure it retries automatically and keeps the logs here.",
+    nvr_done_home: "Done — back home", nvr_detail: "View details",
+    nvr_failed_title: (n, id) => `Step ${n} ${id} failed`,
+    nvr_failed_generic: "The run failed",
+    nvr_failed_sub: "Earlier steps succeeded; later ones didn't run. See the last lines of the log for the cause.",
+    nvr_retried: (n) => `Retried ${n} time(s) automatically, still failing.`,
+    nvr_cancelled_title: "Run cancelled", nvr_timeout_title: "Run timed out and was stopped",
+    nvr_rerun: "Fixed — run again ▶", nvr_rerun2: "Run again ▶", nvr_edit_steps: "Edit steps", nvr_home: "Home",
+    nvr_waiting: "waiting", nvr_notrun: "did not run", nvr_running_dur: "running…",
+    nvr_retry_n: (n) => `${n} retr${n > 1 ? "ies" : "y"}`,
+    nv_health_ok: "All good",
+    nv_health_line: (n) => `${n} workflow${n > 1 ? "s" : ""} · no recent failures`,
+    nv_health_bad_title: (n) => `${n} workflow${n > 1 ? "s" : ""} need${n > 1 ? "" : "s"} attention`,
+    nv_health_bad_line: (id) => `${id}'s latest run failed · rerun with one click once fixed`,
+    nv_fix: "Fix it →", nv_metrics_link: "Full metrics →",
+    nv_run_btn: "▶ Run", nv_view_btn: "View →",
+    nv_next_hints: "Next you could:", nv_hint_another: "create another workflow", nv_hint_expert: "switch to expert mode for everything else",
+    nv_never_ran: "hasn't run yet", nv_last_run: (s) => `last run ${s}`,
+    nv_enabled: "enabled",
+    nv_run_now: "▶ Run now", nv_more: "More ⋯", nv_more_title: "Pause / duplicate / delete and more",
+    nv_more_q: (id) => `What to do with ${id}?`, nv_more_expert: "Edit in expert mode",
+    nv_steps_h: "Steps", nv_steps_hint: "(called “tasks” in expert mode)",
+    nv_edit: "Edit", nv_add_step: "+ Add step",
+    nv_edit_step_title: (id) => `Edit step ${id}`, nv_del_step: "Delete this step",
+    nv_recent_h: "Recent runs", nv_view_log: "View log →",
+    nv_adv_summary: "More settings (concurrency, retries, timeouts, notifications…)",
+    nv_adv_body: (r, m) => `The defaults are enough to start: ${r > 0 ? `${r} automatic retr${r > 1 ? "ies" : "y"} on failure, ` : ""}at most ${m} run${m > 1 ? "s" : ""} at a time.`,
+    nv_adv_body2: "Expand when you need fine control, or", nv_adv_body3: "for every setting.", nv_to_expert: "switch to expert mode",
+    nv_fail_ribbon: (n, id) => `Step ${n} ${id} failed`, nv_fail_ribbon_generic: "The latest run failed",
+    nv_see_log: "view log",
+    nv_step_extract: "Extract data", nv_step_transform: "Transform", nv_step_load: "Load results",
+    nv_step_fetch: "Fetch data", nv_step_render: "Render & send report", nv_step_1: "First step",
   },
 };
 const STATE = {
@@ -612,6 +757,7 @@ function applyRoute() {
   if (typeof closeConnMenu === "function") closeConnMenu(); // dismiss any open popover on navigation
   const seg = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent).filter(Boolean);
   if (!seg.length || seg[0] === "dags") return loadDags();
+  if (seg[0] === "new") return showWizard();
   if (seg[0] === "pools") return showPools();
   if (seg[0] === "resources") return showResources();
   if (seg[0] === "graph") return showGraph();
@@ -735,14 +881,82 @@ function showLogin(expired) {
   $("login-user").focus();
 }
 // startApp runs the normal boot once we know the user is authorized.
-function startApp() {
+async function startApp() {
+  await resolveMode();
   loadInfo();
   Promise.resolve(applyRoute()).catch((e) => { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; });
+}
+
+// ---- novice/expert mode ----
+// Effective mode: saved preference, else inferred once per boot from the store
+// (empty instance => novice onboarding; existing DAGs => expert, so upgrading
+// never flips a working console). Inference isn't persisted — only a toggle click is.
+async function resolveMode() {
+  const saved = localStorage.getItem("cnv_mode");
+  if (saved === "novice" || saved === "expert") uiMode = saved;
+  else {
+    try { overviewCache = await api("/api/overview"); uiMode = overviewCache.stats.total_dags > 0 ? "expert" : "novice"; }
+    catch (_) { uiMode = "expert"; }
+  }
+  document.documentElement.dataset.mode = uiMode;
+  syncModeChrome();
+}
+function setMode(m) {
+  if (uiMode === m) return;
+  uiMode = m; localStorage.setItem("cnv_mode", m);
+  document.documentElement.dataset.mode = m;
+  syncModeChrome();
+  Promise.resolve(applyRoute()).then(finishRouteRender).catch(() => {});
+}
+// sync the topbar chrome that depends on mode: segmented toggle + primary CTA label
+function syncModeChrome() {
+  if (!uiMode) return;
+  const tg = $("mode-toggle");
+  if (tg) {
+    tg.hidden = false;
+    tg.title = t("mode_toggle_title");
+    const nv = $("mode-nov"), ex = $("mode-exp");
+    if (nv) { nv.classList.toggle("on", nvMode()); nv.setAttribute("aria-pressed", nvMode()); }
+    if (ex) { ex.classList.toggle("on", !nvMode()); ex.setAttribute("aria-pressed", !nvMode()); }
+  }
+  const nd = $("newdag"); if (nd) nd.textContent = t(nvMode() ? "nv_newflow" : "newdag");
+}
+// display label for a step/task id — glosses the ids our own templates create,
+// falls back to the raw id for anything user-authored (honest, no guessing)
+const TASK_LABELS = { extract: "nv_step_extract", transform: "nv_step_transform", load: "nv_step_load", fetch: "nv_step_fetch", render: "nv_step_render", step_1: "nv_step_1" };
+function nvTaskLabel(id) { return TASK_LABELS[id] ? t(TASK_LABELS[id]) : id; }
+// stable topological order (Kahn) so novice screens can number steps 1..N;
+// cycles can't occur in saved DAGs (validated), but tolerate them anyway.
+function topoOrder(tasks) {
+  const byId = {}; (tasks || []).forEach((tk) => byId[tk.id] = tk);
+  const out = [], done = new Set();
+  let progress = true;
+  while (out.length < (tasks || []).length && progress) {
+    progress = false;
+    for (const tk of tasks) {
+      if (done.has(tk.id)) continue;
+      if ((tk.deps || []).every((d) => done.has(d) || !byId[d])) { out.push(tk); done.add(tk.id); progress = true; }
+    }
+  }
+  for (const tk of tasks || []) if (!done.has(tk.id)) out.push(tk); // cycle fallback
+  return out;
+}
+// plain-language schedule gloss for novice screens. Only shapes we're sure of
+// ("M H * * *" daily cron, @every, empty); anything else shows the raw expression.
+function nvSchedGloss(schedule) {
+  const s = (schedule || "").trim();
+  if (!s) return t("nv_gloss_manual");
+  let m = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/.exec(s);
+  if (m) return t("nv_gloss_daily", `${String(m[2]).padStart(2, "0")}:${String(m[1]).padStart(2, "0")}`);
+  m = /^@every\s+(\d+)(s|m|h)$/.exec(s);
+  if (m) return t("nv_gloss_every", m[1], t("unit_" + m[2]));
+  return s;
 }
 
 // navKey highlights a sidebar item; crumb (optional) overrides the topbar breadcrumb text.
 let lastNavLabel = null;
 function setNav(navKey, crumb) {
+  document.body.dataset.screen = view; // lets CSS hide chrome per screen (e.g. mode toggle on the wizard)
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
   const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "api" ? t("nav_api") : "DAGs");
   $("crumb").textContent = label;
@@ -763,6 +977,7 @@ function applyStaticI18n() {
   $("lang").textContent = lang === "zh" ? "EN" : "中";
   $("lang").setAttribute("aria-label", t("aria_lang"));
   $("theme").setAttribute("aria-label", t("aria_theme"));
+  syncModeChrome(); // mode-dependent labels (CTA text, toggle title) re-localize too
 }
 function setLang(l) {
   lang = l; localStorage.setItem("cnv_lang", l); applyStaticI18n();
@@ -771,6 +986,7 @@ function setLang(l) {
   else if (view === "dag") renderDagPage();
   else if (view === "task") renderTaskPage();
   else if (view === "run") showRun(currentRun);
+  else if (view === "wizard") renderWizard();
   else if (view === "pools") showPools();
   else if (view === "resources") renderResources(); // from in-memory RES, no refetch
   else if (view === "graph") showGraph();

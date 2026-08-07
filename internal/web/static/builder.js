@@ -293,3 +293,216 @@ async function submitNewDag() {
   try { await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }); if (tasks.length) coachDag = ND.dag.dag_id; $("modal-root").innerHTML = ""; showDag(ND.dag.dag_id); }
   catch (e) { $("nd-srv").textContent = e.message; btn.disabled = false; }
 }
+// ============================================================================
+// Novice wizard (#/new): 3 steps — pick a scenario, confirm commands, schedule —
+// then create via /api/dags/build and jump straight into a trial run.
+// Templates deliberately use commands that SUCCEED out of the box (echo/sleep),
+// so the promised "run once, watch it go green" actually happens; users swap in
+// their real scripts in step 2 or later from the detail page.
+// ============================================================================
+let W = null; // wizard state; survives navigating away mid-flow, cleared on create
+const NV_TEMPLATES = {
+  etl: { defName: "my_daily_etl", steps: [
+    { id: "extract", cmd: "sleep 1 && echo extract" },
+    { id: "transform", cmd: "sleep 1 && echo transform", deps: ["extract"] },
+    { id: "load", cmd: "sleep 1 && echo load run={{ run_id }}", deps: ["transform"] },
+  ] },
+  report: { defName: "daily_report", daily: "08:00", steps: [
+    { id: "fetch", cmd: "sleep 1 && echo fetch data" },
+    { id: "render", cmd: "sleep 1 && echo render report", deps: ["fetch"] },
+  ] },
+  blank: { defName: "my_first_flow", steps: [
+    { id: "step_1", cmd: "echo hello cronova" },
+  ] },
+};
+function wzSteps() {
+  return NV_TEMPLATES[W.tpl].steps.map((s, i) => ({ ...s, cmd: W.cmdEdits[s.id] ?? s.cmd, num: i + 1 }));
+}
+function showWizard() {
+  if (document.body.dataset.role === "viewer") { loadDags(); return; } // viewers can't create
+  view = "wizard"; activeDag = null; closeLog(); stopDagRunsPoll();
+  setNav("dags", t("wz_crumb"));
+  setHash("#/new");
+  if (!W) {
+    W = { step: 1, tpl: "etl", name: NV_TEMPLATES.etl.defName, nameTouched: false, cmdEdits: {},
+      schedMode: "daily", dailyTime: "02:00", intervalN: 30, existing: null, err: "" };
+    api("/api/dags").then((l) => { if (W) W.existing = new Set(l.map((d) => d.dag_id)); }).catch(() => { if (W) W.existing = new Set(); });
+  }
+  renderWizard();
+  finishRouteRender();
+}
+function wzValidate() {
+  const name = (W.name || "").trim();
+  if (!ID_RE.test(name)) return t("err_dagid");
+  if (W.existing && W.existing.has(name)) return t("nd_dagid_dup");
+  if (wzSteps().some((s) => !s.cmd.trim())) return t("err_emptycmd");
+  return "";
+}
+function wzFlowChips(key) {
+  const labels = key === "blank" ? [t("wz_tpl_blank_chip")] : NV_TEMPLATES[key].steps.map((s) => nvTaskLabel(s.id));
+  return `<div class="wz-flow">${labels.map((l) => `<span class="fchip">${esc(l)}</span>`).join(`<span class="farr">→</span>`)}</div>`;
+}
+function renderWizard() {
+  if (!W) return;
+  const dots = [1, 2, 3].map((n) => `<span class="wz-dot ${W.step >= n ? "on" : ""}"></span>`).join("");
+  const head = `<div class="wz-head">
+      <a id="wz-back" role="button" tabindex="0">${esc(t("wz_back"))}</a>
+      <div class="grow" style="flex:1"></div>
+      <div class="wz-dots">${dots}<span class="wz-stepn">${esc(t("wz_stepof", W.step))}</span></div>
+    </div>`;
+  let body = "";
+  if (W.step === 1) {
+    const card = (key) => `<div class="tpl-card ${W.tpl === key ? "on" : ""}" role="button" tabindex="0" data-wztpl="${key}" aria-pressed="${W.tpl === key}" aria-label="${esc(t("wz_tpl_" + key))} — ${esc(t("wz_tpl_" + key + "_d"))}">
+        <div class="tpl-name">${esc(t("wz_tpl_" + key))}</div>
+        <div class="tpl-desc">${esc(t("wz_tpl_" + key + "_d"))}</div>
+        ${wzFlowChips(key)}
+        <div class="tpl-meta">${esc(t("wz_tpl_" + key + "_m"))}</div>
+      </div>`;
+    body = `
+      <h1>${esc(t("wz1_title"))}</h1>
+      <div class="page-sub" style="margin-bottom:18px">${esc(t("wz1_sub"))}</div>
+      <div class="tpl-grid">${card("etl")}${card("report")}${card("blank")}</div>
+      <div class="wz-foot end"><button class="primary" style="padding:9px 22px" id="wz-next">${esc(t("wz1_next"))}</button></div>`;
+  } else if (W.step === 2) {
+    const steps = wzSteps();
+    const inserted = steps[0].cmd.includes("logical_date");
+    body = `
+      <h1>${esc(t("wz2_title"))}</h1>
+      <div class="page-sub" style="margin-bottom:18px">${esc(t("wz2_sub"))}</div>
+      <div class="b-field" style="max-width:340px;margin-bottom:16px">
+        <label>${esc(t("wz2_name_label"))}</label>
+        <input class="mono" id="wz-name" value="${esc(W.name)}" spellcheck="false">
+        <div class="field-hint">${esc(t("wz2_name_hint"))}</div>
+      </div>
+      ${steps.map((s) => `<div class="wz-step-row">
+        <span class="nv-num">${s.num}</span>
+        <div class="wz-step-main">
+          <div class="wz-step-label">${esc(nvTaskLabel(s.id))}</div>
+          <input class="mono" data-wzcmd="${esc(s.id)}" value="${esc(s.cmd)}" spellcheck="false">
+        </div>
+      </div>`).join("")}
+      <div class="nv-dashed" style="margin-top:6px">
+        <div style="font-size:12.5px;color:var(--muted);margin-bottom:9px">${esc(t("wz2_adv"))}</div>
+        <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+          <span class="chip varchip" role="button" tabindex="0" id="wz-datevar">${esc(t("wz2_datevar"))}</span>
+          <span class="nv-hint">${esc(t("wz2_datevar_note"))} <code class="mono" style="color:var(--accent)">--date {{ logical_date }}</code></span>
+        </div>
+        ${inserted ? `<div class="sched-preview" style="margin-top:9px">${esc(t("wz2_inserted", new Date().toISOString().slice(0, 10)))}</div>` : ""}
+      </div>
+      <div class="wz-err" id="wz-err">${esc(W.err || "")}</div>
+      <div class="wz-foot">
+        <button id="wz-prev">${esc(t("wz_prev"))}</button>
+        <button class="primary" style="padding:9px 22px" id="wz-next">${esc(t("wz2_next"))}</button>
+      </div>`;
+  } else {
+    const on = (m) => W.schedMode === m ? "on" : "";
+    body = `
+      <h1>${esc(t("wz3_title"))}</h1>
+      <div class="page-sub" style="margin-bottom:18px">${esc(t("wz3_sub"))}</div>
+      <div class="sched-grid">
+        <div class="tpl-card sched-card ${on("daily")}" role="button" tabindex="0" data-wzsched="daily" aria-pressed="${W.schedMode === "daily"}" aria-label="${esc(t("wz3_daily"))}">
+          <div><div class="tpl-name">${esc(t("wz3_daily"))}</div><div class="tpl-desc">${esc(t("wz3_daily_d"))}</div></div>
+          <input type="time" id="wz-time" value="${esc(W.dailyTime)}" style="width:110px">
+        </div>
+        <div class="tpl-card sched-card ${on("interval")}" role="button" tabindex="0" data-wzsched="interval" aria-pressed="${W.schedMode === "interval"}" aria-label="${esc(t("wz3_interval"))}">
+          <div><div class="tpl-name">${esc(t("wz3_interval"))}</div><div class="tpl-desc">${esc(t("wz3_interval_d"))}</div></div>
+          <div style="display:flex;align-items:center;gap:8px" id="wz-int-wrap">
+            <span class="muted" style="font-size:12.5px">${esc(t("wz3_every"))}</span>
+            <input type="number" min="1" id="wz-int" value="${W.intervalN}" style="width:76px">
+            <span class="muted" style="font-size:12.5px">${esc(t("wz3_minutes"))}</span>
+          </div>
+        </div>
+        <div class="tpl-card sched-card ${on("manual")}" role="button" tabindex="0" data-wzsched="manual" aria-pressed="${W.schedMode === "manual"}" aria-label="${esc(t("wz3_manual"))}">
+          <div><div class="tpl-name">${esc(t("wz3_manual"))}</div><div class="tpl-desc">${esc(t("wz3_manual_d"))}</div></div>
+        </div>
+      </div>
+      <div class="nv-note" style="max-width:560px;margin-top:16px">
+        <b id="wz-sent">${esc(wzSchedSentence())}</b><br>
+        <span class="muted">${esc(t("wz3_note"))}</span>
+      </div>
+      <div class="nv-hint" style="margin-top:10px">${esc(t("wz3_cron_hint"))}</div>
+      <div class="wz-err" id="wz-err">${esc(W.err || "")}</div>
+      <div class="wz-foot" style="max-width:560px">
+        <button id="wz-prev">${esc(t("wz_prev"))}</button>
+        <button class="primary" style="padding:9px 22px" id="wz-create">${esc(t("wz3_create"))}</button>
+      </div>`;
+  }
+  main.innerHTML = `<div class="wz" data-screen-label="wizard">${head}${body}</div>`;
+  wireWizard();
+}
+function wzSchedSentence() {
+  if (W.schedMode === "daily") return t("nv_sched_daily", W.dailyTime);
+  if (W.schedMode === "interval") return t("nv_sched_interval", Math.max(1, W.intervalN));
+  return t("nv_sched_manual");
+}
+function wireWizard() {
+  $("wz-back").onclick = () => { W.err = ""; if (W.step === 1) loadDags(); else { W.step--; renderWizard(); } };
+  const prev = $("wz-prev"); if (prev) prev.onclick = () => { W.err = ""; W.step--; renderWizard(); };
+  const next = $("wz-next"); if (next) next.onclick = () => {
+    if (W.step === 2) { const err = wzValidate(); if (err) { W.err = err; $("wz-err").textContent = err; return; } }
+    W.err = ""; W.step++; renderWizard();
+  };
+  main.querySelectorAll("[data-wztpl]").forEach((c) => c.onclick = () => {
+    const key = c.dataset.wztpl;
+    if (W.tpl !== key) {
+      W.tpl = key; W.cmdEdits = {};
+      if (!W.nameTouched) W.name = NV_TEMPLATES[key].defName;
+      // a template with a preset time seeds the schedule (report → daily 08:00)
+      if (NV_TEMPLATES[key].daily) { W.schedMode = "daily"; W.dailyTime = NV_TEMPLATES[key].daily; }
+    }
+    renderWizard();
+  });
+  const nameEl = $("wz-name");
+  if (nameEl) nameEl.oninput = () => {
+    W.name = nameEl.value.trim(); W.nameTouched = true;
+    const name = W.name; let err = "";
+    if (name && !ID_RE.test(name)) err = t("err_dagid");
+    else if (name && W.existing && W.existing.has(name)) err = t("nd_dagid_dup");
+    W.err = err; $("wz-err").textContent = err;
+  };
+  main.querySelectorAll("[data-wzcmd]").forEach((inp) => inp.oninput = () => { W.cmdEdits[inp.dataset.wzcmd] = inp.value; });
+  const dv = $("wz-datevar");
+  if (dv) dv.onclick = () => {
+    const first = wzSteps()[0];
+    if (first.cmd.includes("logical_date")) return;
+    W.cmdEdits[first.id] = first.cmd + " --date {{ logical_date }}";
+    renderWizard();
+  };
+  main.querySelectorAll("[data-wzsched]").forEach((c) => c.onclick = (e) => {
+    if (e.target.closest("#wz-time, #wz-int-wrap")) return; // typing in the inputs isn't a card pick
+    W.schedMode = c.dataset.wzsched; renderWizard();
+  });
+  const tm = $("wz-time"); if (tm) {
+    tm.onclick = (e) => e.stopPropagation();
+    tm.onchange = () => { if (tm.value) W.dailyTime = tm.value; W.schedMode = "daily"; renderWizard(); };
+  }
+  const iv = $("wz-int"); if (iv) {
+    iv.onclick = (e) => e.stopPropagation();
+    iv.oninput = () => { W.intervalN = Math.max(1, +iv.value || 1); W.schedMode = "interval"; const s = $("wz-sent"); if (s) s.textContent = wzSchedSentence(); };
+  }
+  const create = $("wz-create"); if (create) create.onclick = createAndRunWizard;
+}
+async function createAndRunWizard() {
+  const btn = $("wz-create"); if (btn) btn.disabled = true;
+  const err = wzValidate();
+  if (err) { W.err = err; renderWizard(); return; }
+  const name = W.name.trim(), steps = wzSteps();
+  const schedule = W.schedMode === "daily" ? wzDailyCron(W.dailyTime)
+    : W.schedMode === "interval" ? `@every ${Math.max(1, W.intervalN)}m` : "";
+  const tasks = steps.map((s) => ({ id: s.id, type: "shell", command: s.cmd, deps: s.deps || [], pool: "default", priority: 0, timeout: 0, trigger_rule: "all_success", retries: null, retry_delay: null }));
+  // default_retries: 2 — the novice copy promises automatic retries; expert
+  // settings can dial it back any time.
+  const spec = { dag_id: name, schedule, start_date: "", catchup: false, max_active_runs: 1, default_retries: 2, trigger_after: [], tasks };
+  try { await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }); }
+  catch (e) { W.err = e.message; renderWizard(); return; }
+  let runID = null;
+  try { runID = (await api(`/api/dags/${encodeURIComponent(name)}/trigger`, { method: "POST" })).run_id; }
+  catch (e) { toast(t("trig_fail") + ": " + e.message, "fail"); } // DAG exists — land on its page instead
+  W = null;
+  runID ? showRun(runID) : showDag(name);
+}
+// "HH:MM" -> five-field cron at that time every day
+function wzDailyCron(hm) {
+  const m = /^(\d{1,2}):(\d{1,2})$/.exec(hm || "") || [null, "2", "0"];
+  return `${+m[2]} ${+m[1]} * * *`;
+}

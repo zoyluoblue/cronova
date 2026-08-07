@@ -16,11 +16,13 @@ $("search").onkeydown = (e) => {
   else if (e.key === "Enter") { if (jumpEnter()) e.preventDefault(); }
   else if (e.key === "Escape") { closeJump(); }
 };
-$("newdag").onclick = () => newDagModal();
+$("newdag").onclick = () => { nvMode() ? showWizard() : newDagModal(); };
 $("lang").onclick = () => setLang(lang === "zh" ? "en" : "zh");
 $("theme").onclick = () => { theme = theme === "dark" ? "light" : "dark"; localStorage.setItem("cnv_theme", theme); applyTheme(); };
+$("mode-nov").onclick = () => setMode("novice");
+$("mode-exp").onclick = () => setMode("expert");
 applyTheme();
-document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.onclick = () => { const v = n.dataset.nav; v === "pools" ? showPools() : v === "graph" ? showGraph() : v === "resources" ? showResources() : v === "audit" ? showAudit() : v === "api" ? showApi() : loadDags(); });
+document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.onclick = () => { const v = n.dataset.nav; v === "pools" ? showPools() : v === "graph" ? showGraph() : v === "resources" ? showResources() : v === "audit" ? showAudit() : v === "api" ? showApi() : v === "help" ? window.open(DOCS_URL, "_blank", "noopener") : loadDags(); });
 // One delegated keydown (on the stable document, survives every innerHTML swap):
 // Enter/Space activates any focusable widget we expose with a role (rows, toggles,
 // chips, nav items) — so the focus ring lands on something operable. (#5)
@@ -52,7 +54,7 @@ setInterval(async () => {
   try {
     const fresh = await api("/api/overview");
     if (JSON.stringify(fresh) !== JSON.stringify(overviewCache)) {
-      overviewCache = fresh; $("nav-dags").textContent = fresh.stats.total_dags; renderDags();
+      overviewCache = fresh; setDagCounts(fresh.stats.total_dags); renderDags();
     }
   } catch (_) {}
 }, 6000);

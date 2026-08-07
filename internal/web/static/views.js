@@ -1,14 +1,18 @@
 "use strict";
 // ---- DAGs dashboard ----
 async function loadDags() {
-  view = "dags"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("dags"); setHash("#/dags");
+  view = "dags"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("dags", nvMode() ? t("nv_myflows") : undefined); setHash("#/dags");
   overviewCache = await api("/api/overview");
-  $("nav-dags").textContent = overviewCache.stats.total_dags;
+  setDagCounts(overviewCache.stats.total_dags);
+  if (nvMode()) await ensureNvScheds(); // schedule strings for the plain-language row subtitles
   renderDags();
   finishRouteRender();
 }
+// both sidebars carry a DAG count (expert "DAGs", novice "我的工作流")
+function setDagCounts(n) { const a = $("nav-dags"); if (a) a.textContent = n; const b = $("nav-flows"); if (b) b.textContent = n; }
 function renderDags() {
   if (view !== "dags" || !overviewCache) return;
+  if (nvMode()) return renderDagsNovice();
   const { stats, dags } = overviewCache;
   if (dags.length === 0) { // empty instance: a genuine first-run hero, not the "no matching" copy
     main.innerHTML = `
@@ -100,6 +104,108 @@ function rowHtml(d, scaleMs) {
 }
 
 // ============================================================================
+// Novice home (view='dags', mode=novice): S0 first-entry hero on an empty
+// instance, else a health banner + simple workflow list. Same route and data
+// as the expert dashboard — the mode only changes the presentation.
+// ============================================================================
+let nvScheds = null; // dag_id -> schedule string, for the plain-language subtitles
+let nvSchedsFetching = false; // guards the render-triggered refetch against spinning
+async function ensureNvScheds() {
+  try { nvScheds = Object.fromEntries((await api("/api/dags")).map((d) => [d.dag_id, d.schedule || ""])); }
+  catch (_) { nvScheds = nvScheds || {}; }
+}
+function renderDagsNovice() {
+  const { dags } = overviewCache;
+  const isViewer = document.body.dataset.role === "viewer";
+  if (dags.length === 0) { // S0: first entry on an empty instance
+    const chip = (n, k) => `<div class="s0-chip"><span class="nv-num">${n}</span><span>${esc(t(k))}</span></div>`;
+    main.innerHTML = `<div class="s0">
+      <div class="logo">✦</div>
+      <h1>${esc(t("s0_title"))}</h1>
+      <div class="s0-sub">${esc(t("s0_sub"))}<br>${esc(t("s0_sub2"))}</div>
+      <div class="s0-steps">${chip(1, "s0_step1")}<span class="s0-arrow">→</span>${chip(2, "s0_step2")}<span class="s0-arrow">→</span>${chip(3, "s0_step3")}</div>
+      ${isViewer ? "" : `<button class="primary s0-cta" id="s0-go">${esc(t("s0_cta"))}</button>`}
+      <div class="s0-expert"><a id="s0-expert" role="button" tabindex="0">${esc(t("s0_expert_link"))}</a></div>
+      <div class="s0-term nv-hint">${esc(t("s0_term_hint"))}</div>
+    </div>`;
+    const go = $("s0-go"); if (go) go.onclick = () => showWizard();
+    $("s0-expert").onclick = () => setMode("expert");
+    return;
+  }
+  // a dag the heartbeat surfaced that we have no schedule for yet (e.g. created
+  // from another session) — fetch once and re-render so the subtitle is honest.
+  // Re-render only when the fetch actually filled the gaps (a deleted-dag race
+  // leaves a hole forever — without this guard we'd re-render/fetch in a loop).
+  if (!nvSchedsFetching && dags.some((d) => (nvScheds || {})[d.dag_id] === undefined)) {
+    nvSchedsFetching = true;
+    ensureNvScheds().then(() => {
+      nvSchedsFetching = false;
+      const covered = overviewCache && (overviewCache.dags || []).every((d) => (nvScheds || {})[d.dag_id] !== undefined);
+      if (covered && view === "dags" && nvMode()) renderDags();
+    });
+  }
+  // latest run per dag from the shared activity feed (newest first) — honest
+  // best-effort: an old DAG outside the recent window just omits the time.
+  const lastByDag = {};
+  (overviewCache.activity || []).forEach((a) => { if (!lastByDag[a.dag_id]) lastByDag[a.dag_id] = a; });
+  const failing = dags.filter((d) => d.latest_state === "failed" || d.latest_state === "timed_out");
+  const health = failing.length
+    ? `<div class="nv-banner bad" style="margin-top:6px">
+        <span class="nv-big-ic bad" style="width:34px;height:34px;font-size:16px">!</span>
+        <div class="nv-bmain"><div class="nv-bt">${esc(t("nv_health_bad_title", failing.length))}</div>
+        <div class="nv-bs">${esc(t("nv_health_bad_line", failing[0].dag_id))}</div></div>
+        <button class="primary" id="nv-fix">${esc(t("nv_fix"))}</button>
+      </div>`
+    : `<div class="nv-banner" style="margin-top:6px">
+        <span class="nv-big-ic ok" style="width:34px;height:34px;font-size:17px">✓</span>
+        <div class="nv-bmain"><div class="nv-bt">${esc(t("nv_health_ok"))}</div>
+        <div class="nv-bs">${esc(t("nv_health_line", dags.length))}</div></div>
+        <a id="nv-metrics" role="button" tabindex="0" style="font-size:12.5px;cursor:pointer">${esc(t("nv_metrics_link"))}</a>
+      </div>`;
+  const rows = dags.map((d) => {
+    const last = lastByDag[d.dag_id];
+    const parts = [];
+    if (d.paused) parts.push(t("nx_paused"));
+    parts.push(nvSchedGloss((nvScheds || {})[d.dag_id] || ""));
+    if (last) parts.push(`${t("nv_last_run", stateLabel(last.state))}（${fmt(last.started || last.finished)}${last.ms ? ` · ${fmtMs(last.ms)}` : ""}）`);
+    else if (d.latest_state) parts.push(t("nv_last_run", stateLabel(d.latest_state)));
+    else parts.push(t("nv_never_ran"));
+    return `<div class="nv-item" style="padding:15px 18px;gap:14px">
+      <div class="toggle ${d.paused ? "" : "on"}" role="switch" tabindex="0" aria-checked="${!d.paused}" aria-label="${esc(d.dag_id)} — ${t(d.paused ? "btn_resume" : "btn_pause")}" data-id="${esc(d.dag_id)}" data-paused="${d.paused}"></div>
+      <div class="nv-main">
+        <div class="mono" style="font-size:14px;font-weight:600">${esc(d.dag_id)}</div>
+        <div style="font-size:12.5px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(parts.join(" · "))}</div>
+      </div>
+      ${d.latest_state ? badge(d.latest_state) : ""}
+      <button data-nvrun="${esc(d.dag_id)}">${esc(t("nv_run_btn"))}</button>
+      <button class="primary" data-nvview="${esc(d.dag_id)}">${esc(t("nv_view_btn"))}</button>
+    </div>`;
+  }).join("");
+  main.innerHTML = `<div class="nv-wrap">
+    ${health}
+    <div class="section-h" style="margin:0 0 10px">${esc(t("nv_myflows"))}</div>
+    <div class="nv-panel">${rows}</div>
+    <div class="nv-links">
+      <span>${esc(t("nv_next_hints"))}</span>
+      <a id="nv-another" role="button" tabindex="0">${esc(t("nv_hint_another"))}</a>
+      <span>·</span>
+      <a id="nv-expert" role="button" tabindex="0">${esc(t("nv_hint_expert"))}</a>
+    </div>
+  </div>`;
+  const fix = $("nv-fix"); if (fix) fix.onclick = () => showDag(failing[0].dag_id);
+  const met = $("nv-metrics"); if (met) met.onclick = () => setMode("expert");
+  $("nv-another").onclick = () => showWizard();
+  $("nv-expert").onclick = () => setMode("expert");
+  main.querySelectorAll(".toggle").forEach((tg) => tg.onclick = async () => { await api(`/api/dags/${tg.dataset.id}/pause?paused=${tg.dataset.paused !== "true"}`, { method: "POST" }); loadDags(); });
+  main.querySelectorAll("[data-nvrun]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await api(`/api/dags/${encodeURIComponent(b.dataset.nvrun)}/trigger`, { method: "POST" }); showRun(r.run_id); }
+    catch (e) { toast(t("trig_fail") + ": " + e.message, "fail"); b.disabled = false; }
+  });
+  main.querySelectorAll("[data-nvview]").forEach((b) => b.onclick = () => showDag(b.dataset.nvview));
+}
+
+// ============================================================================
 // DAG operation page (view='dag') — integrated: info + structure (editable
 // graph + task list) + schedule + run history. Edits persist immediately.
 // ============================================================================
@@ -182,6 +288,7 @@ function dagHeroStatsHtml() {
 function patchDagHero() { const el = $("dh-stats"); if (el) el.innerHTML = dagHeroStatsHtml(); }
 function renderDagPage() {
   if (!D) return;
+  if (nvMode()) return renderDagPageNovice();
   const d = D.dag;
   const typ = d.schedule ? "schedule" : (d.trigger_after.length ? "dependency" : "manual");
   const noTasks = D.tasks.length === 0;
@@ -230,6 +337,152 @@ function renderDagPage() {
   renderDagTab();
   reflectSaveState();
 }
+// ============================================================================
+// Novice DAG detail: hero + numbered step list + recent runs; everything else
+// folds behind “更多设置” / the expert mode toggle. Renders from the same D.
+// ============================================================================
+function renderDagPageNovice() {
+  const d = D.dag;
+  const noTasks = D.tasks.length === 0;
+  const ordered = topoOrder(D.tasks.filter((x) => x.id));
+  const last = D.runs[0];
+  const lastFailed = last && (last.state === "failed" || last.state === "timed_out");
+  main.innerHTML = `<div class="nv-wrap">
+    <div class="crumb-bar"><a id="back">← ${esc(t("nv_myflows"))}</a> / ${esc(d.dag_id)}</div>
+    <div class="dag-hero">
+      <div class="dh-top">
+        <h1 class="mono">${copySpan(d.dag_id)}</h1>
+        <span class="tag ${d.paused ? "warn" : "ok"}">${esc(d.paused ? t("f_paused") : t("nv_enabled"))}</span>
+        <span class="savestate ss-saved" id="d-save"></span>
+        <div class="dh-actions">
+          <button class="primary" id="nv-trig" ${noTasks ? "disabled" : ""}>${esc(t("nv_run_now"))}</button>
+          <button class="icon" id="nv-more" title="${esc(t("nv_more_title"))}" aria-label="${esc(t("nv_more_title"))}">${esc(t("nv_more"))}</button>
+        </div>
+      </div>
+      <div class="dh-stats">
+        <div class="dh-stat"><span class="k">${t("dh_last")}</span>
+          ${last ? `<span class="v">${badge(last.state)} <span class="muted">${fmt(last.started_at)} · ${dur(last.started_at, last.finished_at)}</span></span>` : `<span class="v muted">${t("dh_never")}</span>`}</div>
+        <div class="dh-stat"><span class="k">${t("set_sched")}</span><span class="v">${esc(nvSchedGloss(d.schedule))}</span></div>
+      </div>
+      ${noTasks ? `<div class="page-sub" style="margin:8px 0 0">${t("dag_disabled_hint")}</div>` : ""}
+    </div>
+    ${lastFailed ? `<div class="nv-ribbon">
+      <span class="nv-x">✕</span>
+      <span class="nv-rmain" id="nv-ribbon-text">${esc(t("nv_fail_ribbon_generic"))}</span>
+      <a style="font-size:12.5px" id="nv-see-log" role="button" tabindex="0">${esc(t("nv_see_log"))}</a>
+      <button class="primary" id="nv-rerun">${esc(t("nvr_rerun"))}</button>
+    </div>` : ""}
+    <div class="section-h">${esc(t("nv_steps_h"))} <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400">${esc(t("nv_steps_hint"))}</span></div>
+    <div class="nv-panel">
+      ${ordered.map((tk, i) => `<div class="nv-item">
+        <span class="nv-num sm">${i + 1}</span>
+        <div class="nv-main">
+          <div class="nv-label">${esc(nvTaskLabel(tk.id))}</div>
+          <div class="nv-cmd" title="${esc(tk.command || "")}">${esc(tk.command || "—")}</div>
+        </div>
+        <a style="font-size:12.5px" role="button" tabindex="0" data-nvedit="${esc(tk.id)}">${esc(t("nv_edit"))}</a>
+      </div>`).join("")}
+      <div class="nv-item last" style="padding:11px 17px"><a style="font-size:12.5px" role="button" tabindex="0" id="nv-addstep">${esc(t("nv_add_step"))}</a></div>
+    </div>
+    <div class="section-h">${esc(t("nv_recent_h"))}</div>
+    <div class="nv-panel">
+      ${D.runs.length ? D.runs.slice(0, 5).map((r) => `<div class="nv-item" style="padding:12px 17px;gap:14px">
+        ${badge(r.state)}
+        <span style="font-size:13px">${fmt(r.started_at)} · ${typeLabel(r.trigger_type)}</span>
+        <span class="mono muted" style="font-size:12px">${dur(r.started_at, r.finished_at)}</span>
+        <div style="flex:1"></div>
+        <a style="font-size:12.5px" role="button" tabindex="0" data-nvlog="${esc(r.run_id)}">${esc(t("nv_view_log"))}</a>
+      </div>`).join("") : `<div class="empty">${t("no_runs")}</div>`}
+    </div>
+    <details class="adv-box" style="margin-top:22px">
+      <summary>${esc(t("nv_adv_summary"))}</summary>
+      <div style="margin-top:12px;font-size:13px;color:var(--muted);line-height:1.7">
+        ${esc(t("nv_adv_body", d.default_retries, d.max_active_runs))}<br>
+        ${esc(t("nv_adv_body2"))} <a id="nv-adv-expert" role="button" tabindex="0" style="cursor:pointer">${esc(t("nv_to_expert"))}</a> ${esc(t("nv_adv_body3"))}
+      </div>
+    </details>
+  </div>`;
+  $("back").onclick = loadDags;
+  $("nv-trig").onclick = async () => {
+    const b = $("nv-trig"); b.disabled = true;
+    await flushPendingSaves(); // run the latest saved definition
+    try { const r = await api(`/api/dags/${encodeURIComponent(d.dag_id)}/trigger`, { method: "POST" }); showRun(r.run_id); }
+    catch (e) { toast(t("trig_fail") + ": " + e.message, "fail"); if ($("nv-trig")) $("nv-trig").disabled = D.tasks.length === 0; }
+  };
+  $("nv-more").onclick = async () => {
+    const v = await pickDialog(t("nv_more_q", d.dag_id), "", [
+      { value: "pause", label: d.paused ? t("btn_resume") : t("btn_pause") },
+      { value: "dup", label: t("btn_duplicate") },
+      { value: "yaml", label: "YAML" },
+      { value: "expert", label: t("nv_more_expert") },
+      { value: "del", label: t("btn_delete"), danger: true },
+    ]);
+    if (!v) return;
+    if (v === "pause") { await api(`/api/dags/${d.dag_id}/pause?paused=${!d.paused}`, { method: "POST" }); d.paused = !d.paused; renderDagPage(); }
+    else if (v === "dup") duplicateActiveDag();
+    else if (v === "yaml") openYamlDrawer();
+    else if (v === "expert") setMode("expert");
+    else if (v === "del") deleteActiveDag();
+  };
+  if (lastFailed) {
+    $("nv-see-log").onclick = () => showRun(last.run_id);
+    $("nv-rerun").onclick = async () => {
+      const b = $("nv-rerun"); b.disabled = true;
+      await flushPendingSaves();
+      try { await api(`/api/runs/${encodeURIComponent(last.run_id)}/retry`, { method: "POST" }); showRun(last.run_id); }
+      catch (e) { toast(e.message, "fail"); b.disabled = false; }
+    };
+    // name the failing step once the run detail arrives (the runs list alone can't)
+    api(`/api/runs/${encodeURIComponent(last.run_id)}`).then((data) => {
+      const el = $("nv-ribbon-text"); if (!el || !D || D.dag.dag_id !== d.dag_id) return;
+      const tis = data.tasks || [];
+      const idx = ordered.findIndex((tk) => { const ti = tis.find((x) => x.task_id === tk.id); return ti && (ti.state === "failed" || ti.state === "timed_out"); });
+      if (idx >= 0) {
+        const ti = tis.find((x) => x.task_id === ordered[idx].id);
+        el.textContent = t("nv_fail_ribbon", idx + 1, ordered[idx].id) + (ti.try_number > 1 ? " · " + t("nvr_retried", ti.try_number - 1) : "");
+      }
+    }).catch(() => {});
+  }
+  main.querySelectorAll("[data-nvedit]").forEach((a) => a.onclick = () => nvEditStepModal(a.dataset.nvedit));
+  $("nv-addstep").onclick = nvAddStep;
+  main.querySelectorAll("[data-nvlog]").forEach((a) => a.onclick = () => showRun(a.dataset.nvlog));
+  $("nv-adv-expert").onclick = () => setMode("expert");
+  reflectSaveState();
+}
+// minimal per-step editor: the command is the one thing a novice needs to change.
+// Renames, deps, pools etc. live in expert mode.
+function nvEditStepModal(taskId) {
+  const tk = D.tasks.find((x) => x.id === taskId); if (!tk) return;
+  const root = $("modal-root");
+  const canDel = D.tasks.length > 1;
+  root.innerHTML = `<div class="overlay" id="nv-eovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${esc(t("nv_edit_step_title", tk.id))}">
+    <h2>${esc(t("nv_edit_step_title", tk.id))}</h2>
+    <div class="body"><div class="b-field"><label>${esc(t("t_command"))}</label><input class="mono" id="nv-ecmd" value="${esc(tk.command)}" spellcheck="false"></div></div>
+    <div class="foot">${canDel ? `<button class="danger" id="nv-edel" style="margin-right:auto">${esc(t("nv_del_step"))}</button>` : ""}<button id="nv-ecancel">${t("cancel_word")}</button><button class="primary" id="nv-eok">${t("v_save")}</button></div>
+  </div></div>`;
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const save = () => { tk.command = $("nv-ecmd").value; close(); saveDag(); renderDagPage(); };
+  const onKey = (e) => { if (e.key === "Escape") close(); else if (e.key === "Enter") save(); };
+  document.addEventListener("keydown", onKey);
+  $("nv-ecancel").onclick = close;
+  $("nv-eok").onclick = save;
+  const del = $("nv-edel"); if (del) del.onclick = () => { close(); deleteTask(tk.id); };
+  $("nv-eovl").onclick = (e) => { if (e.target.id === "nv-eovl") close(); };
+  const inp = $("nv-ecmd"); inp.focus(); inp.select();
+}
+// append a step chained after the current last one, then open its editor
+function nvAddStep() {
+  let n = D.tasks.length + 1, id;
+  do { id = "step_" + n; n++; } while (D.tasks.some((x) => x.id === id));
+  const ordered = topoOrder(D.tasks.filter((x) => x.id));
+  const tk = blankTask(); tk.id = id; tk.command = "echo hello cronova";
+  if (ordered.length) tk.deps = [ordered[ordered.length - 1].id];
+  D.tasks.push(tk);
+  saveDag();
+  renderDagPage();
+  nvEditStepModal(id);
+}
+
 // renders the active tab's body only (hero + tabs stay put)
 function renderDagTab() {
   const el = $("dag-tab-body"); if (!el) return;
@@ -1465,7 +1718,174 @@ const TASK_TERMINAL = { success: 1, failed: 1, upstream_failed: 1, skipped: 1, c
 const TASK_RETRYABLE = { failed: 1, upstream_failed: 1, cancelled: 1, timed_out: 1 }; // states a per-task retry clears
 const runLive = (s) => s === "queued" || s === "running";
 
+// ============================================================================
+// Novice run screen: a numbered step checklist that lights up as the run
+// progresses, one live log box, and a banner with the obvious next action.
+// Same #/run/<id> route as the expert page — the mode picks the rendering.
+// ============================================================================
+let NVR = null; // { runID, dagID, sched, defs, pin, curTi }
+async function showRunNovice(runID) {
+  view = "run"; currentRun = runID; closeLog(); stopDagRunsPoll(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
+  let data;
+  try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
+  const r = data.run;
+  let dag = null;
+  try { dag = await api(`/api/dags/${r.dag_id}`); } catch (_) {} // archived/racing delete: fall back to instance-only rows
+  const defs = topoOrder(((dag && dag.tasks) || []).map((tk) => ({ id: tk.id, command: tk.command || "", deps: (tk.deps || []).slice() })));
+  NVR = { runID, dagID: r.dag_id, sched: dag ? dag.schedule || "" : "", defs, pin: null, curTi: null };
+  setNav("dags", `${r.dag_id} / ${t("run_word")}`);
+  main.innerHTML = `<div class="nv-wrap-sm">
+    <div id="nvr-banner"></div>
+    <div class="nv-panel">
+      <div id="nvr-steps"></div>
+      <div class="nvr-loghead" id="nvr-loghead"></div>
+      <div class="logbox nvr-log" id="nvr-logbox"></div>
+    </div>
+    <div id="nvr-foot" style="display:flex;justify-content:flex-end;margin-top:14px"></div>
+  </div>`;
+  renderNovRun(data);
+  if (runLive(r.state)) startNovRunPoll(runID, gen);
+  finishRouteRender();
+}
+function startNovRunPoll(runID, gen) {
+  const p = setInterval(async () => {
+    if (gen !== runPollGen) { clearInterval(p); return; } // superseded by a later run view
+    let data; try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (_) { return; }
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) return;
+    renderNovRun(data);
+    if (!runLive(data.run.state)) clearInterval(p);
+  }, 2000);
+  runPoll = p;
+}
+function renderNovRun(data, force) {
+  if (!NVR || !$("nvr-steps")) return;
+  const r = data.run, tis = data.tasks || [];
+  const byTask = {}; tis.forEach((x) => byTask[x.task_id] = x);
+  const terminalRun = !runLive(r.state);
+  // definition order; a run on a since-deleted DAG falls back to instance order
+  const rows = (NVR.defs.length ? NVR.defs : tis.map((x) => ({ id: x.task_id, command: "" }))).map((tk, i) => {
+    const ti = byTask[tk.id];
+    const st = ti ? ti.state : "";
+    let ic, durTxt;
+    if (st === "success") { ic = `<span class="nv-step-ic ok">✓</span>`; durTxt = dur(ti.started_at, ti.finished_at); }
+    else if (st === "failed" || st === "timed_out") { ic = `<span class="nv-step-ic bad">✕</span>`; durTxt = stateLabel(st) + (ti.try_number > 1 ? ` · ${t("nvr_retry_n", ti.try_number - 1)}` : ""); }
+    else if (st === "running" || st === "up_for_retry") { ic = `<span class="nv-spin"></span>`; durTxt = t("nvr_running_dur"); }
+    else if (st === "skipped" || st === "cancelled" || st === "upstream_failed") { ic = `<span class="nv-step-ic skip">⊘</span>`; durTxt = st === "upstream_failed" ? t("nvr_notrun") : stateLabel(st); }
+    else { ic = `<span class="nv-step-ic pending">${i + 1}</span>`; durTxt = terminalRun ? t("nvr_notrun") : t("nvr_waiting"); }
+    const clickable = ti && ti.id;
+    return `<div class="nv-item ${NVR.pin === tk.id ? "sel" : ""}" ${clickable ? `role="button" tabindex="0" data-nvrstep="${esc(tk.id)}"` : ""}>
+      ${ic}
+      <div class="nv-main">
+        <div class="nv-label">${esc(nvTaskLabel(tk.id))}</div>
+        <div class="nv-cmd" title="${esc(tk.command || "")}">${esc(tk.command || "")}</div>
+      </div>
+      <span class="nv-dur">${esc(durTxt)}</span>
+    </div>`;
+  }).join("");
+  const steps = $("nvr-steps");
+  // Rebuild when the content changed. A poll tick defers to the user's focus
+  // (the next tick catches up) — EXCEPT the terminal tick: the poll stops there,
+  // so the last frame must always land or the list would freeze mid-run forever.
+  // User actions (pin click) also force it. Focus is handed back to the same row.
+  const focusedRow = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.nvrstep : null;
+  if (steps._snap !== rows && (force || terminalRun || !(document.activeElement && steps.contains(document.activeElement)))) {
+    steps._snap = rows; steps.innerHTML = rows;
+    steps.querySelectorAll("[data-nvrstep]").forEach((el) => el.onclick = () => { NVR.pin = NVR.pin === el.dataset.nvrstep ? null : el.dataset.nvrstep; renderNovRun(data, true); });
+    const back = focusedRow || (force && NVR.pin);
+    if (back) { const sel = steps.querySelector(`[data-nvrstep="${CSS.escape(back)}"]`); if (sel) sel.focus(); }
+  }
+  renderNovRunBanner(r, tis);
+  // which log to stream: pinned step, else running, else failed, else last finished
+  const pick = (NVR.pin && byTask[NVR.pin])
+    || tis.find((x) => x.state === "running")
+    || tis.find((x) => x.state === "failed" || x.state === "timed_out")
+    || [...tis].reverse().find((x) => TASK_TERMINAL[x.state])
+    || tis[0];
+  if (pick && pick.id && NVR.curTi !== pick.id) { NVR.curTi = pick.id; nvOpenLog(pick); }
+  const foot = $("nvr-foot");
+  const wantCancel = runLive(r.state) ? "1" : "";
+  if (foot.dataset.mode !== wantCancel) {
+    foot.dataset.mode = wantCancel;
+    foot.innerHTML = wantCancel ? `<button class="danger" id="nvr-cancel">${t("run_cancel")}</button>` : "";
+    const c = $("nvr-cancel");
+    if (c) c.onclick = async () => {
+      if (!(await confirmDialog(t("confirm_cancel_title", r.run_id), t("confirm_cancel_body"), { danger: true, okLabel: t("run_cancel") }))) return;
+      try { await api(`/api/runs/${encodeURIComponent(r.run_id)}/cancel`, { method: "POST" }); } catch (e) { toast(e.message, "fail"); }
+    };
+  }
+}
+function renderNovRunBanner(r, tis) {
+  const el = $("nvr-banner"); if (!el) return;
+  const live = runLive(r.state);
+  const failIdx = NVR.defs.findIndex((tk) => { const ti = tis.find((x) => x.task_id === tk.id); return ti && (ti.state === "failed" || ti.state === "timed_out"); });
+  const snap = [r.state, r.finished_at || "", failIdx].join("|");
+  if (el._snap === snap) return; // unchanged — keep focus/DOM stable across polls
+  el._snap = snap;
+  if (live) {
+    el.innerHTML = `<div style="margin:8px 0 20px">
+      <h1 style="font-size:22px;margin:0 0 6px;font-weight:700">${t("nvr_running_title", `<span class="mono" style="color:var(--accent)">${esc(r.dag_id)}</span>`)}</h1>
+      <div class="page-sub" style="margin-bottom:0">${esc(t("nvr_sub"))}</div>
+    </div>`;
+    return;
+  }
+  if (r.state === "success") {
+    el.innerHTML = `<div class="nv-banner ok" style="margin:8px 0 20px">
+      <span class="nv-big-ic ok">✓</span>
+      <div class="nv-bmain">
+        <div class="nv-bt">${esc(t("nvr_done_title", dur(r.started_at, r.finished_at)))}</div>
+        <div class="nv-bs">${esc(nvSchedGloss(NVR.sched))} · ${esc(t("nvr_done_sub"))}</div>
+      </div>
+      <button class="primary" id="nvr-home">${esc(t("nvr_done_home"))}</button>
+      <button id="nvr-detail">${esc(t("nvr_detail"))}</button>
+    </div>`;
+  } else {
+    const failTi = failIdx >= 0 ? tis.find((x) => x.task_id === NVR.defs[failIdx].id) : null;
+    const title = r.state === "cancelled" ? t("nvr_cancelled_title")
+      : r.state === "timed_out" ? t("nvr_timeout_title")
+      : failIdx >= 0 ? t("nvr_failed_title", failIdx + 1, NVR.defs[failIdx].id) : t("nvr_failed_generic");
+    const retried = failTi && failTi.try_number > 1 ? " " + t("nvr_retried", failTi.try_number - 1) : "";
+    el.innerHTML = `<div class="nv-banner bad" style="margin:8px 0 20px">
+      <span class="nv-big-ic bad">✕</span>
+      <div class="nv-bmain">
+        <div class="nv-bt">${esc(title)}</div>
+        <div class="nv-bs">${esc(t("nvr_failed_sub"))}${esc(retried)}</div>
+      </div>
+      <button class="primary" id="nvr-retry">${esc(r.state === "cancelled" ? t("nvr_rerun2") : t("nvr_rerun"))}</button>
+      <button id="nvr-edit">${esc(t("nvr_edit_steps"))}</button>
+      <button class="icon" id="nvr-home">${esc(t("nvr_home"))}</button>
+    </div>`;
+  }
+  const home = $("nvr-home"); if (home) home.onclick = () => loadDags();
+  const det = $("nvr-detail"); if (det) det.onclick = () => showDag(NVR.dagID);
+  const ed = $("nvr-edit"); if (ed) ed.onclick = () => showDag(NVR.dagID);
+  const rt = $("nvr-retry"); if (rt) rt.onclick = async () => {
+    rt.disabled = true;
+    try { await api(`/api/runs/${encodeURIComponent(NVR.runID)}/retry`, { method: "POST" }); showRun(NVR.runID); }
+    catch (e) { toast(e.message, "fail"); rt.disabled = false; }
+  };
+}
+// one live log stream inside the steps panel (SSE, auto-follows the active step)
+function nvOpenLog(ti) {
+  closeLog();
+  const head = $("nvr-loghead"), box = $("nvr-logbox");
+  if (!head || !box) return;
+  head.innerHTML = `${t("log_word")} · <span class="mono">${esc(ti.task_id)}</span> <span class="live" id="nvr-live"><span class="p"></span>${t("live")}</span>`;
+  box.textContent = "";
+  let lines = [];
+  logES = new EventSource(`/api/tasks/${ti.id}/log/stream`);
+  logES.onmessage = (e) => {
+    lines.push(e.data);
+    if (lines.length > LOG_CAP) { lines = lines.slice(-LOG_CAP); box.textContent = lines.join("\n"); }
+    else box.appendChild(document.createTextNode((box.firstChild ? "\n" : "") + e.data));
+    box.scrollTop = box.scrollHeight;
+  };
+  const dead = () => { closeLog(); const l = $("nvr-live"); if (l) l.textContent = ""; };
+  logES.addEventListener("done", dead);
+  logES.onerror = dead;
+}
+
 async function showRun(runID) {
+  if (nvMode()) return showRunNovice(runID);
   view = "run"; currentRun = runID; closeLog(); stopDagRunsPoll(); clearInterval(runPoll); const gen = ++runPollGen; setHash("#/run/" + encodeURIComponent(runID));
   let data;
   try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
