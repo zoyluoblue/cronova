@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -51,18 +52,23 @@ type Info struct {
 
 // Server holds the API dependencies.
 type Server struct {
-	store          store.Store
-	eng            Engine
-	logDir         string
-	projectsDir    string // uploaded project files ("" = uploads disabled)
-	web            fs.FS
-	info           Info
-	auth           AuthConfig
-	loginLim       *loginLimiter // brute-force throttle for POST /api/login
-	sseSlots       chan struct{} // bounds long-lived log-stream connections
-	started        time.Time     // for /metrics uptime
-	readyCheck     func(context.Context) error
-	trustedProxies []*net.IPNet
+	store         store.Store
+	eng           Engine
+	logDir        string
+	projectsDir   string // uploaded project files ("" = uploads disabled)
+	web           fs.FS
+	info          Info
+	auth          AuthConfig
+	loginLim      *loginLimiter // brute-force throttle for POST /api/login
+	sseSlots      chan struct{} // bounds long-lived log-stream connections
+	started       time.Time     // for /metrics uptime
+	readyCheck    func(context.Context) error
+	schedulerTick time.Duration // >0 enables scheduler-loop liveness in /readyz
+	// admission caps, surfaced in /metrics and queue-full errors so operators
+	// can see the watermark instead of discovering the ceiling by hitting it
+	limitQueued, limitActive, limitTasks int
+	accessLog                            *slog.Logger // nil = no API access logging
+	trustedProxies                       []*net.IPNet
 }
 
 const (
@@ -101,6 +107,19 @@ func (s *Server) SetProjectsDir(dir string) { s.projectsDir = dir }
 // It must be configured before Handler is served.
 func (s *Server) SetReadinessCheck(check func(context.Context) error) { s.readyCheck = check }
 
+// SetSchedulerTick tells /readyz the scheduling interval so it can flag a
+// stalled loop (last completed tick too far in the past). 0 disables the check
+// (e.g. an API-only deployment without an in-process scheduler).
+func (s *Server) SetSchedulerTick(tick time.Duration) { s.schedulerTick = tick }
+
+// SetLimits records the global admission caps for /metrics and error messages.
+func (s *Server) SetLimits(queued, active, tasks int) {
+	s.limitQueued, s.limitActive, s.limitTasks = queued, active, tasks
+}
+
+// SetAccessLogger enables request logging for /api/* routes on logger.
+func (s *Server) SetAccessLogger(logger *slog.Logger) { s.accessLog = logger }
+
 // Handler builds the HTTP routes (Go 1.22+ method+pattern mux).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -116,8 +135,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/dags/{id}", s.deleteDAG)
 	mux.HandleFunc("POST /api/dags/{id}/trigger", s.triggerDAG)
 	mux.HandleFunc("POST /api/dags/{id}/backfill", s.backfillDAG)
+	// external events + per-DAG inbound webhooks
+	mux.HandleFunc("POST /api/events", s.publishEvent)
+	mux.HandleFunc("POST /api/dags/{id}/hook", s.setDagHook)
+	mux.HandleFunc("GET /api/dags/{id}/hook", s.getDagHook)
+	mux.HandleFunc("DELETE /api/dags/{id}/hook", s.deleteDagHook)
+	mux.HandleFunc("POST /api/hooks/{id}/{secret}", s.hookTrigger) // public: the secret IS the credential
 	mux.HandleFunc("POST /api/dags/{id}/pause", s.pauseDAG)
 	mux.HandleFunc("GET /api/dags/{id}/runs", s.listRuns)
+	mux.HandleFunc("GET /api/dags/{id}/task-durations", s.taskDurations)
+	mux.HandleFunc("GET /api/dags/{id}/versions", s.listDagVersions)
+	mux.HandleFunc("POST /api/dags/{id}/versions/{hash}/restore", s.restoreDagVersion)
 	mux.HandleFunc("GET /api/runs/{runID}", s.getRun)
 	mux.HandleFunc("POST /api/runs/{runID}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{runID}/retry", s.retryRun)
@@ -162,7 +190,50 @@ func (s *Server) Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 		}))
 	}
-	return securityHeaders(s.withAuth(mux))
+	return securityHeaders(s.withAccessLog(s.withAuth(mux)))
+}
+
+// withAccessLog logs /api/* requests (method, path, status, duration) at a
+// level matched to the outcome: server errors loudly, client errors as
+// warnings, successes at debug so info-level production logs stay quiet.
+// Static assets, health probes, and /metrics scrapes are never logged.
+func (s *Server) withAccessLog(next http.Handler) http.Handler {
+	if s.accessLog == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		lvl := slog.LevelDebug
+		switch {
+		case rec.status >= 500:
+			lvl = slog.LevelError
+		case rec.status >= 400:
+			lvl = slog.LevelWarn
+		}
+		s.accessLog.Log(r.Context(), lvl, "api",
+			"method", r.Method, "path", r.URL.Path, "status", rec.status,
+			"dur_ms", time.Since(start).Milliseconds())
+	})
+}
+
+// statusWriter captures the response code for access logging. It deliberately
+// forwards Flush so SSE log streaming keeps working through the wrapper.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) { w.status = code; w.ResponseWriter.WriteHeader(code) }
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -187,6 +258,13 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// httpErrCode is httpErr plus a stable machine code ("queue_full", …) so the
+// console can localize the message instead of echoing English at a zh user;
+// the raw error stays as the fallback for codes a client doesn't know.
+func httpErrCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
 // decodeJSON reads a JSON request body (capped at 1 MiB) into v.
 func decodeJSON(r *http.Request, v any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
@@ -195,14 +273,22 @@ func decodeJSON(r *http.Request, v any) error {
 func mapErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		httpErr(w, http.StatusNotFound, "not found")
-	case errors.Is(err, model.ErrNoTasks), errors.Is(err, model.ErrBadMarkState):
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpErrCode(w, http.StatusNotFound, "not_found", "not found")
+	case errors.Is(err, model.ErrNoTasks):
+		httpErrCode(w, http.StatusBadRequest, "no_tasks", err.Error())
+	case errors.Is(err, model.ErrBadMarkState):
+		httpErrCode(w, http.StatusBadRequest, "bad_mark_state", err.Error())
 	case errors.Is(err, model.ErrQueueFull):
 		w.Header().Set("Retry-After", "5")
-		httpErr(w, http.StatusTooManyRequests, err.Error())
-	case errors.Is(err, model.ErrActiveRuns), errors.Is(err, model.ErrRunNotActive), errors.Is(err, model.ErrNothingToRetry), errors.Is(err, model.ErrRunStillActive):
-		httpErr(w, http.StatusConflict, err.Error())
+		httpErrCode(w, http.StatusTooManyRequests, "queue_full", err.Error())
+	case errors.Is(err, model.ErrActiveRuns):
+		httpErrCode(w, http.StatusConflict, "active_runs", err.Error())
+	case errors.Is(err, model.ErrRunNotActive):
+		httpErrCode(w, http.StatusConflict, "run_not_active", err.Error())
+	case errors.Is(err, model.ErrNothingToRetry):
+		httpErrCode(w, http.StatusConflict, "nothing_to_retry", err.Error())
+	case errors.Is(err, model.ErrRunStillActive):
+		httpErrCode(w, http.StatusConflict, "run_still_active", err.Error())
 	default:
 		httpErr(w, http.StatusInternalServerError, err.Error())
 	}
@@ -224,7 +310,9 @@ func (s *Server) schedulePreview(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
-	sched, err := parser.ParseSchedule(spec)
+	// optional ?timezone= mirrors the DAG-level field so the preview shows the
+	// same instants the engine will fire at for a tz-scheduled DAG.
+	sched, err := parser.ParseScheduleIn(spec, r.URL.Query().Get("timezone"))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid schedule: "+err.Error())
 		return
@@ -418,6 +506,16 @@ func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
 	}
 	runID, err := s.eng.TriggerManual(r.Context(), r.PathValue("id"), req.Params)
 	if err != nil {
+		// queue-full gets the current watermark so the caller sees how far over
+		// capacity the instance is, not just a bare refusal.
+		if errors.Is(err, model.ErrQueueFull) && s.limitQueued > 0 {
+			if byState, cerr := s.store.CountRunsByState(r.Context()); cerr == nil {
+				w.Header().Set("Retry-After", "5")
+				httpErr(w, http.StatusTooManyRequests, fmt.Sprintf("%v (queued %d/%d, active %d/%d)",
+					err, byState[model.RunQueued], s.limitQueued, byState[model.RunRunning], s.limitActive))
+				return
+			}
+		}
 		mapErr(w, err)
 		return
 	}

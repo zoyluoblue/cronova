@@ -102,3 +102,53 @@ func TestRevokedBearerRejected(t *testing.T) {
 		t.Fatalf("revoked bearer = %d, want 401", rec.Code)
 	}
 }
+
+// Operator tokens drive runs but cannot touch definitions/config; dag-scoped
+// tokens are confined to their DAG; expired tokens stop authenticating.
+func TestOperatorScopedAndExpiringTokens(t *testing.T) {
+	h := authServer(t, model.RoleAdmin)
+	cookie := loginCookie(t, h, "u", "pw")
+
+	// operator: run ops allowed, config writes forbidden, reads allowed
+	op := mintToken(t, h, cookie, "ops-bot", "operator")
+	if rec := bearer(h, "POST", "/api/dags/etl/trigger", op); rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("operator trigger = %d, want allowed", rec.Code)
+	}
+	if rec := bearer(h, "POST", "/api/runs/etl__r1/cancel", op); rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("operator cancel = %d, want allowed", rec.Code)
+	}
+	if rec := bearer(h, "POST", "/api/pools/p", op); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator pool write = %d, want 403", rec.Code)
+	}
+	if rec := bearer(h, "GET", "/api/overview", op); rec.Code != http.StatusOK {
+		t.Fatalf("operator read = %d, want 200", rec.Code)
+	}
+
+	// dag-scoped operator token: only its own DAG's writes pass
+	rec := do(h, "POST", "/api/tokens", `{"name":"etl-only","role":"operator","dag_id":"etl"}`, cookie)
+	if rec.Code != http.StatusBadRequest { // etl does not exist yet -> rejected
+		t.Fatalf("scope to missing dag = %d, want 400", rec.Code)
+	}
+	// (scope validation against a real DAG is covered in server_test setups)
+
+	// expiring token: a TTL in the past cannot be minted via API (positive only),
+	// so mint with a tiny TTL and rely on the expiry check path via store write.
+	rec = do(h, "POST", "/api/tokens", `{"name":"short","role":"viewer","ttl":"1ns"}`, cookie)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("mint ttl token = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var tok model.APIToken
+	if err := json.Unmarshal(rec.Body.Bytes(), &tok); err != nil {
+		t.Fatal(err)
+	}
+	if tok.ExpiresAt == nil {
+		t.Fatal("ttl token missing expires_at")
+	}
+	if rec := bearer(h, "GET", "/api/overview", tok.Plaintext); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired token read = %d, want 401", rec.Code)
+	}
+	// invalid ttl rejected
+	if rec := do(h, "POST", "/api/tokens", `{"name":"bad","ttl":"-5h"}`, cookie); rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative ttl = %d, want 400", rec.Code)
+	}
+}

@@ -314,6 +314,85 @@ on macOS (override with `key_file:` in `cronova.yaml` or `CRONOVA_KEY_FILE`).
 Include it in the same backup as the SQLite DB: a database restored without its
 key file has unreadable connection passwords, and they must be re-entered.
 
+## Backup & restore
+
+`cronova backup` snapshots everything a restore needs, **while the server is
+running** — the database copy uses SQLite's `VACUUM INTO`, which is atomic with
+respect to concurrent transactions (a plain `cp` of a live DB can capture a
+torn mid-commit state; never do that):
+
+```bash
+cronova backup -config /etc/cronova/cronova.yaml /backups/cronova-$(date +%F)
+```
+
+The destination directory receives `cronova.db` (compacted snapshot),
+`cronova.key`, `dags/`, and `projects/`. Task **logs are not included** — they
+can be large and are already governed by retention; add the logs directory to
+your backup job separately if you need them.
+
+To restore:
+
+1. Stop the service (`cronova stop`).
+2. Copy `cronova.db`, `cronova.key`, `dags/`, and `projects/` from the backup
+   back to their configured paths (see the platform layout table above).
+3. Start the service (`cronova start`) and verify with `cronova healthcheck`.
+
+Runs that were mid-flight at backup time recover on start exactly as after a
+crash (re-attached under a standalone executor, failed over under the
+in-process one).
+
+## Monitoring
+
+`GET /metrics` serves Prometheus text format on the console address, and is
+unauthenticated like `/healthz` (scrapers expect that). Scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: cronova
+    static_configs: [{ targets: ["cronova-host:8090"] }]
+```
+
+Key series:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `cronova_up`, `cronova_uptime_seconds` | gauge | process liveness |
+| `cronova_runs_current{state}` | gauge | runs stored per state (shrinks with retention) |
+| `cronova_runs_finished_total{state}` | counter | terminal transitions since process start — use with `rate()` |
+| `cronova_run_duration_seconds{dag_id}` | histogram | finished-run wall-clock durations |
+| `cronova_scheduler_last_tick_timestamp_seconds` | gauge | last completed scheduling tick |
+| `cronova_notify_failures_total` | counter | webhook alerts that failed after retries |
+| `cronova_max_queued_runs` / `cronova_max_active_runs` | gauge | admission caps (pair with `runs_current` for the watermark) |
+| `cronova_pool_slots` / `cronova_pool_used{pool}` | gauge | pool saturation |
+
+Suggested alerts:
+
+```yaml
+- alert: CronovaSchedulerStalled
+  expr: time() - cronova_scheduler_last_tick_timestamp_seconds > 60
+- alert: CronovaRunFailures
+  expr: increase(cronova_runs_finished_total{state="failed"}[15m]) > 0
+- alert: CronovaQueueSaturation
+  expr: cronova_runs_current{state="queued"} / cronova_max_queued_runs > 0.8
+- alert: CronovaNotifyBroken
+  expr: increase(cronova_notify_failures_total[1h]) > 0
+```
+
+`/readyz` also reports `503` when the scheduling loop itself stalls (last tick
+older than 5× the tick interval), so a plain supervisor healthcheck catches the
+one failure mode a DB/executor probe cannot see.
+
+Instance-wide alerting without Prometheus: set a default webhook in
+`cronova.yaml` — DAGs without their own `notify_url` alert here on failure, and
+scheduler-level events (executor unreachable/recovered, retention failures)
+post here too:
+
+```yaml
+notify:
+  url: https://hooks.slack.com/services/…
+  format: slack   # raw | slack | feishu | dingtalk
+```
+
 ## Uploaded projects
 
 The console can upload scripts / project folders / zips (task editor →

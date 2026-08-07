@@ -95,22 +95,25 @@ const (
 // are derived by parsing DefinitionYAML and are not stored row-by-row.
 type DAG struct {
 	DagID          string     `json:"dag_id"`
-	Schedule       string     `json:"schedule"` // cron expression; empty => manual/event only
+	Schedule       string     `json:"schedule"`           // cron expression; empty => manual/event only
+	Timezone       string     `json:"timezone,omitempty"` // IANA zone the cron fields evaluate in ("" = UTC)
 	StartDate      time.Time  `json:"start_date"`
 	Catchup        bool       `json:"catchup"`
 	Paused         bool       `json:"paused"`
 	MaxActiveRuns  int        `json:"max_active_runs"`
-	DefaultRetries int        `json:"default_retries"` // DAG-level default; per-task retries override
+	MaxActiveTasks int        `json:"max_active_tasks,omitempty"` // cap on this DAG's concurrent tasks across runs (0 = unlimited)
+	DefaultRetries int        `json:"default_retries"`            // DAG-level default; per-task retries override
 	DefinitionYAML string     `json:"definition_yaml,omitempty"`
 	Owner          string     `json:"owner,omitempty"`   // reserved for future RBAC
 	Project        string     `json:"project,omitempty"` // reserved for future RBAC
 	Tasks          []Task     `json:"tasks,omitempty"`
-	TriggerAfter   []string   `json:"trigger_after,omitempty"`  // upstream dag_ids
-	NotifyURL      string     `json:"notify_url,omitempty"`     // webhook POSTed on a notify_on state
-	NotifyOn       []string   `json:"notify_on,omitempty"`      // run states to notify on: "failure", "success"
-	NotifyFormat   string     `json:"notify_format,omitempty"`  // webhook body shape: ""/raw | slack | feishu | dingtalk
-	SLA            int        `json:"sla,omitempty"`            // soft deadline (seconds from run start); breach alerts, run keeps going
-	DagrunTimeout  int        `json:"dagrun_timeout,omitempty"` // hard deadline (seconds from run start); breach kills the run → timed_out
+	TriggerAfter   []string   `json:"trigger_after,omitempty"`    // upstream dag_ids
+	TriggerOnEvent []string   `json:"trigger_on_event,omitempty"` // external event keys that trigger a run
+	NotifyURL      string     `json:"notify_url,omitempty"`       // webhook POSTed on a notify_on state
+	NotifyOn       []string   `json:"notify_on,omitempty"`        // run states to notify on: "failure", "success"
+	NotifyFormat   string     `json:"notify_format,omitempty"`    // webhook body shape: ""/raw | slack | feishu | dingtalk
+	SLA            int        `json:"sla,omitempty"`              // soft deadline (seconds from run start); breach alerts, run keeps going
+	DagrunTimeout  int        `json:"dagrun_timeout,omitempty"`   // hard deadline (seconds from run start); breach kills the run → timed_out
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 	DeletedAt      *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
@@ -134,6 +137,10 @@ type Task struct {
 	Timeout       int    `json:"timeout"`                   // execution timeout seconds; 0 = none (kills the attempt)
 	SLA           int    `json:"sla,omitempty"`             // soft deadline (seconds from run start); breach alerts only
 	TriggerRule   string `json:"trigger_rule"`              // when to run vs. upstream states (default all_success)
+	// When is an optional runtime condition template (e.g. "{{ params.env }}"
+	// or "{{ ti.check.proceed }}"): evaluated once the task is otherwise ready;
+	// a falsy/unresolved render marks the task skipped instead of running it.
+	When string `json:"when,omitempty"`
 	// HTTP is set when Type == "http": a native HTTP request run via `cronova run-op`
 	// instead of a shell Command. URL/Headers/Body may contain {{ var. }}/{{ conn. }}
 	// templates, resolved server-side at dispatch.
@@ -147,6 +154,15 @@ type Task struct {
 	// directory and runs Command with its cwd there (so `python3 main.py` resolves)
 	// and CRONOVA_PROJECT_DIR pointing at it. Empty = run with the executor's cwd.
 	Project string `json:"project,omitempty"`
+}
+
+// DagVersion is one entry of a DAG's append-only definition history.
+type DagVersion struct {
+	ID        int64     `json:"id"`
+	DagID     string    `json:"dag_id"`
+	Hash      string    `json:"hash"`
+	YAML      string    `json:"yaml,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // HTTPSpec configures an http-type task's request. ExpectedStatus lists the
@@ -187,6 +203,12 @@ type Event struct {
 
 const EventSourceDependency = "dependency"
 
+// EventSourceExternal marks events published from outside (POST /api/events or
+// an inbound webhook): DAGs subscribe via trigger_on_event and the scheduler
+// creates an event-triggered run per subscriber. event_key is the idempotency
+// key — publishing the same key twice cannot double-trigger.
+const EventSourceExternal = "external"
+
 // TaskInstance is the execution of one Task within one DagRun. It is the
 // smallest unit tracked by the state machine.
 type TaskInstance struct {
@@ -222,8 +244,12 @@ const MaxPoolSlots = 1024
 type Role string
 
 const (
-	RoleAdmin  Role = "admin"  // full access: trigger, edit, delete
-	RoleViewer Role = "viewer" // read-only
+	RoleAdmin Role = "admin" // full access: trigger, edit, delete
+	// RoleOperator can run things (trigger, cancel, retry, backfill, pause,
+	// mark) but cannot change definitions or configuration — the right grant
+	// for CI pipelines and ops automations that only need to drive runs.
+	RoleOperator Role = "operator"
+	RoleViewer   Role = "viewer" // read-only
 )
 
 // User is a console/API account. PasswordHash is a PBKDF2-HMAC-SHA256 hash and is never serialized.
@@ -233,6 +259,10 @@ type User struct {
 	PasswordHash string    `json:"-"`
 	Role         Role      `json:"role"`
 	CreatedAt    time.Time `json:"created_at"`
+	// TokenDagScope carries a dag-scoped API token's restriction through the
+	// request principal (never persisted or serialized): when non-empty, write
+	// operations are limited to this DAG.
+	TokenDagScope string `json:"-"`
 }
 
 // Variable is a UI-managed shared key-value, referenced as {{ var.Key }}.
@@ -278,6 +308,12 @@ type APIToken struct {
 	Plaintext  string     `json:"token,omitempty"` // create-response only; never stored
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// ExpiresAt makes the token stop authenticating after this instant
+	// (nil = never — the pre-existing behavior). Supports rotation policies.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// DagID scopes the token's WRITE operations to one DAG (trigger/backfill/
+	// pause and that DAG's run ops). "" = unscoped. Reads stay role-governed.
+	DagID string `json:"dag_id,omitempty"`
 }
 
 // Session is an opaque server-side session bound to a user.

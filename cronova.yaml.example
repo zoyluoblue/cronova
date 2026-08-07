@@ -15,11 +15,19 @@ allow_unauthenticated_remote: false
 # ── Scheduler ───────────────────────────────────────────────────────────────
 tick: 2s                    # how often the loop wakes to schedule/poll work
 
+# GitOps hot-reload: re-scan the dags directory for changed YAML this often, so
+# a `git pull` goes live without a restart. "0" (default) disables.
+reload: "0"
+
 # Manual `cronova serve` defaults to the in-process executor when this is empty.
 # Installed systemd/launchd services override it with the standalone executor so
 # scheduler restarts do not kill running tasks, e.g.:
 #   executor: "unix:///run/cronova/executor.sock"
-# The socket parent must be private (0700); TCP executor targets are rejected.
+# The socket parent must be private (0700). A scheduler on ANOTHER machine can
+# reach an executor over mandatory mutual TLS:
+#   executor: "tcp://worker-host:9445"
+# with CRONOVA_EXEC_TLS_CERT / _KEY / _CA pointing at the PEM files, and
+# cronova-executor started with -listen-tcp + its certificate flags.
 executor: ""
 
 # Bound work admitted from every trigger source and across every pool.
@@ -31,6 +39,21 @@ max_concurrent_tasks: 64
 # Use "0" to keep either class forever.
 retention: 2160h
 audit_retention: 8760h
+
+# ── Alerting ────────────────────────────────────────────────────────────────
+# Instance-wide default webhook: DAGs without their own notify_url alert here
+# (failure-only unless they set notify_on), and scheduler-level events
+# (executor unreachable/recovered, retention failures) post here too.
+# format: raw | slack | feishu | dingtalk
+notify:
+  url: ""
+  format: ""
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+# level: debug | info | warn | error;  format: text | json (for Loki/ELK).
+log:
+  level: info
+  format: text
 
 # ── Authentication ──────────────────────────────────────────────────────────
 auth:

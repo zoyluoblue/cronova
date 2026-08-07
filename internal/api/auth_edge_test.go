@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/zoyluo/cronova/internal/metrics"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/store/sqlite"
 )
@@ -154,5 +156,41 @@ func TestLoginFailureAuditedWithTruncatedUsername(t *testing.T) {
 	}
 	if !found {
 		t.Error("no login_failed audit entry recorded")
+	}
+}
+
+// A stalled scheduling loop must flip /readyz even when DB and executor answer:
+// it is the one failure mode no dependency probe can see.
+func TestReadyzReflectsSchedulerStall(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.New(filepath.Join(dir, "ready-sched.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, &stubTrigger{}, dir, nil, Info{})
+	srv.SetSchedulerTick(2 * time.Second)
+	defer metrics.Reset()
+
+	// fresh tick: ready
+	metrics.SetLastTick(time.Now())
+	rec, body := get(t, srv.Handler(), "GET", "/readyz")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fresh-tick readyz = %d %v", rec.Code, body)
+	}
+	// stale tick (beyond the 30s floor): not ready, component=scheduler
+	metrics.SetLastTick(time.Now().Add(-2 * time.Minute))
+	rec, body = get(t, srv.Handler(), "GET", "/readyz")
+	if rec.Code != http.StatusServiceUnavailable || body.(map[string]any)["component"] != "scheduler" {
+		t.Fatalf("stalled readyz = %d %v, want 503 scheduler", rec.Code, body)
+	}
+	// no scheduler configured (tick 0): the check is disabled entirely
+	srv2 := New(st, &stubTrigger{}, dir, nil, Info{})
+	rec, body = get(t, srv2.Handler(), "GET", "/readyz")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no-scheduler readyz = %d %v", rec.Code, body)
 	}
 }

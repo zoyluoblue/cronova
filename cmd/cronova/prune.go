@@ -19,11 +19,34 @@ import (
 //	cronova prune -yes                 # no confirmation (scripts / cron)
 func cmdPrune(args []string) error {
 	fs := flag.NewFlagSet("prune", flag.ExitOnError)
-	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
-	logDir := fs.String("logs", "logs", "directory for task log files")
+	configPath := fs.String("config", envOr("CRONOVA_CONFIG", "cronova.yaml"), "path to YAML config file (optional)")
+	dbPath := fs.String("db", "", "SQLite metadata database path (default: from config, else data/cronova.db)")
+	logDir := fs.String("logs", "", "directory for task log files (default: from config, else logs)")
 	olderThan := fs.Duration("older-than", 90*24*time.Hour, "delete finished runs older than this")
+	noVacuum := fs.Bool("no-vacuum", false, "skip the VACUUM that returns freed space to the filesystem")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt")
 	_ = fs.Parse(args)
+
+	// Resolve db/logs the same way `serve` does (config file, then flags), so
+	// a bare `cronova prune` on an installed service prunes the real database
+	// instead of silently no-opping against an empty ./data/cronova.db.
+	cfg := defaultConfig()
+	configExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			configExplicit = true
+		}
+	})
+	if err := loadConfigFile(&cfg, *configPath, configExplicit); err != nil {
+		return err
+	}
+	applyEnv(&cfg)
+	if *dbPath == "" {
+		*dbPath = cfg.DB
+	}
+	if *logDir == "" {
+		*logDir = cfg.Logs
+	}
 
 	if *olderThan <= 0 {
 		return fmt.Errorf("-older-than must be positive (got %s)", olderThan)
@@ -57,5 +80,13 @@ func cmdPrune(args []string) error {
 		fmt.Printf(" (%d log dir(s) could not be removed)", logErrs)
 	}
 	fmt.Println()
+	// Deleting rows alone leaves the DB file at its high-water mark; VACUUM
+	// rewrites it and returns the space. Only worth the rewrite when rows went.
+	if len(pruned) > 0 && !*noVacuum {
+		if err := st.Vacuum(ctx); err != nil {
+			return fmt.Errorf("vacuum after prune: %w", err)
+		}
+		fmt.Println("vacuumed — freed space returned to the filesystem")
+	}
 	return nil
 }

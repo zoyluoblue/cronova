@@ -15,6 +15,15 @@ import (
 // ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrLeaseHeld is returned by AcquireLease when another live scheduler
+// instance owns the lease — starting a second scheduler against the same
+// database would double-dispatch tasks.
+var ErrLeaseHeld = errors.New("store: scheduler lease held by another instance")
+
+// ErrLeaseLost is returned by RenewLease when the lease was taken over by
+// another instance; the caller must stop scheduling immediately.
+var ErrLeaseLost = errors.New("store: scheduler lease lost")
+
 // ErrAlreadyExists is returned when creating a row that violates a uniqueness
 // constraint (notably a DagRun for an already-existing (dag_id, logical_date)).
 // Callers performing catchup rely on this to skip already-created runs.
@@ -76,8 +85,9 @@ type Store interface {
 
 	// --- audit log ---
 	RecordAudit(ctx context.Context, e *model.AuditEntry) error
-	// ListAudit returns audit entries newest-first; target != "" filters to one dag/run.
-	ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error)
+	// ListAudit returns audit entries newest-first; target != "" filters to one
+	// dag/run; offset pages further back in time.
+	ListAudit(ctx context.Context, target string, limit, offset int) ([]*model.AuditEntry, error)
 	// PruneAudit deletes entries older than cutoff and returns the number removed.
 	PruneAudit(ctx context.Context, cutoff time.Time) (int64, error)
 
@@ -110,6 +120,17 @@ type Store interface {
 	ListPendingEvents(ctx context.Context, source string, limit int) ([]*model.Event, error)
 	// ConsumeEvent idempotently marks an event delivered.
 	ConsumeEvent(ctx context.Context, id int64) error
+	// PublishEvent durably records an event; (source, key) is the idempotency
+	// key — re-publishing an existing key is a no-op (created=false).
+	PublishEvent(ctx context.Context, source, key, payload string) (created bool, err error)
+	// Per-DAG inbound-webhook secrets (only the SHA-256 hash is stored).
+	SetDagHook(ctx context.Context, dagID, secretHash, prefix string) error
+	GetDagHook(ctx context.Context, dagID string) (secretHash, prefix string, createdAt time.Time, err error)
+	DeleteDagHook(ctx context.Context, dagID string) error
+	// Task outputs (XCom-equivalent): a small JSON string-map per (run, task),
+	// referenced downstream as {{ ti.<task_id>.<key> }}.
+	SetTaskOutput(ctx context.Context, runID, taskID, output string) error
+	GetTaskOutput(ctx context.Context, runID, taskID string) (string, error)
 
 	// --- pools ---
 	UpsertPool(ctx context.Context, p *model.Pool) error

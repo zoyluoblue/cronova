@@ -484,10 +484,22 @@ func TestMetrics(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	text, _ := body.(string)
-	for _, want := range []string{"cronova_up 1", "cronova_dags_total 1", `cronova_runs_total{state="success"} 1`, "# TYPE cronova_runs_active gauge"} {
+	for _, want := range []string{
+		"cronova_up 1", "cronova_dags_total 1",
+		// current rows are a GAUGE (retention pruning shrinks them — a counter
+		// here would corrupt rate() on prune); true counters live in
+		// cronova_runs_finished_total, maintained in-process by the scheduler.
+		"# TYPE cronova_runs_current gauge", `cronova_runs_current{state="success"} 1`,
+		"# TYPE cronova_runs_finished_total counter",
+		"# TYPE cronova_runs_active gauge",
+		"# TYPE cronova_notify_failures_total counter",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("/metrics missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "cronova_runs_total") {
+		t.Error("/metrics still exposes the semantically-broken cronova_runs_total")
 	}
 }
 

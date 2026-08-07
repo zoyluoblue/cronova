@@ -15,10 +15,10 @@ function renderDags() {
   if (nvMode()) return renderDagsNovice();
   const { stats, dags } = overviewCache;
   if (dags.length === 0) { // empty instance: a genuine first-run hero, not the "no matching" copy
-    main.innerHTML = `
-      <div class="page-h"><h1>DAGs</h1><span class="num">0</span></div>
+    main.innerHTML = `<div class="ov-wrap">
+      <div class="page-h"><h1>${t("nav_dags")}${hlp("hlp_dag", "b")}</h1><span class="num">0</span></div>
       <div class="page-sub">${t("dags_sub")}</div>
-      <div class="empty-state" style="margin-top:20px"><div class="es-ic">✦</div><div class="es-t">${t("no_dags_title")}</div><div class="es-s">${t("no_dags_sub")}</div><div style="margin-top:16px"><button class="primary" id="es-new">${t("newdag")}</button></div></div>`;
+      <div class="empty-state" style="margin-top:20px"><div class="es-ic">✦</div><div class="es-t">${t("no_dags_title")}</div><div class="es-s">${t("no_dags_sub")}</div><div style="margin-top:16px"><button class="primary" id="es-new">${t("newdag")}</button></div></div></div>`;
     $("es-new").onclick = () => newDagModal();
     return;
   }
@@ -31,26 +31,114 @@ function renderDags() {
     if (filter === "paused") return d.paused;
     return true;
   });
-  main.innerHTML = `
-    <div class="page-h"><h1>DAGs</h1><span class="num">${stats.total_dags}</span>
-      <div class="filters">${["all", "running", "failed", "paused"].map((f) => `<button class="pill ${filter === f ? "active" : ""}" data-f="${f}">${t("f_" + f)}</button>`).join("")}</div></div>
-    <div class="page-sub">${t("dags_sub")}</div>
-    <div class="cards">
-      <div class="card"><div class="k"><span class="d" style="background:var(--accent)"></span>${t("c_active")}</div><div class="v">${stats.active_dags}</div><div class="s">${t("c_active_s", stats.total_dags)}</div></div>
-      <div class="card"><div class="k"><span class="d" style="background:var(--run)"></span>${t("c_running")}</div><div class="v">${stats.running_runs}</div><div class="s">${t("c_running_s")}</div></div>
-      <div class="card"><div class="k"><span class="d" style="background:var(--ok)"></span>${t("c_rate")}</div><div class="v">${stats.success_rate.toFixed(1)}%</div><div class="s">${t("c_rate_s")}</div></div>
-      <div class="card${stats.failed ? " clickable" : ""}" ${stats.failed ? `data-card="failed" role="button" tabindex="0" aria-label="${t("c_failed")}"` : ""}><div class="k"><span class="d" style="background:var(--fail)"></span>${t("c_failed")}</div><div class="v">${stats.failed}</div><div class="s">${t("c_failed_s")}</div></div></div>
-    ${activityStrip(overviewCache.activity)}
+  main.innerHTML = `<div class="ov-wrap">
+    <div class="page-h"><h1>${t("nav_dags")}${hlp("hlp_dag", "b")}</h1><span class="num">${stats.total_dags}</span></div>
+    <div class="page-sub" style="margin-bottom:14px">${t("dags_sub")}</div>
+    ${healthBarHtml(stats, dags)}
     ${gettingStartedHtml(dags)}
-    <table class="tbl"><thead><tr><th style="width:42px"></th><th>${t("h_dag")}</th><th>${t("h_last")}</th><th>${t("h_spark")}</th><th>${t("h_pool")}</th><th>${t("h_next")}</th><th style="width:80px">${t("h_act")}</th></tr></thead>
-    <tbody>${list.map((d) => rowHtml(d, sparkScaleMs)).join("") || `<tr><td colspan="7"><div class="empty">${t("no_match")}</div></td></tr>`}</tbody></table>`;
-  main.querySelectorAll(".act-tick[data-run]").forEach((x) => x.onclick = () => showRun(x.dataset.run));
+    <div class="filters" style="margin-bottom:12px">${["all", "running", "failed", "paused"].map((f) => `<button class="pill ${filter === f ? "active" : ""}" data-f="${f}">${t("f_" + f)}</button>`).join("")}</div>
+    <table class="tbl"><thead><tr>
+      ${isAdminRole() ? `<th style="width:30px"><input type="checkbox" id="bulk-all" aria-label="${esc(t("bulk_all"))}" title="${esc(t("bulk_all"))}"></th>` : ""}
+      <th style="width:42px">${hlp("hlp_toggle")}</th>
+      <th>${t("h_dag")}</th>
+      <th>${t("h_spark")}${hlp("hlp_spark")}</th>
+      <th>${t("h_next")}${hlp("hlp_next", "r")}</th>
+      <th style="width:96px"></th></tr></thead>
+    <tbody>${list.map((d) => rowHtml(d, sparkScaleMs)).join("")}</tbody></table>
+    ${list.length ? "" : `<div class="tbl-empty">${t(query ? "no_match" : "no_match_filter")}</div>`}
+    <div class="bulk-bar" id="bulk-bar" hidden></div></div>`;
   main.querySelectorAll(".pill[data-f]").forEach((b) => b.onclick = () => { filter = b.dataset.f; renderDags(); });
-  const fc = main.querySelector('[data-card="failed"]'); if (fc) fc.onclick = () => { filter = "failed"; renderDags(); }; // dead number -> one-click triage
+  const go = $("ov-go"); if (go) go.onclick = () => (go.dataset.run ? showRun(go.dataset.run) : showDag(go.dataset.dag));
   const gx = $("gs-x"); if (gx) gx.onclick = () => { localStorage.setItem("cnv_gs_done", "1"); $("gs-box").remove(); };
   main.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showDag(tr.dataset.id); });
   main.querySelectorAll(".toggle").forEach((tg) => tg.onclick = async (e) => { e.stopPropagation(); await api(`/api/dags/${tg.dataset.id}/pause?paused=${tg.dataset.paused !== "true"}`, { method: "POST" }); loadDags(); });
   main.querySelectorAll(".play").forEach((b) => b.onclick = async (e) => { e.stopPropagation(); b.disabled = true; try { await api(`/api/dags/${b.dataset.id}/trigger`, { method: "POST" }); toast(t("toast_run_queued"), "ok"); setTimeout(loadDags, 500); } catch (err) { toast(t("trig_fail") + ": " + err.message, "fail"); b.disabled = false; } });
+  wireBulk(list);
+}
+
+// ---- bulk operations (maintenance windows, incident cleanup) ----
+// Row checkboxes + select-all (scoped to the CURRENT filter) reveal a sticky
+// action bar; each action fans out over the existing single-DAG endpoints
+// sequentially, reporting per-item failures instead of stopping half-way.
+let bulkSel = new Set();
+function isAdminRole() { return document.body.dataset.role !== "viewer"; }
+function wireBulk(list) {
+  const all = $("bulk-all");
+  if (!all) return; // viewer, or empty dashboard
+  const ids = list.map((d) => d.dag_id);
+  bulkSel = new Set([...bulkSel].filter((id) => ids.includes(id))); // drop rows filtered away
+  const sync = () => {
+    all.checked = ids.length > 0 && ids.every((id) => bulkSel.has(id));
+    main.querySelectorAll(".bulk-ck").forEach((ck) => ck.checked = bulkSel.has(ck.dataset.id));
+    renderBulkBar();
+  };
+  all.onchange = () => { ids.forEach((id) => all.checked ? bulkSel.add(id) : bulkSel.delete(id)); sync(); };
+  main.querySelectorAll(".bulk-ck").forEach((ck) => {
+    ck.onclick = (e) => e.stopPropagation(); // ticking must not open the DAG page
+    ck.onchange = () => { ck.checked ? bulkSel.add(ck.dataset.id) : bulkSel.delete(ck.dataset.id); sync(); };
+  });
+  sync();
+}
+function renderBulkBar() {
+  const bar = $("bulk-bar"); if (!bar) return;
+  if (!bulkSel.size) { bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<span class="bulk-n">${esc(t("bulk_selected", bulkSel.size))}</span>
+    <button data-bulk="pause">${t("btn_pause")}</button>
+    <button data-bulk="resume">${t("btn_resume")}</button>
+    <button data-bulk="trigger">▶ ${t("trigger")}</button>
+    <button class="danger" data-bulk="delete">${t("btn_delete")}</button>
+    <button class="icon" id="bulk-clear" aria-label="${t("cancel_word")}">✕</button>`;
+  $("bulk-clear").onclick = () => { bulkSel.clear(); renderDags(); };
+  bar.querySelectorAll("[data-bulk]").forEach((b) => b.onclick = () => runBulk(b.dataset.bulk));
+}
+async function runBulk(op) {
+  const ids = [...bulkSel];
+  if (op === "delete" && !(await confirmDialog(t("bulk_del_title", ids.length), t("confirm_del_dag_body"), { danger: true, okLabel: t("btn_delete") }))) return;
+  const call = (id) => {
+    if (op === "pause") return api(`/api/dags/${encodeURIComponent(id)}/pause?paused=true`, { method: "POST" });
+    if (op === "resume") return api(`/api/dags/${encodeURIComponent(id)}/pause?paused=false`, { method: "POST" });
+    if (op === "trigger") return api(`/api/dags/${encodeURIComponent(id)}/trigger`, { method: "POST" });
+    return api(`/api/dags/${encodeURIComponent(id)}`, { method: "DELETE" });
+  };
+  let ok = 0;
+  const fails = [];
+  for (const id of ids) {
+    try { await call(id); ok++; } catch (e) { fails.push(`${id}: ${e.message}`); }
+  }
+  toast(t("bulk_done", ok, ids.length), fails.length ? "warn" : "ok");
+  fails.slice(0, 3).forEach((f) => toast(f, "fail"));
+  bulkSel.clear();
+  loadDags();
+}
+// one health bar in place of the old stat cards: the worst failing DAG (if any)
+// plus the two global counters the cards used to carry. "去处理" jumps straight
+// to the failing run when the activity feed still has it, else to the DAG page.
+function healthBarHtml(stats, dags) {
+  const activity = overviewCache.activity || [];
+  const statsHtml = `<div class="ov-stats">
+    <span title="${esc(t("ov_running_tip"))}">${t("ov_running")} <b style="color:var(--run)">${stats.running_runs}</b></span>
+    <span>${t("ov_rate")} <b style="color:var(--ok)">${stats.success_rate.toFixed(0)}%</b>${hlp("hlp_rate", "r")}</span></div>`;
+  const failing = dags.filter((d) => d.latest_state === "failed" || d.latest_state === "timed_out");
+  if (!failing.length) {
+    const latest = activity.find((a) => a.started || a.finished); // a queued run has no timestamp yet — skip it
+    const sub = latest ? ` · ${t("ov_last_run", fmtDay(latest.started || latest.finished))}` : "";
+    return `<div class="ov-bar"><span class="ov-ic ok">✓</span>
+      <div class="ov-main"><span class="ov-t">${esc(t("ov_all_ok"))}</span><span class="ov-s">${esc(sub)}</span></div>${statsHtml}</div>`;
+  }
+  // find the failing run itself — the dag's NEWEST activity entry can be a
+  // successful backfill that finished later, so filter by state, not recency
+  const f = failing[0];
+  const last = activity.find((a) => a.dag_id === f.dag_id && (a.state === "failed" || a.state === "timed_out"));
+  const parts = [];
+  const when = last && fmtDay(last.started || last.finished);
+  if (when && when !== "—") parts.push(when);
+  if (failing.length > 1) parts.push(t("ov_fail_more", failing.length - 1));
+  else if (dags.length > failing.length) parts.push(t("ov_rest_ok", dags.length - failing.length));
+  return `<div class="ov-bar bad"><span class="ov-ic">!</span>
+    <div class="ov-main"><span class="ov-t">${esc(t("ov_fail_title", f.dag_id))}</span><span class="ov-s">${esc(parts.map((p) => " · " + p).join(""))}</span></div>
+    ${statsHtml}
+    <a id="ov-go" role="button" tabindex="0"${last ? ` data-run="${esc(last.run_id)}"` : ""} data-dag="${esc(f.dag_id)}">${esc(t("ov_go"))}</a></div>`;
 }
 // getting-started checklist, derived from REAL store data (auto-hides once all
 // three are done, or when dismissed). Never shown again after completion.
@@ -68,39 +156,14 @@ function gettingStartedHtml(dags) {
     <button class="icon" id="gs-x" aria-label="${t("cancel_word")}">✕</button></div>`;
 }
 
-// global recent-run timeline: the last ~24 runs across all live DAGs, drawn as
-// state-colored ticks positioned by their REAL start time on a shared axis.
-// Honest — a tick only where a run actually ran; hover = detail, click = open run.
-function activityStrip(activity) {
-  const items = (activity || []).filter((a) => a.started || a.finished);
-  if (!items.length) return `<div class="act-strip act-empty">${t("act_none")}</div>`;
-  const ms = (x) => (x ? new Date(x).getTime() : null);
-  const times = items.flatMap((a) => [ms(a.started), ms(a.finished)]).filter(Boolean);
-  const t0 = Math.min(...times), t1 = Math.max(Math.max(...times), Date.now());
-  const span = Math.max(1000, t1 - t0);
-  // time-sort ascending, then nudge apart so a burst of near-simultaneous runs
-  // stays individually hoverable/clickable instead of stacking into one pixel
-  // (honest for the common case: natural gaps exceed MINGAP and aren't touched).
-  const MINGAP = 1.4; // percent
-  const placed = items.map((a) => ({ a, s: ms(a.started) || ms(a.finished) })).sort((x, y) => x.s - y.s);
-  let prev = -Infinity;
-  placed.forEach((o) => { let l = (o.s - t0) / span * 100; if (l < prev + MINGAP) l = prev + MINGAP; o.left = Math.min(100, l); prev = o.left; });
-  const ticks = placed.map(({ a, left }) => {
-    const title = `${a.dag_id} · ${stateLabel(a.state)}${a.ms ? ` · ${fmtMs(a.ms)}` : ""} · ${fmt(a.started || a.finished)}`;
-    return `<span class="act-tick a-${esc(a.state)}" style="left:${left.toFixed(2)}%" data-run="${esc(a.run_id)}" role="button" tabindex="0" title="${esc(title)}" aria-label="${esc(title)}"></span>`;
-  }).join("");
-  return `<div class="section-h" style="margin:6px 0 8px">${t("act_recent")}</div>
-    <div class="act-strip"><div class="act-track">${ticks}</div>
-    <div class="act-axis"><span>${esc(fmt(new Date(t0).toISOString()))}</span><span>${t("act_now")}</span></div></div>`;
-}
-
 function rowHtml(d, scaleMs) {
   return `<tr class="row" data-id="${esc(d.dag_id)}">
-    <td><div class="toggle no-nav ${d.paused ? "" : "on"}" role="switch" tabindex="0" aria-checked="${!d.paused}" aria-label="${esc(d.dag_id)} — ${t(d.paused ? "btn_resume" : "btn_pause")}" data-id="${esc(d.dag_id)}" data-paused="${d.paused}"></div></td>
-    <td><div class="dag-name" role="button" tabindex="0" aria-label="${esc(d.dag_id)}">${esc(d.dag_id)} <span class="tag">${typeLabel(d.type)}</span></div><div class="dag-desc">${esc(descLabel(d.description))}</div></td>
-    <td>${badge(d.latest_state)}</td><td>${sparkline(d.sparkline, scaleMs)}</td>
-    <td class="mono muted">${esc(d.pool)}</td><td class="mono muted">${esc(nextLabel(d.next_schedule))}</td>
-    <td><button class="icon play no-nav" data-id="${esc(d.dag_id)}" title="${t("trigger")}">▶</button></td></tr>`;
+    ${isAdminRole() ? `<td><input type="checkbox" class="bulk-ck no-nav" data-id="${esc(d.dag_id)}" ${bulkSel.has(d.dag_id) ? "checked" : ""} aria-label="${esc(t("bulk_pick", d.dag_id))}"></td>` : ""}
+    <td><div class="toggle no-nav ${d.paused ? "" : "on"}" role="switch" tabindex="0" aria-checked="${!d.paused}" aria-label="${esc(d.dag_id)} — ${t(d.paused ? "btn_resume" : "btn_pause")}" title="${esc(t(d.paused ? "toggle_tip_off" : "toggle_tip_on"))}" data-id="${esc(d.dag_id)}" data-paused="${d.paused}"></div></td>
+    <td><div class="dag-title"><span class="dag-name" role="button" tabindex="0" aria-label="${esc(d.dag_id)}">${esc(d.dag_id)}</span><span class="tag">${typeLabel(d.type)}</span>${badge(d.latest_state, true)}</div><div class="dag-desc">${esc(descLabel(d.description))}</div></td>
+    <td>${sparkline(d.sparkline, scaleMs)}</td>
+    <td class="mono muted" style="font-size:12px">${esc(nextLabel(d.next_schedule))}</td>
+    <td style="text-align:right"><button class="icon play no-nav" style="white-space:nowrap" data-id="${esc(d.dag_id)}" title="${esc(t("run_now_tip"))}">▶ ${t("btn_run_word")}</button></td></tr>`;
 }
 
 // ============================================================================
@@ -214,7 +277,7 @@ async function showDag(id, tab) {
   setHash("#/dag/" + encodeURIComponent(id) + (tab && tab !== "runs" ? "/" + tab : ""));
   await flushPendingSaves(); // land any debounced edit before we refetch + replace D
   let dag, runs, allDags = [];
-  try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=25`)]); }
+  try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=${runsLimit()}`)]); }
   catch (e) { D = null; view = "dag"; activeDag = id; setNav("dags", id); main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   if (dag.deleted_at) { // archived DAG: do NOT open the editor (a save would silently revive it)
     D = null; view = "dag"; activeDag = id; setNav("dags", id);
@@ -394,6 +457,17 @@ function renderDagPageNovice() {
         <a style="font-size:12.5px" role="button" tabindex="0" data-nvlog="${esc(r.run_id)}">${esc(t("nv_view_log"))}</a>
       </div>`).join("") : `<div class="empty">${t("no_runs")}</div>`}
     </div>
+    <div class="section-h">${esc(t("nv_notify_h"))}</div>
+    <div class="nv-panel" style="padding:14px 17px">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="nv-notify-on" ${d.notify_url && (d.notify_on || []).includes("failure") ? "checked" : ""}>
+        <span style="font-size:13.5px;font-weight:600">${esc(t("nv_notify_toggle"))}</span>
+      </label>
+      <div id="nv-notify-body" style="margin-top:10px" ${d.notify_url ? "" : "hidden"}>
+        <input id="nv-notify-url" type="url" class="mono" placeholder="https://hooks.slack.com/services/…" value="${esc(d.notify_url || "")}" style="width:100%">
+        <div class="field-hint">${esc(t("nv_notify_hint"))}</div>
+      </div>
+    </div>
     <details class="adv-box" style="margin-top:22px">
       <summary>${esc(t("nv_adv_summary"))}</summary>
       <div style="margin-top:12px;font-size:13px;color:var(--muted);line-height:1.7">
@@ -403,6 +477,19 @@ function renderDagPageNovice() {
     </details>
   </div>`;
   $("back").onclick = loadDags;
+  // "notify me on failure": one switch + one URL, mapped onto the full
+  // notify_url/notify_on model (format auto-detected from the URL's host).
+  const nvNotifySync = () => {
+    const on = $("nv-notify-on").checked, url = $("nv-notify-url").value.trim();
+    $("nv-notify-body").hidden = !on && !url;
+    d.notify_url = on || url ? url : "";
+    d.notify_on = on && url ? ["failure"] : [];
+    if (url) d.notify_format = url.includes("hooks.slack.com") ? "slack" : url.includes("open.feishu.cn") ? "feishu" : url.includes("oapi.dingtalk.com") ? "dingtalk" : (d.notify_format || "");
+    if (!on && !url) d.notify_url = "";
+    saveDag();
+  };
+  $("nv-notify-on").onchange = () => { $("nv-notify-body").hidden = !$("nv-notify-on").checked; if ($("nv-notify-on").checked) $("nv-notify-url").focus(); nvNotifySync(); };
+  $("nv-notify-url").oninput = nvNotifySync;
   $("nv-trig").onclick = async () => {
     const b = $("nv-trig"); b.disabled = true;
     await flushPendingSaves(); // run the latest saved definition
@@ -504,7 +591,7 @@ function maybePollDagRuns() {
     if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs" || D.editKey) { stopDagRunsPoll(); return; }
     // carry the user's state filter, or the poll would silently reset it 3s in
     const fq = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
-    let runs; try { runs = await api(`/api/dags/${encodeURIComponent(dagID)}/runs?limit=25${fq}`); } catch (_) { return; }
+    let runs; try { runs = await api(`/api/dags/${encodeURIComponent(dagID)}/runs?limit=${runsLimit()}${fq}`); } catch (_) { return; }
     if (view !== "dag" || !D || D.dag.dag_id !== dagID || D.tab !== "runs") return;
     if (JSON.stringify(runs) === JSON.stringify(D.runs)) {
       if (!(runs || []).some((r) => runLive(r.state))) stopDagRunsPoll(); // settled
@@ -777,10 +864,32 @@ async function refreshDagRuns() {
   const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
   // With a filter active, D.runs is a filtered subset — rebuilding the whole
   // page would compute hero stats from it; re-render only the runs table.
-  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25${q}`)) || []; if (D.editKey || D.runFilter) renderDagRuns(); else renderDagPage(); } catch (_) {}
+  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; if (D.editKey || D.runFilter) renderDagRuns(); else renderDagPage(); } catch (_) {}
 }
 // Runs-tab state filter chips: label key -> API state list ("" = no filter).
 const RUN_FILTERS = [["rf_all", ""], ["rf_running", "queued,running"], ["rf_failed", "failed,cancelled,timed_out"], ["rf_success", "success"]];
+// runsLimit is the DAG page's run-history page size: 25 until "load more"
+// grows it (capped by the API's max page). Growing the limit — rather than
+// offset-appending — keeps the live poll's full refetch consistent.
+function runsLimit() { return (D && D.runsLimit) || 25; }
+
+// durationTrendHtml answers "is this DAG getting slower?" at a glance: one bar
+// per run in the CURRENT list (oldest→newest, honest wall-clock heights scaled
+// to the window max), colored by outcome. Click a bar to open that run.
+function durationTrendHtml(runs) {
+  const finished = runs.filter((r) => r.started_at && r.finished_at);
+  if (finished.length < 2) return ""; // one bar is not a trend
+  const items = [...runs].reverse(); // oldest → newest, like the sparkline
+  const ms = (r) => (r.started_at && r.finished_at) ? Math.max(0, new Date(r.finished_at) - new Date(r.started_at)) : 0;
+  const max = Math.max(1, ...items.map(ms));
+  const bars = items.map((r) => {
+    const m = ms(r), h = m > 0 ? Math.max(4, Math.round(m / max * 46)) : 3;
+    const title = `${r.logical_date} · ${stateLabel(r.state)}${m ? ` · ${fmtMs(m)}` : ""}`;
+    return `<i class="dt-bar dt-${esc(r.state)}" style="height:${h}px" role="button" tabindex="0" data-run="${esc(r.run_id)}" title="${esc(title)}" aria-label="${esc(title)}"></i>`;
+  }).join("");
+  return `<div class="dur-trend" title="${esc(t("dt_hint"))}"><div class="dt-bars">${bars}</div><span class="dt-max mono">${fmtMs(max)}</span></div>`;
+}
+
 function renderDagRuns() {
   const el = $("d-runs"); if (!el) return;
   const chips = `<div class="varchips" style="margin-bottom:8px">${RUN_FILTERS.map(([k, v]) =>
@@ -791,22 +900,31 @@ function renderDagRuns() {
       const go = async () => {
         D.runFilter = c.dataset.rf;
         const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
-        try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=25${q}`)) || []; } catch (_) {}
+        try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; } catch (_) {}
         renderDagRuns();
       };
       c.onclick = go; chipKeyActivate(c, go);
     });
   };
   if (!D.runs.length) { el.innerHTML = chips + `<div class="empty">${t("no_runs")}</div>`; wire(); return; }
-  el.innerHTML = chips + `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th><th style="width:56px"></th></tr></thead>
+  el.innerHTML = chips + durationTrendHtml(D.runs) + `<table class="tbl"><thead><tr><th>${t("th_logical")}</th><th>${t("th_state")}</th><th>${t("th_trig")}</th><th>${t("th_started")}</th><th>${t("th_dur")}</th><th style="width:56px"></th></tr></thead>
     <tbody>${D.runs.map((r) => {
     const act = !canAct ? "" : runLive(r.state)
       ? `<button class="icon rr-act no-nav" data-rr-cancel="${esc(r.run_id)}" title="${t("run_cancel")}" aria-label="${t("run_cancel")}">✕</button>`
       : (r.state === "failed" || r.state === "cancelled" || r.state === "timed_out")
         ? `<button class="icon rr-act no-nav" data-rr-retry="${esc(r.run_id)}" title="${t("run_retry")}" aria-label="${t("run_retry")}">↻</button>` : "";
     return `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td class="run-row-act">${act}</td></tr>`;
-  }).join("")}</tbody></table>`;
+  }).join("")}</tbody></table>${D.runs.length >= runsLimit() && runsLimit() < 200 ? `<div style="text-align:center;margin-top:10px"><button class="icon" id="runs-more">${t("runs_more")}</button></div>` : ""}`;
+  const more = $("runs-more");
+  if (more) more.onclick = async () => {
+    more.disabled = true;
+    D.runsLimit = Math.min(200, runsLimit() + 25);
+    const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
+    try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; } catch (_) {}
+    renderDagRuns();
+  };
   el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showRun(tr.dataset.run); });
+  el.querySelectorAll(".dt-bar[data-run]").forEach((b) => b.onclick = () => showRun(b.dataset.run));
   el.querySelectorAll("[data-rr-cancel]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); inlineCancelRun(b.dataset.rrCancel); });
   el.querySelectorAll("[data-rr-retry]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); b.disabled = true; inlineRetryRun(b.dataset.rrRetry); }); // disable to swallow a double-click (2nd → 409)
   wire();
@@ -1844,11 +1962,14 @@ function renderNovRunBanner(r, tis) {
       : r.state === "timed_out" ? t("nvr_timeout_title")
       : failIdx >= 0 ? t("nvr_failed_title", failIdx + 1, NVR.defs[failIdx].id) : t("nvr_failed_generic");
     const retried = failTi && failTi.try_number > 1 ? " " + t("nvr_retried", failTi.try_number - 1) : "";
+    const sub = r.state === "cancelled" ? t("nvr_cancelled_sub")
+      : r.state === "timed_out" ? t("nvr_timeout_sub")
+      : t("nvr_failed_sub") + retried;
     el.innerHTML = `<div class="nv-banner bad" style="margin:8px 0 20px">
       <span class="nv-big-ic bad">✕</span>
       <div class="nv-bmain">
         <div class="nv-bt">${esc(title)}</div>
-        <div class="nv-bs">${esc(t("nvr_failed_sub"))}${esc(retried)}</div>
+        <div class="nv-bs">${esc(sub)}</div>
       </div>
       <button class="primary" id="nvr-retry">${esc(r.state === "cancelled" ? t("nvr_rerun2") : t("nvr_rerun"))}</button>
       <button id="nvr-edit">${esc(t("nvr_edit_steps"))}</button>
@@ -2092,11 +2213,13 @@ function showLog(tiID, taskID) {
   closeLog();
   const wrap = $("logwrap");
   if (wrap) wrap.dataset.opened = "1";
+  const multi = runDataCache && (runDataCache.tasks || []).length > 1;
   $("logwrap").innerHTML = `
     <div class="run-log-panel">
     <div class="run-log-head">
       <div>${t("log_word")} · <span class="mono">${esc(taskID)}</span> <span class="live" id="live"></span></div>
-      <a id="log-dl" href="/api/tasks/${tiID}/log?download=1" download="${esc(taskID)}.log">${t("log_download")}</a>
+      <div style="display:flex;gap:14px">${multi ? `<a id="log-all" role="button" tabindex="0">${t("log_all")}</a>` : ""}
+      <a id="log-dl" href="/api/tasks/${tiID}/log?download=1" download="${esc(taskID)}.log">${t("log_download")}</a></div>
     </div>
     <div class="log-toolbar">
       <input id="log-find" placeholder="${t("log_find_ph")}" style="max-width:220px">
@@ -2125,6 +2248,44 @@ function showLog(tiID, taskID) {
   };
   logES.addEventListener("done", () => { closeLog(); $("live").textContent = ""; });
   logES.onerror = () => { closeLog(); $("live").textContent = ""; };
+  const all = $("log-all"); if (all) all.onclick = () => showAllLogs();
+}
+
+// showAllLogs replaces the single-task stream with the whole run interleaved:
+// one SSE per task instance (arrival order), each line prefixed with a
+// stably-colored [task_id] so parallel branches read apart. Clicking a task's
+// 日志 button returns to the focused single-task view.
+function showAllLogs() {
+  const data = runDataCache; if (!data) return;
+  closeLog();
+  const tasks = (data.tasks || []).filter((tk) => tk.id);
+  $("logwrap").innerHTML = `
+    <div class="run-log-panel">
+    <div class="run-log-head">
+      <div>${t("log_word")} · ${esc(t("log_all"))} <span class="muted">(${tasks.length})</span> <span class="live" id="live"><span class="p"></span>${t("live")}</span></div>
+    </div>
+    <div class="logbox" id="logbox"></div></div>`;
+  const box = $("logbox");
+  const colors = ["#7aa2ff", "#3ecf8e", "#e0a93a", "#d99a87", "#8a78ff", "#5b9bf0", "#f0938a", "#6bcf9e"];
+  let lineCount = 0, open = tasks.length;
+  tasks.forEach((tk, i) => {
+    const es = new EventSource(`/api/tasks/${tk.id}/log/stream`);
+    logESAll.push(es);
+    es.onmessage = (e) => {
+      if (++lineCount > LOG_CAP) { if (lineCount === LOG_CAP + 1) box.appendChild(document.createTextNode("\n… (capped)")); return; }
+      const line = document.createElement("div");
+      const tag = document.createElement("span");
+      tag.style.color = colors[i % colors.length];
+      tag.textContent = `[${tk.task_id}] `;
+      line.appendChild(tag);
+      line.appendChild(document.createTextNode(e.data));
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    };
+    const settle = () => { es.close(); if (--open <= 0) { const l = $("live"); if (l) l.textContent = ""; } };
+    es.addEventListener("done", settle);
+    es.onerror = settle;
+  });
 }
 
 // ---- pools ----
@@ -2151,17 +2312,41 @@ function auditActionLabel(a) { const v = t("act_" + a); return v === "act_" + a 
 function auditRows(entries) {
   return entries.map((e) => `<tr><td style="font-size:12.5px">${fmt(e.ts)}</td><td class="mono">${esc(e.actor)}</td><td><span class="tag">${esc(auditActionLabel(e.action))}</span></td><td class="mono">${esc(e.target || "—")}${e.detail ? ` <span class="muted">${esc(e.detail)}</span>` : ""}</td></tr>`).join("");
 }
+let AUD = null; // audit page state: fetched entries + client-side filters
 async function showAudit() {
   view = "audit"; activeDag = null; closeLog(); stopDagRunsPoll(); setNav("audit"); setHash("#/audit");
   let entries = [];
   try { entries = await api("/api/audit?limit=200"); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
-  main.innerHTML = `
-    <div class="page-h"><h1>${t("nav_audit")}</h1><span class="num">${entries.length}</span></div>
-    <div class="page-sub">${t("audit_sub")}</div>
-    ${entries.length
-      ? `<table class="tbl"><thead><tr><th style="width:180px">${t("au_time")}</th><th>${t("au_actor")}</th><th>${t("au_action")}</th><th>${t("au_target")}</th></tr></thead><tbody>${auditRows(entries)}</tbody></table>`
-      : `<div class="empty">${t("audit_empty")}</div>`}`;
+  AUD = { entries, actor: "", action: "", more: entries.length >= 200 };
+  renderAudit();
   finishRouteRender();
+}
+function renderAudit() {
+  if (view !== "audit" || !AUD) return;
+  const shown = AUD.entries.filter((e) => (!AUD.actor || e.actor === AUD.actor) && (!AUD.action || e.action === AUD.action));
+  const opts = (vals, sel, all) => `<option value="">${esc(all)}</option>` + [...new Set(vals)].sort().map((v) => `<option value="${esc(v)}" ${sel === v ? "selected" : ""}>${esc(v)}</option>`).join("");
+  main.innerHTML = `
+    <div class="page-h"><h1>${t("nav_audit")}</h1><span class="num">${shown.length}</span>
+      <div class="filters" style="display:flex;gap:8px">
+        <select id="au-actor" aria-label="${esc(t("au_f_actor"))}" style="max-width:170px">${opts(AUD.entries.map((e) => e.actor), AUD.actor, t("au_f_actor"))}</select>
+        <select id="au-action" aria-label="${esc(t("au_f_action"))}" style="max-width:170px">${opts(AUD.entries.map((e) => e.action), AUD.action, t("au_f_action"))}</select>
+      </div></div>
+    <div class="page-sub">${t("audit_sub")}</div>
+    ${shown.length
+      ? `<table class="tbl"><thead><tr><th style="width:180px">${t("au_time")}</th><th>${t("au_actor")}</th><th>${t("au_action")}</th><th>${t("au_target")}</th></tr></thead><tbody>${auditRows(shown)}</tbody></table>`
+      : `<div class="empty">${t("audit_empty")}</div>`}
+    ${AUD.more ? `<div style="text-align:center;margin-top:10px"><button class="icon" id="au-more">${t("audit_more")}</button></div>` : ""}`;
+  $("au-actor").onchange = () => { AUD.actor = $("au-actor").value; renderAudit(); };
+  $("au-action").onchange = () => { AUD.action = $("au-action").value; renderAudit(); };
+  const more = $("au-more");
+  if (more) more.onclick = async () => {
+    more.disabled = true;
+    let page = [];
+    try { page = await api(`/api/audit?limit=200&offset=${AUD.entries.length}`); } catch (_) {}
+    AUD.entries = AUD.entries.concat(page || []);
+    AUD.more = (page || []).length >= 200;
+    renderAudit();
+  };
 }
 
 // ---- API & integration (interactive docs + API tokens) ----
@@ -2173,7 +2358,7 @@ async function showApi() {
   renderApi();
   finishRouteRender();
 }
-function roleLabel(role) { return role === "viewer" ? t("role_viewer_ro") : t("role_admin_full"); }
+function roleLabel(role) { return role === "viewer" ? t("role_viewer_ro") : role === "operator" ? t("role_operator") : t("role_admin_full"); }
 function renderApi() {
   if (view !== "api" || !TOKENS) return;
   const admin = !authUser || authUser.role === "admin";
@@ -2207,7 +2392,7 @@ function renderApi() {
       <tbody>${rows}</tbody></table>` : `<div class="empty">${t("tok_none")}</div>`}
     ${admin ? `<div class="toolbar" style="margin-top:16px">
       <input id="tok-name" class="mono" placeholder="${t("tok_name_ph")}" style="width:220px" maxlength="60">
-      <select id="tok-role"><option value="admin">${t("role_admin_full")}</option><option value="viewer">${t("role_viewer_ro")}</option></select>
+      <select id="tok-role"><option value="admin">${t("role_admin_full")}</option><option value="operator">${t("role_operator")}</option><option value="viewer">${t("role_viewer_ro")}</option></select>
       <button class="primary" id="tok-add">${t("tok_create")}</button>
     </div>` : ""}`;
   if (admin) {

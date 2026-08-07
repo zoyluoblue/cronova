@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ import (
 // also prevents path traversal: dag_id is used as a filename when a DAG is
 // created via the API (see scheduler.CreateDAG).
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// eventKeyPattern additionally allows ":" so external event keys can namespace
+// (e.g. "warehouse:orders_ready") without loosening dag/task id rules.
+var eventKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
 
 const (
 	MaxDefinitionBytes = 1 << 20
@@ -50,9 +55,15 @@ type taskYAML struct {
 	Timeout       int      `yaml:"timeout"`         // seconds
 	SLA           int      `yaml:"sla"`             // seconds from run start (soft alert)
 	TriggerRule   string   `yaml:"trigger_rule"`
-	Conn          string   `yaml:"conn"`    // connection id for type: sql
-	Project       string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
-	HTTP          *struct {
+	When          string   `yaml:"when"` // runtime condition template; falsy render => skipped
+	// Foreach fans this task out into one task per item at PARSE time: task id
+	// becomes <id>_<index>, {{ item }} / {{ item_index }} in command/when are
+	// replaced per shard, and downstream deps on <id> depend on every shard.
+	// Each shard keeps its own retries, log, and state.
+	Foreach []string `yaml:"foreach"`
+	Conn    string   `yaml:"conn"`    // connection id for type: sql
+	Project string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
+	HTTP    *struct {
 		Method         string            `yaml:"method"`
 		URL            string            `yaml:"url"`
 		Headers        map[string]string `yaml:"headers"`
@@ -62,11 +73,18 @@ type taskYAML struct {
 }
 
 type dagYAML struct {
-	DagID             string     `yaml:"dag_id"`
-	Schedule          string     `yaml:"schedule"`
-	StartDate         string     `yaml:"start_date"`
-	Catchup           bool       `yaml:"catchup"`
-	MaxActiveRuns     int        `yaml:"max_active_runs"`
+	DagID    string `yaml:"dag_id"`
+	Schedule string `yaml:"schedule"`
+	// Timezone is the IANA zone the cron fields (and a date-only start_date)
+	// are evaluated in; empty = UTC (the historic behavior).
+	Timezone      string `yaml:"timezone"`
+	StartDate     string `yaml:"start_date"`
+	Catchup       bool   `yaml:"catchup"`
+	MaxActiveRuns int    `yaml:"max_active_runs"`
+	// MaxActiveTasks caps this DAG's concurrently queued/running TASKS across
+	// all of its runs (0 = unlimited). Complements pools: this is a per-DAG
+	// budget, pools are a shared global one.
+	MaxActiveTasks    int        `yaml:"max_active_tasks"`
 	DefaultRetries    int        `yaml:"default_retries"`
 	DefaultRetryDelay int        `yaml:"default_retry_delay"`
 	SLA               int        `yaml:"sla"`            // run soft deadline, seconds from start
@@ -75,7 +93,10 @@ type dagYAML struct {
 	TriggerAfter      []struct {
 		DagID string `yaml:"dag_id"`
 	} `yaml:"trigger_after"`
-	Notify struct {
+	// TriggerOnEvent subscribes this DAG to external event keys (published via
+	// POST /api/events); each matching event creates one event-triggered run.
+	TriggerOnEvent []string `yaml:"trigger_on_event"`
+	Notify         struct {
 		URL    string   `yaml:"url"`
 		On     []string `yaml:"on"`     // "failure", "success"
 		Format string   `yaml:"format"` // ""/raw | slack | feishu | dingtalk
@@ -91,6 +112,16 @@ var cronParser = cron.NewParser(
 // is an error here; callers should check for "" (manual/event-only) first.
 func ParseSchedule(spec string) (cron.Schedule, error) {
 	return cronParser.Parse(spec)
+}
+
+// ParseScheduleIn parses a schedule evaluated in the named IANA timezone
+// (e.g. "Asia/Shanghai"): cron fields mean wall-clock time THERE, DST included.
+// tz "" keeps the historic UTC behavior; @every intervals are tz-independent.
+func ParseScheduleIn(spec, tz string) (cron.Schedule, error) {
+	if tz == "" || strings.HasPrefix(spec, "@") || strings.HasPrefix(spec, "CRON_TZ=") || strings.HasPrefix(spec, "TZ=") {
+		return cronParser.Parse(spec)
+	}
+	return cronParser.Parse("CRON_TZ=" + tz + " " + spec)
 }
 
 // Parse parses and validates a DAG definition. The raw bytes are retained in
@@ -124,12 +155,24 @@ func Parse(raw []byte) (*model.DAG, error) {
 	if !idPattern.MatchString(y.DagID) {
 		return nil, fmt.Errorf("invalid dag_id %q: use letters, digits, '_', '-', '.'", y.DagID)
 	}
+	// timezone: cron fields (and a date-only start_date) mean wall-clock time
+	// in this IANA zone; empty keeps the historic UTC behavior. Validated here
+	// so a bad zone fails at definition time, not silently at schedule time.
+	loc := time.UTC
+	y.Timezone = strings.TrimSpace(y.Timezone)
+	if y.Timezone != "" {
+		l, err := time.LoadLocation(y.Timezone)
+		if err != nil {
+			return nil, fmt.Errorf("dag %q: invalid timezone %q (use an IANA name like Asia/Shanghai): %w", y.DagID, y.Timezone, err)
+		}
+		loc = l
+	}
 	// A DAG may legitimately have zero tasks: the builder creates a "shell" DAG
 	// first, then tasks are added incrementally. A 0-task DAG is valid to store
 	// but is never scheduled or triggered (gated in the scheduler) until it has
 	// at least one task.
 	if y.Schedule != "" {
-		if _, err := ParseSchedule(y.Schedule); err != nil {
+		if _, err := ParseScheduleIn(y.Schedule, y.Timezone); err != nil {
 			return nil, fmt.Errorf("dag %q: invalid schedule %q: %w", y.DagID, y.Schedule, err)
 		}
 	}
@@ -141,8 +184,11 @@ func Parse(raw []byte) (*model.DAG, error) {
 	if maxActive == 0 {
 		maxActive = 1
 	}
+	if y.MaxActiveTasks < 0 || y.MaxActiveTasks > MaxTasks {
+		return nil, fmt.Errorf("dag %q: max_active_tasks must be between 0 and %d", y.DagID, MaxTasks)
+	}
 
-	startDate, err := parseStartDate(y.StartDate)
+	startDate, err := parseStartDate(y.StartDate, loc)
 	if err != nil {
 		return nil, fmt.Errorf("dag %q: %w", y.DagID, err)
 	}
@@ -165,9 +211,11 @@ func Parse(raw []byte) (*model.DAG, error) {
 	d := &model.DAG{
 		DagID:          y.DagID,
 		Schedule:       y.Schedule,
+		Timezone:       y.Timezone,
 		StartDate:      startDate,
 		Catchup:        y.Catchup,
 		MaxActiveRuns:  maxActive,
+		MaxActiveTasks: y.MaxActiveTasks,
 		DefaultRetries: y.DefaultRetries,
 		SLA:            y.SLA,
 		DagrunTimeout:  y.DagrunTimeout,
@@ -185,6 +233,24 @@ func Parse(raw []byte) (*model.DAG, error) {
 			seenTriggers[ta.DagID] = true
 			d.TriggerAfter = append(d.TriggerAfter, ta.DagID)
 		}
+	}
+	if len(y.TriggerOnEvent) > MaxTasks {
+		return nil, fmt.Errorf("dag %q: trigger_on_event count exceeds %d", y.DagID, MaxTasks)
+	}
+	seenEvents := map[string]bool{}
+	for _, ek := range y.TriggerOnEvent {
+		ek = strings.TrimSpace(ek)
+		if ek == "" {
+			continue
+		}
+		if len(ek) > maxIdentifierBytes || !eventKeyPattern.MatchString(ek) {
+			return nil, fmt.Errorf("dag %q: invalid trigger_on_event key %q (letters/digits/_.:- only)", y.DagID, ek)
+		}
+		if seenEvents[ek] {
+			return nil, fmt.Errorf("dag %q: duplicate trigger_on_event key %q", y.DagID, ek)
+		}
+		seenEvents[ek] = true
+		d.TriggerOnEvent = append(d.TriggerOnEvent, ek)
 	}
 	// notify: an outbound webhook fired when a run finishes in a listed state.
 	d.NotifyURL = strings.TrimSpace(y.Notify.URL)
@@ -211,6 +277,17 @@ func Parse(raw []byte) (*model.DAG, error) {
 		d.NotifyFormat = y.Notify.Format
 	default:
 		return nil, fmt.Errorf("dag %q: invalid notify.format %q (raw, slack, feishu, or dingtalk)", y.DagID, y.Notify.Format)
+	}
+
+	// foreach fan-out expands at PARSE time, so the scheduler's state machine
+	// sees N ordinary tasks — per-shard retries/logs/state come for free and no
+	// runtime machinery is added. Items are static YAML strings (dynamic lists
+	// are out of scope by design; see docs). Downstream deps on the original id
+	// are rewritten to depend on every shard.
+	if expanded, err := expandForeach(y.DagID, y.Tasks); err != nil {
+		return nil, err
+	} else {
+		y.Tasks = expanded
 	}
 
 	seen := make(map[string]bool, len(y.Tasks))
@@ -261,6 +338,7 @@ func Parse(raw []byte) (*model.DAG, error) {
 			Conn:        strings.TrimSpace(t.Conn),
 			Project:     strings.TrimSpace(t.Project),
 			TriggerRule: orDefault(t.TriggerRule, model.RuleAllSuccess),
+			When:        strings.TrimSpace(t.When),
 		}
 		if !model.ValidTriggerRule(task.TriggerRule) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid trigger_rule %q", y.DagID, t.ID, t.TriggerRule)
@@ -346,14 +424,22 @@ func Parse(raw []byte) (*model.DAG, error) {
 	return d, nil
 }
 
-func parseStartDate(s string) (time.Time, error) {
+func parseStartDate(s string, loc *time.Location) (time.Time, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
 	if s == "" {
 		return time.Now().UTC().Truncate(24 * time.Hour), nil
 	}
-	for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02 15:04:05"} {
-		if t, err := time.Parse(layout, s); err == nil {
+	// Layouts without an explicit offset are interpreted in the DAG's timezone
+	// (UTC when none is set), so "2026-01-01" means that date THERE.
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
 			return t.UTC(), nil
 		}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
 	}
 	return time.Time{}, fmt.Errorf("invalid start_date %q", s)
 }
@@ -405,4 +491,70 @@ func detectCycle(tasks []model.Task) error {
 		}
 	}
 	return nil
+}
+
+// itemRe / itemIndexRe substitute the per-shard placeholders in a foreach
+// task's command and when-condition.
+var (
+	itemRe      = regexp.MustCompile(`\{\{\s*item\s*\}\}`)
+	itemIndexRe = regexp.MustCompile(`\{\{\s*item_index\s*\}\}`)
+)
+
+// expandForeach turns each task carrying a foreach list into one task per item
+// (id `<id>_<index>`), and rewrites every dependency on the original id into
+// dependencies on all shards. Tasks without foreach pass through unchanged.
+func expandForeach(dagID string, tasks []taskYAML) ([]taskYAML, error) {
+	hasAny := false
+	for _, t := range tasks {
+		if len(t.Foreach) > 0 {
+			hasAny = true
+			break
+		}
+	}
+	if !hasAny {
+		return tasks, nil
+	}
+	out := make([]taskYAML, 0, len(tasks))
+	shards := map[string][]string{}
+	for _, t := range tasks {
+		if len(t.Foreach) == 0 {
+			out = append(out, t)
+			continue
+		}
+		if t.ID == "" {
+			return nil, fmt.Errorf("dag %q: foreach task needs an id", dagID)
+		}
+		if len(t.Foreach) > MaxTasks {
+			return nil, fmt.Errorf("dag %q: task %q foreach expands to more than %d shards", dagID, t.ID, MaxTasks)
+		}
+		for i, item := range t.Foreach {
+			c := t
+			c.Foreach = nil
+			c.ID = fmt.Sprintf("%s_%d", t.ID, i)
+			idx := strconv.Itoa(i)
+			c.Command = itemIndexRe.ReplaceAllString(itemRe.ReplaceAllString(t.Command, item), idx)
+			c.When = itemIndexRe.ReplaceAllString(itemRe.ReplaceAllString(t.When, item), idx)
+			c.Deps = append([]string(nil), t.Deps...)
+			shards[t.ID] = append(shards[t.ID], c.ID)
+			out = append(out, c)
+		}
+	}
+	if len(out) > MaxTasks {
+		return nil, fmt.Errorf("dag %q: foreach expansion exceeds %d tasks", dagID, MaxTasks)
+	}
+	for i := range out {
+		if len(out[i].Deps) == 0 {
+			continue
+		}
+		var nd []string
+		for _, dep := range out[i].Deps {
+			if sh, ok := shards[dep]; ok {
+				nd = append(nd, sh...)
+			} else {
+				nd = append(nd, dep)
+			}
+		}
+		out[i].Deps = nd
+	}
+	return out, nil
 }

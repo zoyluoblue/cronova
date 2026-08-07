@@ -24,6 +24,9 @@ type Config struct {
 	Tick       string `yaml:"tick"`
 	Executor   string `yaml:"executor"`
 	HTTP       string `yaml:"http"`
+	// Reload re-scans the dags directory for changed YAML this often (GitOps:
+	// a git pull goes live without restart). "0"/empty = off.
+	Reload string `yaml:"reload"`
 	// AllowUnauthenticatedRemote is an explicit escape hatch for binding the
 	// unauthenticated console to a non-loopback address.
 	AllowUnauthenticatedRemote bool `yaml:"allow_unauthenticated_remote"`
@@ -39,7 +42,20 @@ type Config struct {
 	// KeyFile holds the hex key that encrypts connection passwords at rest.
 	// Auto-generated (0600) on first serve. "none" disables encryption.
 	KeyFile string `yaml:"key_file"`
-	Auth    struct {
+	// Notify is the instance-wide default webhook: DAGs without their own
+	// notify_url alert here (failure-only unless they set notify_on), and
+	// scheduler-level events (executor down, retention failures) post here too.
+	Notify struct {
+		URL    string `yaml:"url"`
+		Format string `yaml:"format"` // ""/raw | slack | feishu | dingtalk
+	} `yaml:"notify"`
+	// Log controls the process-wide logger: level debug|info|warn|error,
+	// format text|json (json for Loki/ELK ingestion).
+	Log struct {
+		Level  string `yaml:"level"`
+		Format string `yaml:"format"`
+	} `yaml:"log"`
+	Auth struct {
 		Enabled        bool     `yaml:"enabled"`
 		SessionTTL     string   `yaml:"session_ttl"`
 		SecureCookie   bool     `yaml:"secure_cookie"`
@@ -101,6 +117,7 @@ func applyEnv(c *Config) {
 	env("CRONOVA_PROJECTS", &c.Projects)
 	env("CRONOVA_WORKSPACES", &c.Workspaces)
 	env("CRONOVA_TICK", &c.Tick)
+	env("CRONOVA_RELOAD", &c.Reload)
 	env("CRONOVA_EXECUTOR", &c.Executor)
 	env("CRONOVA_HTTP", &c.HTTP)
 	if v, ok := os.LookupEnv("CRONOVA_ALLOW_UNAUTHENTICATED_REMOTE"); ok {
@@ -111,6 +128,10 @@ func applyEnv(c *Config) {
 	env("CRONOVA_RETENTION", &c.Retention)
 	env("CRONOVA_AUDIT_RETENTION", &c.AuditRetention)
 	env("CRONOVA_KEY_FILE", &c.KeyFile)
+	env("CRONOVA_NOTIFY_URL", &c.Notify.URL)
+	env("CRONOVA_NOTIFY_FORMAT", &c.Notify.Format)
+	env("CRONOVA_LOG_LEVEL", &c.Log.Level)
+	env("CRONOVA_LOG_FORMAT", &c.Log.Format)
 	envInt := func(key string, dst *int) {
 		if v, ok := os.LookupEnv(key); ok {
 			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
@@ -183,6 +204,9 @@ func overlaySetFlags(c *Config, fs *flag.FlagSet, vals map[string]any) {
 	str("http", &c.HTTP)
 	if set["tick"] {
 		c.Tick = vals["tick"].(*time.Duration).String()
+	}
+	if set["reload"] {
+		c.Reload = vals["reload"].(*time.Duration).String()
 	}
 	if set["retention"] {
 		c.Retention = vals["retention"].(*time.Duration).String()

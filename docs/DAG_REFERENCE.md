@@ -42,10 +42,13 @@ notify:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `dag_id` | string | — (required) | Unique identifier for the DAG. |
-| `schedule` | string | `""` (manual) | Cron expression (`"0 2 * * *"`) **or** an interval (`"@every 30s"`). Empty = the DAG runs only on manual trigger or `trigger_after`. |
+| `schedule` | string | `""` (manual) | Cron expression (`"0 2 * * *"`) **or** an interval (`"@every 30s"`). Empty = the DAG runs only on manual trigger, `trigger_after`, or `trigger_on_event`. |
+| `timezone` | string | `""` (UTC) | IANA zone (e.g. `Asia/Shanghai`) the cron fields — and a date-only `start_date` — are evaluated in, DST included. |
 | `start_date` | date string | — | Earliest logical date the DAG is scheduled for; anchors catchup/backfill. |
 | `catchup` | bool | `false` | Backfill missed periods between `start_date` and now. Backfilled runs are throttled so they never flood. |
 | `max_active_runs` | int | `1` | Maximum concurrent runs of this DAG (0 is treated as 1). |
+| `max_active_tasks` | int | `0` (unlimited) | Cap on this DAG's concurrently queued/running **tasks** across all of its runs — a per-DAG budget complementing the global pools. |
+| `trigger_on_event` | list of strings | — | External event keys this DAG subscribes to: `POST /api/events {"key": …}` creates one event-triggered run per subscriber (idempotent per key). The event payload becomes the run's params. |
 | `default_retries` | int | `0` | Retry count applied to tasks that don't set their own `retries`. |
 | `default_retry_delay` | int (seconds) | `0` | Retry delay applied to tasks that don't set their own `retry_delay`. |
 | `sla` | int (seconds) | `0` | Run-level soft deadline, measured from run start. A breach raises an alert; it does not cancel the run. |
@@ -92,6 +95,8 @@ Each entry under `tasks:` describes one task.
 | `timeout` | int (seconds) | `0` | Per-attempt execution timeout; on breach the whole process group is killed. `0` = none. |
 | `sla` | int (seconds) | `0` | Task soft deadline from run start; breach alerts only. |
 | `trigger_rule` | string | `all_success` | When to run relative to upstream states. See [Trigger rules](#trigger-rules). |
+| `when` | string | — | Runtime condition template (e.g. `"{{ params.env }}"` or `"{{ ti.check.proceed }}"`), evaluated once the task is otherwise ready. A falsy render (`""`, `false`, `0`, `no`, or an unresolved placeholder) marks the task **skipped**. |
+| `foreach` | list of strings | — | Fans the task out into one task per item at definition time: ids become `<id>_<index>`, `{{ item }}` / `{{ item_index }}` are substituted in `command`/`when`, and downstream `deps` on the original id cover every shard. Each shard keeps its own retries, log, and state. |
 | `conn` | string | — | Connection id for a `sql` task (selects driver + builds the DSN). |
 | `project` | string | — | Name of an uploaded project directory to stage as the working directory (shell tasks). See [Getting Started → Projects](GETTING_STARTED.md). |
 | `http` | object | — | HTTP request spec for `http` tasks (see below). |
@@ -171,7 +176,36 @@ Plus UI-managed references, resolved server-side (secrets never enter the blanke
 
 - `{{ var.KEY }}` — a shared [variable](AGENTS.md).
 - `{{ conn.ID.FIELD }}` — a connection field: `host`, `port`, `login` (alias `user`), `password`, `type`, or an extra JSON field as `extra.KEY`.
-- `{{ params.KEY }}` — a manual-trigger parameter (also injected as `CRONOVA_PARAM_<KEY>`).
+- `{{ params.KEY }}` — a manual-trigger parameter (also injected as `CRONOVA_PARAM_<KEY>`). Event-triggered runs receive the event payload as params plus `{{ params.event_key }}`.
+- `{{ ti.TASK_ID.KEY }}` — a field of an upstream task's emitted output (this run only).
+
+### Passing data between tasks
+
+A task can hand small values (row counts, generated file paths, ids) to its
+downstream tasks by writing a **flat JSON string map** to the file named in
+`$CRONOVA_OUTPUT` (up to 64 KB):
+
+```yaml
+tasks:
+  - id: produce
+    command: 'echo "{\"rows\":\"1234\"}" > "$CRONOVA_OUTPUT"'
+  - id: consume
+    command: 'echo upstream wrote {{ ti.produce.rows }} rows'
+    deps: [produce]
+```
+
+The output is collected when the task finishes successfully and stored per
+(run, task); trigger rules guarantee the upstream finished before a downstream
+referencing it is dispatched. This is metadata passing, not a data channel —
+move real datasets through external storage.
+
+### Self-skipping tasks
+
+A task that exits with code **99** is recorded as `skipped` instead of failed —
+the shell-level way to say "nothing to do here today". Combine with downstream
+`trigger_rule: none_failed` (skip passes through) or the default `all_success`
+(skip blocks) to shape what happens next; `when:` (see task fields) is the
+declarative alternative evaluated before the task even starts.
 
 In the console task editor these are inserted as click/drag **pills** — you don't type the `{{ }}`.
 

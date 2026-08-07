@@ -37,14 +37,23 @@ let coachDag = null;
 // ---- i18n ----
 const DICT = {
   zh: {
-    workspace: "工作区", newdag: "+ 新建 DAG", search_ph: "筛选 DAG…",
+    workspace: "工作区", nav_dags: "工作流", newdag: "+ 新建工作流",
     f_all: "全部", f_running: "运行中", f_failed: "失败", f_paused: "已暂停",
-    dags_sub: "所有工作流定义 · 开关 · 调度 · 查看最近运行",
-    c_active: "活跃 DAG", c_running: "运行中 run", c_rate: "近期成功率", c_failed: "失败 DAG",
-    c_active_s: (n) => `共 ${n} 个定义`, c_running_s: "across all pools", c_rate_s: "最近运行", c_failed_s: "最近一次失败",
-    h_dag: "DAG", h_last: "最近运行", h_spark: "最近 14 次", h_pool: "POOL", h_next: "下次调度", h_act: "操作",
-    no_match: "没有匹配的 DAG", no_dags_title: "还没有 DAG", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
-    back_dags: "← DAGs", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
+    dags_sub: "点击名称查看运行记录和结构；用左侧开关暂停 / 恢复自动调度。",
+    ov_fail_title: (id) => `${id} 最近一次运行失败`, ov_fail_more: (n) => `另有 ${n} 个工作流也在失败`,
+    ov_rest_ok: (n) => `其余 ${n} 个工作流一切正常`, ov_all_ok: "所有工作流运行正常", ov_last_run: (w) => `最近一次运行 ${w}`,
+    ov_running: "运行中", ov_running_tip: "正在执行的运行数", ov_rate: "近期成功率", ov_go: "去处理 →",
+    hlp_dag: '<b>工作流（DAG）</b>= 一组按依赖顺序自动执行的任务，加上「什么时候跑」的调度规则。<span class="eg">例如：每天 2 点，先取数 → 再加工 → 最后写入。</span>',
+    hlp_toggle: "<b>调度开关。</b>关掉后不再自动运行（手动触发仍可用），历史全部保留，随时可恢复。",
+    hlp_spark: '每一格是一次运行：<b class="ok">绿</b>=成功、<b class="bad">红</b>=失败、<b class="run">蓝</b>=进行中，越高耗时越长。悬停看详情。',
+    hlp_next: "按调度规则算出的下一次自动运行时间。「就绪」= 正在等一个空闲槽位。",
+    hlp_rate: "最近运行中成功的比例（每个工作流最多统计 14 次，跳过和取消不计入）。",
+    toggle_tip_on: "已启用 —— 点击暂停自动调度", toggle_tip_off: "已暂停 —— 点击恢复自动调度",
+    btn_run_word: "运行", run_now_tip: "立即手动运行一次，不影响原有调度",
+    day_today: "今天", day_yesterday: "昨天",
+    h_dag: "工作流", h_spark: "最近 14 次", h_pool: "POOL", h_next: "下次运行",
+    no_match: "没有匹配的工作流", no_match_filter: "这个筛选下没有工作流", no_dags_title: "还没有工作流", no_dags_sub: "创建第一个工作流，开始调度任务。", trigger: "触发", manual_trigger: "手动触发",
+    back_dags: "← 工作流", run_word: "run", sub_manual: "仅手动触发", max_active: "最大并发",
     run_progress: "进度",
     sec_graph: "依赖图", sec_structure: "结构", sec_runs: "运行历史", sec_instances: "任务实例",
     g_timeline: "时间线", g_never_ran: "未运行", run_no_tasks: "该运行暂无任务实例", run_done_ok: "运行成功完成", run_done_fail: "运行失败", run_done_timeout: "运行超时",
@@ -54,9 +63,8 @@ const DICT = {
     mark_run_title: (id) => `标记运行“${id}”为?`, mark_run_body: "覆盖已结束运行的最终状态(不改动任务)。标记成功会触发下游 DAG。",
     confirm_cancel_title: (id) => `取消运行“${id}”?`, confirm_cancel_body: "正在运行的任务会被终止。", th_act: "操作",
     confirm_retry_title: (id) => `重跑“${id}”?`, confirm_retry_body: "该任务及其所有下游任务会被重置并重新运行。",
-    copied: "已复制", copy_fail: "复制失败，请手动选择文本", copy_hint: "点击复制", search_ph: "跳转 / 筛选 DAG…", jump_open: "打开", jump_none: "无匹配 DAG",
+    copied: "已复制", copy_fail: "复制失败，请手动选择文本", copy_hint: "点击复制", search_ph: "搜索工作流…", jump_open: "打开", jump_none: "无匹配工作流",
     gz_in: "放大", gz_out: "缩小", gz_fit: "适应视图", gz_hint: "拖拽平移 · Ctrl/⌘+滚轮缩放",
-    act_recent: "近期活动", act_now: "现在", act_none: "还没有运行记录",
     login_title: "登录 cronova", login_sub: "请输入你的账户凭据", login_user: "用户名", login_pass: "密码", login_btn: "登录", login_bad: "用户名或密码错误", logout: "登出", sess_expired: "会话已过期，请重新登录", role_admin: "管理员", role_viewer: "只读",
     tab_runs: "运行", tab_structure: "结构", tab_settings: "设置",
     dh_last: "上次运行", dh_next: "调度", dh_rate: "近期成功率", dh_never: "还没有运行", dh_norate: "—",
@@ -84,7 +92,7 @@ const DICT = {
     tok_revoke_title: (n) => `撤销 Token“${n}”?`, tok_revoke_body: "撤销后使用该 Token 的调用会立即失败,且不可恢复。",
     tok_created_ok: "Token 已创建", tok_revoked: "Token 已撤销",
     tok_reveal_h: "你的新 API Token", tok_reveal_warn: "请立即复制并妥善保存 —— 关闭后将无法再次查看明文。", tok_copy: "复制", tok_done: "我已保存",
-    role_admin_full: "管理员(读写)", role_viewer_ro: "只读(仅 GET)",
+    role_admin_full: "管理员(读写)", role_operator: "运维(触发/取消/重跑)", role_viewer_ro: "只读(仅 GET)",
     res_vars: "变量", res_conns: "连接",
     res_sub: "跨任务共享的配置。命令里用 {{ var.KEY }} / {{ conn.ID.字段 }} 引用，触发时用 {{ params.KEY }}。",
     v_key: "变量名", v_value: "值", v_add: "添加变量", v_none: "还没有变量", v_save: "保存",
@@ -108,10 +116,26 @@ const DICT = {
     pools_sub: "全局并发槽位，跨所有 DAG 与 run 共享。", p_name: "名称", p_slots: "槽位", p_save: "保存",
     p_newname: "新池名称", p_create: "创建池", p_need: "需要名称和正整数槽位",
     trig_fail: "触发失败", api_err: "API 错误",
+    // 服务端错误码 → 本地化文案（api() 按 code 映射；未知码回退原始英文）
+    err_code_not_found: "对象不存在（可能已被删除）",
+    err_code_no_tasks: "该工作流还没有任何步骤，先添加一个再运行",
+    err_code_bad_mark_state: "不允许标记为这个状态",
+    err_code_queue_full: "运行队列已满，请稍后再试",
+    err_code_active_runs: "该工作流还有正在进行的运行，先取消或等它们结束",
+    err_code_run_not_active: "这次运行已经结束，无法取消",
+    err_code_nothing_to_retry: "这次运行没有失败的步骤，无需重跑",
+    err_code_run_still_active: "这次运行还在进行中，结束后才能重跑",
+    dt_hint: "运行时长趋势：越高越慢，颜色为结果；点击柱子打开该次运行",
+    runs_more: "加载更多 ↓", audit_more: "加载更多 ↓", log_all: "全部任务",
+    bulk_all: "全选（当前筛选）", bulk_pick: (id) => `选择 ${id}`,
+    bulk_selected: (n) => `已选 ${n} 个工作流`, bulk_done: (ok, n) => `批量操作完成：${ok}/${n} 成功`,
+    bulk_del_title: (n) => `归档选中的 ${n} 个工作流？`,
+    au_f_actor: "按操作人筛选", au_f_action: "按操作筛选", au_f_all: "全部",
     nx_paused: "已暂停", nx_due: "就绪", nx_in: (m) => `${m} 分钟后`,
     b_dag_info: "DAG 信息",
     f_dag_id: "DAG ID", f_start: "开始日期",
     f_catchup: "补跑 catchup", f_maxactive: "最大并发", f_defretries: "默认重试",
+    f_catchup_hint: "开启后，从 start_date 起每个错过的调度周期都会补建一次运行（每个 tick 最多补一个，受最大并发限制，不会形成风暴）",
     f_trigger_after: "上游依赖 (成功后触发)",
     b_addtask: "+ 添加任务", b_remove: "移除",
     t_id: "任务 ID", t_type: "类型", t_command: "命令", t_pool: "Pool", t_priority: "优先级",
@@ -164,7 +188,7 @@ const DICT = {
     btn_duplicate: "⧉ 复制", dup_dag_title: "复制为新 DAG(输入新 ID)", dup_done: "已复制",
     y_copy: "复制", y_download: "下载", y_close: "关闭", y_copied: "YAML 已复制到剪贴板", y_copy_fail: "复制失败,请手动选择文本",
     nd_import_yaml: "或粘贴 YAML 导入…", nd_back_form: "← 返回表单创建", nd_import: "导入", nd_yaml_empty: "请先粘贴 YAML 内容", nd_imported: "YAML 已导入",
-    gs_title: "快速上手", gs_create: "创建第一个 DAG", gs_trigger: "触发一次运行", gs_green: "拿到一次成功运行",
+    gs_title: "快速上手", gs_create: "创建第一个工作流", gs_trigger: "触发一次运行", gs_green: "拿到一次成功运行",
     adv_options: "高级选项", log_find_ph: "在日志中查找…", log_download: "下载完整日志", log_matches: (n) => `${n} 行匹配`, log_capped: (n) => `仅显示最近 ${n} 行`,
     back_dag: (d) => `← 返回 ${d}`, confirm_del_task_title: (id) => `删除任务 “${id}”？`,
     // ---- novice mode ----
@@ -211,6 +235,8 @@ const DICT = {
     nvr_failed_sub: "前面的步骤已成功，后面的没有执行。错误原因见日志最后几行。",
     nvr_retried: (n) => `已自动重试 ${n} 次仍失败。`,
     nvr_cancelled_title: "运行已取消", nvr_timeout_title: "运行超时，已强制停止",
+    nvr_cancelled_sub: "你手动停止了这次运行。命令没问题的话，随时可以再次运行。",
+    nvr_timeout_sub: "运行超过了设定的时长限制，已被强制停止，后面的步骤没有执行。",
     nvr_rerun: "修复后重跑 ▶", nvr_rerun2: "再次运行 ▶", nvr_edit_steps: "编辑步骤", nvr_home: "回首页",
     nvr_waiting: "等待中", nvr_notrun: "未执行", nvr_running_dur: "运行中…",
     nvr_retry_n: (n) => `重试 ${n} 次`,
@@ -229,7 +255,9 @@ const DICT = {
     nv_edit: "编辑", nv_add_step: "+ 添加步骤",
     nv_edit_step_title: (id) => `编辑步骤 ${id}`, nv_del_step: "删除此步骤",
     nv_recent_h: "最近运行", nv_view_log: "查看日志 →",
-    nv_adv_summary: "更多设置（并发、重试、超时、失败通知……）",
+    nv_notify_h: "失败通知", nv_notify_toggle: "失败时通知我",
+    nv_notify_hint: "粘贴群机器人的 Webhook 地址（支持 Slack / 飞书 / 钉钉，自动识别格式）。运行失败时会发一条消息。",
+    nv_adv_summary: "更多设置（并发、重试、超时……）",
     nv_adv_body: (r, m) => `这些默认值已经够用：${r > 0 ? `失败自动重试 ${r} 次、` : ""}同一时间只跑 ${m} 份。`,
     nv_adv_body2: "需要精细控制时再展开，或", nv_adv_body3: "查看全部设置项。", nv_to_expert: "切到专家模式",
     nv_fail_ribbon: (n, id) => `第 ${n} 步 ${id} 失败`, nv_fail_ribbon_generic: "最近一次运行失败",
@@ -238,14 +266,23 @@ const DICT = {
     nv_step_fetch: "取数", nv_step_render: "生成并发送报表", nv_step_1: "第一步",
   },
   en: {
-    workspace: "Workspace", newdag: "+ New DAG", search_ph: "Filter DAGs…",
+    workspace: "Workspace", nav_dags: "Workflows", newdag: "+ New workflow",
     f_all: "All", f_running: "Running", f_failed: "Failed", f_paused: "Paused",
-    dags_sub: "All workflow definitions · toggle · schedule · recent runs",
-    c_active: "Active DAGs", c_running: "Running runs", c_rate: "Recent success", c_failed: "Failed DAGs",
-    c_active_s: (n) => `${n} defined`, c_running_s: "across all pools", c_rate_s: "recent runs", c_failed_s: "last run failed",
-    h_dag: "DAG", h_last: "LAST RUN", h_spark: "LAST 14", h_pool: "POOL", h_next: "NEXT", h_act: "ACTIONS",
-    no_match: "No matching DAGs", no_dags_title: "No DAGs yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
-    back_dags: "← DAGs", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
+    dags_sub: "Click a name for runs and structure; the left toggle pauses / resumes scheduling.",
+    ov_fail_title: (id) => `${id}: latest run failed`, ov_fail_more: (n) => `${n} more failing`,
+    ov_rest_ok: (n) => `the other ${n} are healthy`, ov_all_ok: "All workflows healthy", ov_last_run: (w) => `last run ${w}`,
+    ov_running: "Running", ov_running_tip: "Runs currently executing", ov_rate: "Recent success", ov_go: "Investigate →",
+    hlp_dag: '<b>A workflow (DAG)</b> = tasks that run in dependency order, plus a rule for when to run. <span class="eg">e.g. daily at 2:00 — extract → transform → load.</span>',
+    hlp_toggle: "<b>Schedule switch.</b> Off = no more automatic runs (manual trigger still works); history is kept and it can be re-enabled any time.",
+    hlp_spark: 'Each bar is one run: <b class="ok">green</b>=success, <b class="bad">red</b>=failed, <b class="run">blue</b>=running; taller = slower. Hover for details.',
+    hlp_next: "Next automatic run per the schedule. “due” = waiting for a free slot.",
+    hlp_rate: "Share of recent runs that succeeded (up to 14 per workflow; skips and cancellations don't count).",
+    toggle_tip_on: "Enabled — click to pause scheduling", toggle_tip_off: "Paused — click to resume scheduling",
+    btn_run_word: "Run", run_now_tip: "Run once now, manually — doesn't affect the schedule",
+    day_today: "today", day_yesterday: "yesterday",
+    h_dag: "WORKFLOW", h_spark: "LAST 14", h_pool: "POOL", h_next: "NEXT RUN",
+    no_match: "No matching workflows", no_match_filter: "No workflows under this filter", no_dags_title: "No workflows yet", no_dags_sub: "Create your first workflow to start scheduling tasks.", trigger: "Trigger", manual_trigger: "manual trigger",
+    back_dags: "← Workflows", run_word: "run", sub_manual: "manual trigger only", max_active: "max active",
     run_progress: "Progress",
     sec_graph: "Dependency graph", sec_structure: "Structure", sec_runs: "Run history", sec_instances: "Task instances",
     g_timeline: "Timeline", g_never_ran: "did not run", run_no_tasks: "No task instances yet for this run", run_done_ok: "Run finished — success", run_done_fail: "Run failed", run_done_timeout: "Run timed out",
@@ -255,9 +292,8 @@ const DICT = {
     mark_run_title: (id) => `Mark run “${id}” as?`, mark_run_body: "Override a finished run's recorded outcome (tasks untouched). Marking success fires downstream-DAG triggers.",
     confirm_cancel_title: (id) => `Cancel run “${id}”?`, confirm_cancel_body: "Running tasks will be killed.", th_act: "Actions",
     confirm_retry_title: (id) => `Retry “${id}”?`, confirm_retry_body: "This task and all of its downstream tasks will be reset and re-run.",
-    copied: "Copied", copy_fail: "Copy failed — select the text manually", copy_hint: "Click to copy", search_ph: "Jump / filter DAGs…", jump_open: "Open", jump_none: "No matching DAG",
+    copied: "Copied", copy_fail: "Copy failed — select the text manually", copy_hint: "Click to copy", search_ph: "Search workflows…", jump_open: "Open", jump_none: "No matching workflow",
     gz_in: "Zoom in", gz_out: "Zoom out", gz_fit: "Fit to view", gz_hint: "Drag to pan · Ctrl/⌘ + wheel to zoom",
-    act_recent: "Recent activity", act_now: "now", act_none: "No runs yet",
     login_title: "Sign in to cronova", login_sub: "Enter your account credentials", login_user: "Username", login_pass: "Password", login_btn: "Sign in", login_bad: "Invalid username or password", logout: "Sign out", sess_expired: "Session expired — please sign in again", role_admin: "Admin", role_viewer: "Viewer",
     tab_runs: "Runs", tab_structure: "Structure", tab_settings: "Settings",
     dh_last: "Last run", dh_next: "Schedule", dh_rate: "Success rate", dh_never: "No runs yet", dh_norate: "—",
@@ -285,7 +321,7 @@ const DICT = {
     tok_revoke_title: (n) => `Revoke token “${n}”?`, tok_revoke_body: "Calls using this token will fail immediately. This cannot be undone.",
     tok_created_ok: "Token created", tok_revoked: "Token revoked",
     tok_reveal_h: "Your new API token", tok_reveal_warn: "Copy it now and store it securely — you won't be able to see the plaintext again.", tok_copy: "Copy", tok_done: "I've saved it",
-    role_admin_full: "Admin (read-write)", role_viewer_ro: "Viewer (GET only)",
+    role_admin_full: "Admin (read-write)", role_operator: "Operator (trigger/cancel/retry)", role_viewer_ro: "Viewer (GET only)",
     res_vars: "Variables", res_conns: "Connections",
     res_sub: "Config shared across tasks. Reference in commands as {{ var.KEY }} / {{ conn.ID.field }}, or {{ params.KEY }} at trigger time.",
     v_key: "Key", v_value: "Value", v_add: "Add variable", v_none: "No variables yet", v_save: "Save",
@@ -309,10 +345,25 @@ const DICT = {
     pools_sub: "Global concurrency slots, shared across all DAGs and runs.", p_name: "name", p_slots: "slots", p_save: "Save",
     p_newname: "new pool name", p_create: "Create pool", p_need: "name + positive slots required",
     trig_fail: "trigger failed", api_err: "API error",
+    err_code_not_found: "Not found (it may have been deleted)",
+    err_code_no_tasks: "This workflow has no steps yet — add one before running it",
+    err_code_bad_mark_state: "That state is not a valid mark target",
+    err_code_queue_full: "The run queue is full — try again shortly",
+    err_code_active_runs: "This workflow still has active runs — cancel or wait for them first",
+    err_code_run_not_active: "This run has already finished — nothing to cancel",
+    err_code_nothing_to_retry: "This run has no failed steps to retry",
+    err_code_run_still_active: "This run is still active — retry it after it finishes",
+    dt_hint: "Duration trend: taller = slower, color = outcome; click a bar to open that run",
+    runs_more: "Load more ↓", audit_more: "Load more ↓", log_all: "All tasks",
+    bulk_all: "Select all (current filter)", bulk_pick: (id) => `Select ${id}`,
+    bulk_selected: (n) => `${n} workflow${n > 1 ? "s" : ""} selected`, bulk_done: (ok, n) => `Bulk action done: ${ok}/${n} succeeded`,
+    bulk_del_title: (n) => `Archive the ${n} selected workflow${n > 1 ? "s" : ""}?`,
+    au_f_actor: "Filter by actor", au_f_action: "Filter by action", au_f_all: "All",
     nx_paused: "paused", nx_due: "due", nx_in: (m) => `in ${m}m`,
     b_dag_info: "DAG info",
     f_dag_id: "DAG ID", f_start: "Start date",
     f_catchup: "Catchup", f_maxactive: "Max active", f_defretries: "Default retries",
+    f_catchup_hint: "When on, every schedule period missed since start_date gets a backfilled run (at most one per tick, bounded by max active runs — no thundering herd)",
     f_trigger_after: "Trigger after (upstream success)",
     b_addtask: "+ Add task", b_remove: "Remove",
     t_id: "Task ID", t_type: "Type", t_command: "Command", t_pool: "Pool", t_priority: "Priority",
@@ -365,7 +416,7 @@ const DICT = {
     btn_duplicate: "⧉ Duplicate", dup_dag_title: "Duplicate as a new DAG (enter a new id)", dup_done: "Duplicated",
     y_copy: "Copy", y_download: "Download", y_close: "Close", y_copied: "YAML copied to clipboard", y_copy_fail: "Copy failed — select the text manually",
     nd_import_yaml: "or paste YAML to import…", nd_back_form: "← back to the form", nd_import: "Import", nd_yaml_empty: "Paste some YAML first", nd_imported: "YAML imported",
-    gs_title: "Getting started", gs_create: "Create your first DAG", gs_trigger: "Trigger a run", gs_green: "Get a green run",
+    gs_title: "Getting started", gs_create: "Create your first workflow", gs_trigger: "Trigger a run", gs_green: "Get a green run",
     adv_options: "Advanced options", log_find_ph: "Find in log…", log_download: "Download full log", log_matches: (n) => `${n} matching lines`, log_capped: (n) => `showing last ${n} lines`,
     back_dag: (d) => `← Back to ${d}`, confirm_del_task_title: (id) => `Delete task “${id}”?`,
     // ---- novice mode ----
@@ -412,6 +463,8 @@ const DICT = {
     nvr_failed_sub: "Earlier steps succeeded; later ones didn't run. See the last lines of the log for the cause.",
     nvr_retried: (n) => `Retried ${n} time(s) automatically, still failing.`,
     nvr_cancelled_title: "Run cancelled", nvr_timeout_title: "Run timed out and was stopped",
+    nvr_cancelled_sub: "You stopped this run. If the commands look right, run it again any time.",
+    nvr_timeout_sub: "The run exceeded its time limit and was force-stopped; later steps did not run.",
     nvr_rerun: "Fixed — run again ▶", nvr_rerun2: "Run again ▶", nvr_edit_steps: "Edit steps", nvr_home: "Home",
     nvr_waiting: "waiting", nvr_notrun: "did not run", nvr_running_dur: "running…",
     nvr_retry_n: (n) => `${n} retr${n > 1 ? "ies" : "y"}`,
@@ -430,7 +483,9 @@ const DICT = {
     nv_edit: "Edit", nv_add_step: "+ Add step",
     nv_edit_step_title: (id) => `Edit step ${id}`, nv_del_step: "Delete this step",
     nv_recent_h: "Recent runs", nv_view_log: "View log →",
-    nv_adv_summary: "More settings (concurrency, retries, timeouts, notifications…)",
+    nv_notify_h: "Failure alerts", nv_notify_toggle: "Notify me on failure",
+    nv_notify_hint: "Paste an incoming-webhook URL (Slack / Feishu / DingTalk auto-detected). A message is sent when a run fails.",
+    nv_adv_summary: "More settings (concurrency, retries, timeouts…)",
     nv_adv_body: (r, m) => `The defaults are enough to start: ${r > 0 ? `${r} automatic retr${r > 1 ? "ies" : "y"} on failure, ` : ""}at most ${m} run${m > 1 ? "s" : ""} at a time.`,
     nv_adv_body2: "Expand when you need fine control, or", nv_adv_body3: "for every setting.", nv_to_expert: "switch to expert mode",
     nv_fail_ribbon: (n, id) => `Step ${n} ${id} failed`, nv_fail_ribbon_generic: "The latest run failed",
@@ -465,8 +520,12 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) {
-    let m = r.statusText; try { m = (await r.json()).error || m; } catch (_) {}
-    const err = new Error(m); err.status = r.status;
+    // Prefer the machine code (localizable) over the raw English error string;
+    // unknown codes fall back to the server's message so nothing is lost.
+    let m = r.statusText, code = "";
+    try { const b = await r.json(); m = b.error || m; code = b.code || ""; } catch (_) {}
+    if (code) { const loc = t("err_code_" + code); if (loc !== "err_code_" + code) m = loc; }
+    const err = new Error(m); err.status = r.status; err.code = code;
     // session expired mid-use → bounce to login (not during the auth calls themselves)
     if (r.status === 401 && authUser && !path.startsWith("/api/login") && !path.startsWith("/api/me")) {
       authUser = null; showLogin(true);
@@ -507,6 +566,19 @@ function legacyCopy(text) {
   } catch (_) { return false; }
 }
 const fmt = (x) => (x ? new Date(x).toLocaleString() : "—");
+// friendly short time for banner copy: 今天 08:12 / 昨天 08:12 / 8月7日 08:12 (en: today / yesterday / Aug 7)
+function fmtDay(x) {
+  if (!x) return "—";
+  const d = new Date(x);
+  if (isNaN(d)) return "—";
+  const hm = d.toLocaleTimeString(lang === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const key = (a) => a.getFullYear() * 10000 + a.getMonth() * 100 + a.getDate();
+  const now = new Date(), yd = new Date(now); yd.setDate(yd.getDate() - 1);
+  if (key(d) === key(now)) return `${t("day_today")} ${hm}`;
+  if (key(d) === key(yd)) return `${t("day_yesterday")} ${hm}`;
+  const md = lang === "zh" ? `${d.getMonth() + 1}月${d.getDate()}日` : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return `${md} ${hm}`;
+}
 
 // ---- toast + in-app confirm (themed + bilingual; replaces native alert/confirm) ----
 // kind: ok | fail | warn | info. Success/info auto-dismiss; errors persist until clicked.
@@ -562,8 +634,18 @@ function pickDialog(title, body, options) {
   });
 }
 function dur(a, b) { if (!a) return "—"; const ms = (b ? new Date(b) : new Date()) - new Date(a); if (ms < 0) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`; }
-function badge(s) { const k = s || "none"; return `<span class="badge s-${k}"><span class="d"></span>${stateLabel(s)}</span>`; }
-function closeLog() { if (logES) { logES.close(); logES = null; } }
+function badge(s, sm) { const k = s || "none"; return `<span class="badge${sm ? " sm" : ""} s-${k}"><span class="d"></span>${stateLabel(s)}</span>`; }
+// ?-bubble with a rich HTML tip from the dict. pos: "" above-left, "r" above-right, "b" below
+function hlp(key, pos) {
+  const html = t(key);
+  return `<span class="hlp${pos ? " hlp-" + pos : ""}" tabindex="0" aria-label="${esc(html.replace(/<[^>]+>/g, ""))}">?<span class="tip" aria-hidden="true">${html}</span></span>`;
+}
+let logESAll = []; // extra streams opened by the all-tasks combined log view
+function closeLog() {
+  if (logES) { logES.close(); logES = null; }
+  logESAll.forEach((es) => { try { es.close(); } catch (_) {} });
+  logESAll = [];
+}
 // human label for a seconds threshold (SLA / timeout); 0 => "off".
 function secsLabel(sec) {
   sec = +sec || 0;
@@ -693,21 +775,52 @@ function attachPanZoom(wrap, store) {
     zoomAt(e.clientX - r.left, e.clientY - r.top, s * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
   }, { passive: false });
   let drag = false, moved = false, sx = 0, sy = 0, otx = 0, oty = 0;
+  // touch: track active pointers so two fingers pinch-zoom (mobile has no
+  // Ctrl+wheel); a second finger cancels the pan and hands over to the pinch.
+  const touches = new Map(); // pointerId -> {x, y}
+  let pinchDist = 0;
   wrap.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.pointerType !== "touch" && e.button !== 0) return;
     wrap._sup = 0; // any fresh press clears a stale suppress-latch (e.g. drag released off-element)
     if (e.target.closest(".graph-zoom")) return; // let the zoom buttons handle themselves
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        drag = false; wrap.classList.remove("panning");
+        const [a, b] = [...touches.values()];
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+        wrap._sup = 1; // the pinch must not synthesize a node click
+        return;
+      }
+    }
     drag = true; moved = false; sx = e.clientX; sy = e.clientY; otx = tx; oty = ty;
     try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
   });
   wrap.addEventListener("pointermove", (e) => {
+    if (e.pointerType === "touch" && touches.has(e.pointerId)) {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        const [a, b] = [...touches.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchDist > 0 && d > 0) {
+          const r = wrap.getBoundingClientRect();
+          zoomAt((a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top, s * (d / pinchDist));
+        }
+        pinchDist = d;
+        return;
+      }
+    }
     if (!drag) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if (!moved && Math.hypot(dx, dy) < 4) return; // below threshold: still a click
     moved = true; wrap.classList.add("panning");
     tx = otx + dx; ty = oty + dy; clamp(); apply();
   });
-  const end = () => { if (!drag) return; drag = false; wrap.classList.remove("panning"); if (moved) wrap._sup = 1; };
+  const end = (e) => {
+    if (e && e.pointerType === "touch") { touches.delete(e.pointerId); if (touches.size < 2) pinchDist = 0; }
+    if (!drag) return;
+    drag = false; wrap.classList.remove("panning"); if (moved) wrap._sup = 1;
+  };
   wrap.addEventListener("pointerup", end);
   wrap.addEventListener("pointercancel", end);
   // capture-phase: swallow the click synthesized after a pan so node handlers don't
@@ -958,7 +1071,8 @@ let lastNavLabel = null;
 function setNav(navKey, crumb) {
   document.body.dataset.screen = view; // lets CSS hide chrome per screen (e.g. mode toggle on the wizard)
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
-  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t("nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "api" ? t("nav_api") : "DAGs");
+  // novice mode names the same pages in its own words (共享配置 / 我的工作流)
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t(nvMode() ? "nv_shared" : "nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "api" ? t("nav_api") : t(nvMode() ? "nv_myflows" : "nav_dags"));
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
   // search stays visible everywhere now (global jump-to-DAG), not just the dashboard
@@ -982,7 +1096,7 @@ function applyStaticI18n() {
 function setLang(l) {
   lang = l; localStorage.setItem("cnv_lang", l); applyStaticI18n();
   // dag/task re-render from in-memory D (no refetch) so unsaved edits survive.
-  if (view === "dags") renderDags();
+  if (view === "dags") { setNav("dags"); renderDags(); } // crumb is localized now (工作流/Workflows) — refresh it too
   else if (view === "dag") renderDagPage();
   else if (view === "task") renderTaskPage();
   else if (view === "run") showRun(currentRun);

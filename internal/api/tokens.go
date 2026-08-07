@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zoyluo/cronova/internal/auth"
 	"github.com/zoyluo/cronova/internal/model"
@@ -34,6 +35,10 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 		Role string `json:"role"`
+		// TTL bounds the token's lifetime, e.g. "720h" ("" = never expires).
+		TTL string `json:"ttl"`
+		// DagID scopes write operations to one DAG ("" = unscoped).
+		DagID string `json:"dag_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid request")
@@ -48,16 +53,33 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = model.RoleAdmin
 	}
-	if role != model.RoleAdmin && role != model.RoleViewer {
-		httpErr(w, http.StatusBadRequest, "role must be admin or viewer")
+	if role != model.RoleAdmin && role != model.RoleOperator && role != model.RoleViewer {
+		httpErr(w, http.StatusBadRequest, "role must be admin, operator, or viewer")
 		return
+	}
+	var expiresAt *time.Time
+	if strings.TrimSpace(req.TTL) != "" {
+		d, err := time.ParseDuration(req.TTL)
+		if err != nil || d <= 0 {
+			httpErr(w, http.StatusBadRequest, "invalid ttl (use a positive duration like 720h)")
+			return
+		}
+		t := time.Now().UTC().Add(d)
+		expiresAt = &t
+	}
+	req.DagID = strings.TrimSpace(req.DagID)
+	if req.DagID != "" {
+		if _, err := s.store.GetDAG(r.Context(), req.DagID); err != nil {
+			httpErr(w, http.StatusBadRequest, "dag_id does not name an existing DAG")
+			return
+		}
 	}
 	plaintext, hash, err := auth.NewAPIToken()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "token generation failed")
 		return
 	}
-	tok := &model.APIToken{Name: req.Name, Role: role, Prefix: plaintext[:prefixLen]}
+	tok := &model.APIToken{Name: req.Name, Role: role, Prefix: plaintext[:prefixLen], ExpiresAt: expiresAt, DagID: req.DagID}
 	if err := s.store.CreateAPIToken(r.Context(), tok, hash); err != nil {
 		mapErr(w, err)
 		return

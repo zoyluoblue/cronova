@@ -2,13 +2,17 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
 	pb "github.com/zoyluo/cronova/proto/cronova/executor/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
@@ -24,15 +28,35 @@ type GRPCClient struct {
 
 var _ Executor = (*GRPCClient)(nil)
 
-// Dial connects to an executor over an absolute Unix socket. The executor has
-// no application-layer authentication, so TCP targets are intentionally
-// rejected; filesystem ownership and socket mode form the trust boundary.
+// Dial connects to an executor: an absolute unix:///path socket (same host —
+// filesystem ownership is the trust boundary), or tcp://host:port under
+// MANDATORY mutual TLS (both sides verify certificates; there is no plaintext
+// TCP mode). The mTLS material comes from CRONOVA_EXEC_TLS_CERT / _KEY / _CA
+// (PEM file paths) so the target string stays a plain address.
+//
+// A remote executor runs tasks on ITS host: task logs are written there, and
+// project attach requires a shared filesystem (the runner reports that error
+// explicitly). Suits offloading compute; log streaming lands in a later phase.
 func Dial(target string) (*GRPCClient, error) {
 	u, err := url.Parse(target)
-	if err != nil || u.Scheme != "unix" || !filepath.IsAbs(u.Path) || u.Host != "" || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("executor target must be an absolute unix:///path socket, got %q", target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid executor target %q: %w", target, err)
 	}
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var creds grpc.DialOption
+	switch {
+	case u.Scheme == "unix" && filepath.IsAbs(u.Path) && u.Host == "" && u.RawQuery == "" && u.Fragment == "":
+		creds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	case u.Scheme == "tcp" && u.Host != "":
+		tc, err := clientMTLS()
+		if err != nil {
+			return nil, fmt.Errorf("executor tcp target requires mutual TLS: %w", err)
+		}
+		creds = grpc.WithTransportCredentials(tc)
+		target = u.Host // grpc dials host:port with the default resolver
+	default:
+		return nil, fmt.Errorf("executor target must be unix:///abs/path or tcp://host:port, got %q", target)
+	}
+	conn, err := grpc.NewClient(target, creds)
 	if err != nil {
 		return nil, fmt.Errorf("dial executor %q: %w", target, err)
 	}
@@ -116,4 +140,31 @@ func fromPBPhase(p pb.Phase) Phase {
 	default:
 		return PhaseUnknown
 	}
+}
+
+// clientMTLS loads the scheduler-side certificate pair and the CA that signed
+// the executor's certificate from CRONOVA_EXEC_TLS_CERT / _KEY / _CA. All
+// three are required — a TCP executor link is always mutually authenticated.
+func clientMTLS() (credentials.TransportCredentials, error) {
+	certFile, keyFile, caFile := os.Getenv("CRONOVA_EXEC_TLS_CERT"), os.Getenv("CRONOVA_EXEC_TLS_KEY"), os.Getenv("CRONOVA_EXEC_TLS_CA")
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return nil, fmt.Errorf("set CRONOVA_EXEC_TLS_CERT, CRONOVA_EXEC_TLS_KEY and CRONOVA_EXEC_TLS_CA (PEM paths)")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load client cert: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read ca: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("no certificates in %s", caFile)
+	}
+	return credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		MinVersion:   tls.VersionTLS13,
+	}), nil
 }

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zoyluo/cronova/internal/metrics"
 	"github.com/zoyluo/cronova/internal/model"
 )
 
@@ -104,11 +105,29 @@ func newNotifyClient(allowPrivate bool) *http.Client {
 	}
 }
 
+// notifyTarget resolves where a DAG's alerts go: the DAG's own webhook wins;
+// otherwise the instance-wide default (whose event filter, absent an explicit
+// per-DAG notify_on, is failure-only — a global webhook should alert, not spam).
+func (s *Scheduler) notifyTarget(d *model.DAG) (url, format string, on []string) {
+	if d.NotifyURL != "" {
+		return d.NotifyURL, d.NotifyFormat, d.NotifyOn
+	}
+	if s.opts.DefaultNotifyURL == "" {
+		return "", "", nil
+	}
+	on = d.NotifyOn
+	if len(on) == 0 {
+		on = []string{"failure"}
+	}
+	return s.opts.DefaultNotifyURL, s.opts.DefaultNotifyFormat, on
+}
+
 // notifyRun fires the DAG's webhook (async, best-effort) when a finished run's
 // state matches the DAG's notify_on list. It never blocks the scheduler tick;
 // delivery is tracked by s.inflight so a graceful shutdown waits for it.
 func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunState, finishedAt time.Time, tis []*model.TaskInstance) {
-	if d.NotifyURL == "" {
+	url, format, notifyOn := s.notifyTarget(d)
+	if url == "" {
 		return
 	}
 	ev := ""
@@ -126,7 +145,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	// (unlike a normal success/failure finalize, which requires the event to be listed).
 	if final != model.RunTimedOut {
 		want := false
-		for _, e := range d.NotifyOn {
+		for _, e := range notifyOn {
 			if e == ev {
 				want = true
 			}
@@ -164,7 +183,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(d.NotifyURL, d.NotifyFormat, p)
+	s.postNotify(url, format, p)
 }
 
 // notifyDeadline fires a soft SLA-miss alert mid-run (the run keeps going). kind
@@ -172,7 +191,8 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 // the latter. It fires whenever a webhook is configured — setting the threshold is
 // itself the opt-in — independent of notify_on (which gates finalize alerts).
 func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID string, thresholdSec int, elapsed time.Duration) {
-	if d.NotifyURL == "" {
+	url, format, _ := s.notifyTarget(d)
+	if url == "" {
 		return
 	}
 	summary := fmt.Sprintf("cronova · %s · run %s missed SLA (%ds)", d.DagID, run.RunID, thresholdSec)
@@ -187,7 +207,20 @@ func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(d.NotifyURL, d.NotifyFormat, p)
+	s.postNotify(url, format, p)
+}
+
+// notifySystem alerts the instance-wide webhook about a scheduler-level event
+// (executor unreachable/recovered, retention failure) — things that previously
+// only reached stderr. No-op without a default webhook.
+func (s *Scheduler) notifySystem(event, text string) {
+	if s.opts.DefaultNotifyURL == "" {
+		return
+	}
+	s.postNotify(s.opts.DefaultNotifyURL, s.opts.DefaultNotifyFormat, notifyPayload{
+		Text:  "cronova · system · " + text,
+		State: event,
+	})
 }
 
 // notifyBody renders the webhook body for the DAG's notify.format. "raw" (or
@@ -210,33 +243,57 @@ func notifyBody(format string, p notifyPayload) []byte {
 	return body
 }
 
+// notifyRetryDelays paces redelivery after a transient failure (network error
+// or 5xx). A short exponential ladder: a receiver blip shouldn't lose an alert,
+// but an alert channel that's down for minutes is Prometheus's job to notice
+// (cronova_notify_failures_total).
+var notifyRetryDelays = []time.Duration{2 * time.Second, 6 * time.Second}
+
 // postNotify delivers a payload to the webhook asynchronously (best-effort,
-// tracked by s.inflight for graceful shutdown). It snapshots everything the
-// goroutine needs and logs only the host — never the secret-bearing URL.
+// tracked by s.inflight for graceful shutdown). Transient failures (network,
+// 5xx) are retried with backoff; a 4xx is a configuration error and is not.
+// It snapshots everything the goroutine needs and logs only the host — never
+// the secret-bearing URL.
 func (s *Scheduler) postNotify(rawURL, format string, p notifyPayload) {
 	url, runID, host, state := rawURL, p.RunID, notifyHost(rawURL), p.State
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
 		body := notifyBody(format, p)
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			s.log.Error("notify build", "run", runID, "host", host, "err", stripURL(err))
-			return
+		attempt := func() (retryable bool, err error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+			if rerr != nil {
+				return false, rerr
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, derr := s.notifyClient.Do(req)
+			if derr != nil {
+				return true, derr
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode >= 500 {
+				return true, fmt.Errorf("status %d", resp.StatusCode)
+			}
+			if resp.StatusCode >= 300 {
+				return false, fmt.Errorf("status %d", resp.StatusCode)
+			}
+			return false, nil
 		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := s.notifyClient.Do(req)
-		if err != nil {
-			s.log.Error("notify post", "run", runID, "host", host, "err", stripURL(err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			s.log.Warn("notify non-2xx", "run", runID, "host", host, "status", resp.StatusCode)
-		} else {
-			s.log.Info("notify sent", "run", runID, "state", state)
+		for try := 0; ; try++ {
+			retryable, err := attempt()
+			if err == nil {
+				s.log.Info("notify sent", "run", runID, "state", state, "try", try+1)
+				return
+			}
+			if !retryable || try >= len(notifyRetryDelays) {
+				metrics.IncNotifyFailure()
+				s.log.Error("notify delivery failed", "run", runID, "host", host, "tries", try+1, "err", stripURL(err))
+				return
+			}
+			s.log.Warn("notify retrying", "run", runID, "host", host, "try", try+1, "err", stripURL(err))
+			time.Sleep(notifyRetryDelays[try])
 		}
 	}()
 }

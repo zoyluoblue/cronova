@@ -31,6 +31,15 @@ document.addEventListener("keydown", (e) => {
   const el = e.target;
   if (el && el.matches && el.matches('[tabindex="0"][role]:not(input):not(textarea):not(select)')) { e.preventDefault(); el.click(); }
 });
+// Escape closes an open help bubble without moving pointer or focus (WCAG 1.4.13
+// dismissable); the .hlp-off class clears itself when the trigger is left.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const off = (el, ev) => { el.classList.add("hlp-off"); el.addEventListener(ev, () => el.classList.remove("hlp-off"), { once: true }); };
+  const h = document.activeElement;
+  if (h && h.classList && h.classList.contains("hlp")) off(h, "blur");
+  document.querySelectorAll(".hlp:hover").forEach((el) => off(el, "mouseleave"));
+});
 // One delegated click for copy-to-clipboard: any [data-copy] element copies its
 // value. stopPropagation so a copyable inside a clickable row copies without also
 // triggering the row's navigation.
@@ -57,4 +66,11 @@ setInterval(async () => {
       overviewCache = fresh; setDagCounts(fresh.stats.total_dags); renderDags();
     }
   } catch (_) {}
-}, 6000);
+}, 6000);// Touch affordance for hover-only details: sparkline cells and activity ticks
+// describe themselves via title, which never shows on touch. A tap surfaces
+// the same text as a toast (harmless no-op for mouse users who saw the tooltip).
+document.addEventListener("click", (e) => {
+  const el = e.target.closest && e.target.closest(".spark i[title], .dt-bar[title]:not([data-run]), .gantt-bar[title]");
+  if (!el || !el.title) return;
+  if (window.matchMedia && window.matchMedia("(hover: none)").matches) { e.stopPropagation(); toast(el.title, "info"); }
+}, true);

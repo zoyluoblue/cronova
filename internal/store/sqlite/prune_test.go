@@ -117,7 +117,7 @@ func TestPruneAudit(t *testing.T) {
 	if deleted != 1 {
 		t.Fatalf("deleted = %d, want 1", deleted)
 	}
-	entries, err := s.ListAudit(ctx, "", 10)
+	entries, err := s.ListAudit(ctx, "", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

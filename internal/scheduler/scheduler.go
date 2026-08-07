@@ -28,6 +28,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/zoyluo/cronova/internal/executor"
+	"github.com/zoyluo/cronova/internal/metrics"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/operator"
 	"github.com/zoyluo/cronova/internal/scheduler/parser"
@@ -61,6 +62,15 @@ type Options struct {
 	// webhooks (loopback/private/link-local IPs). Off in production; tests set it
 	// so an httptest server on 127.0.0.1 can receive deliveries.
 	AllowPrivateNotifyTargets bool
+	// DefaultNotifyURL is the instance-wide webhook used when a DAG has no
+	// notify_url of its own (its notify_on defaults to ["failure"] then), and
+	// for scheduler-level events (executor unreachable, retention failures).
+	// Empty disables the fallback — per-DAG webhooks still work.
+	DefaultNotifyURL    string
+	DefaultNotifyFormat string
+	// ReloadInterval re-scans DagDir for changed YAML files this often (GitOps:
+	// git-pull the directory and edits go live without a restart). 0 = off.
+	ReloadInterval time.Duration
 }
 
 // Scheduler is the cronova scheduling engine.
@@ -141,6 +151,20 @@ func New(st store.Store, ex executor.Executor, opts Options) *Scheduler {
 // LoadDAGs reads, parses, validates, and registers every *.yaml/*.yml file in
 // the configured DagDir. Bad files are logged and skipped, not fatal.
 func (s *Scheduler) LoadDAGs(ctx context.Context) error {
+	return s.loadDAGFiles(ctx, false)
+}
+
+// ReloadDAGs is the periodic (-reload) variant of LoadDAGs: it re-scans the
+// DAG directory but only re-registers files whose content actually changed,
+// so a quiet directory costs one read per file and zero DB writes. Deletions
+// are deliberately NOT synced — removing a file never archives a DAG (that is
+// an explicit console/API/CLI action); files are the source of truth for
+// definitions, the DB for lifecycle.
+func (s *Scheduler) ReloadDAGs(ctx context.Context) error {
+	return s.loadDAGFiles(ctx, true)
+}
+
+func (s *Scheduler) loadDAGFiles(ctx context.Context, skipUnchanged bool) error {
 	if s.opts.DagDir == "" {
 		return nil
 	}
@@ -169,15 +193,25 @@ func (s *Scheduler) LoadDAGs(ctx context.Context) error {
 			s.log.Error("parse dag", "file", name, "err", err)
 			continue
 		}
+		existing, gerr := s.store.GetDAG(ctx, d.DagID)
 		// The DB archive wins over a lingering file: if this dag_id was
 		// soft-deleted, do NOT re-register it (which would revive it). This makes
 		// a delete durable even if the YAML file removal failed or was restored.
-		if existing, gerr := s.store.GetDAG(ctx, d.DagID); gerr == nil && existing.DeletedAt != nil {
+		if gerr == nil && existing.DeletedAt != nil {
 			s.log.Warn("skipping soft-deleted dag (file still present)", "dag", d.DagID, "file", name)
 			continue
 		}
+		if skipUnchanged && gerr == nil && existing.DefinitionYAML == string(raw) {
+			if _, _, cached := s.cachedDAG(d.DagID); cached {
+				continue // same bytes, already live — nothing to do
+			}
+		}
 		if err := s.registerDAG(ctx, d); err != nil {
 			s.log.Error("register dag", "dag", d.DagID, "err", err)
+			continue
+		}
+		if skipUnchanged {
+			s.log.Info("dag reloaded from file", "dag", d.DagID, "file", name)
 		}
 	}
 	return nil
@@ -189,6 +223,16 @@ func (s *Scheduler) registerDAG(ctx context.Context, d *model.DAG) error {
 	if err := s.store.UpsertDAG(ctx, d); err != nil {
 		return err
 	}
+	// Version history: append-only, deduped on the latest hash so restarts and
+	// reloads of an unchanged definition don't spam versions. Best-effort — a
+	// history write must never fail registration.
+	if ver, ok := s.store.(interface {
+		AppendDagVersion(context.Context, string, string, string) error
+	}); ok && d.DefinitionYAML != "" {
+		if err := ver.AppendDagVersion(ctx, d.DagID, definitionHash(d.DefinitionYAML), d.DefinitionYAML); err != nil {
+			s.log.Warn("append dag version", "dag", d.DagID, "err", err)
+		}
+	}
 	if err := s.ensurePools(ctx, d); err != nil {
 		return err
 	}
@@ -197,7 +241,7 @@ func (s *Scheduler) registerDAG(ctx context.Context, d *model.DAG) error {
 	}
 	var sched cron.Schedule
 	if d.Schedule != "" {
-		sc, err := parser.ParseSchedule(d.Schedule)
+		sc, err := parser.ParseScheduleIn(d.Schedule, d.Timezone)
 		if err != nil {
 			return err
 		}
@@ -316,7 +360,7 @@ func (s *Scheduler) NextSchedule(ctx context.Context, d *model.DAG) (time.Time, 
 	if cd, _, ok := s.cachedDAG(d.DagID); ok && len(cd.Tasks) == 0 {
 		return time.Time{}, false
 	}
-	sched, err := parser.ParseSchedule(d.Schedule)
+	sched, err := parser.ParseScheduleIn(d.Schedule, d.Timezone)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -432,7 +476,7 @@ func (s *Scheduler) Backfill(ctx context.Context, dagID string, from, to time.Ti
 	if d.Schedule == "" {
 		return 0, 0, fmt.Errorf("dag %q has no schedule — backfill enumerates schedule periods", dagID)
 	}
-	sched, err := parser.ParseSchedule(d.Schedule)
+	sched, err := parser.ParseScheduleIn(d.Schedule, d.Timezone)
 	if err != nil {
 		return 0, 0, fmt.Errorf("dag %q: bad schedule: %w", dagID, err)
 	}
@@ -500,6 +544,7 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 	if err := s.store.UpdateDagRunState(ctx, runID, model.RunCancelled, run.StartedAt, &fin); err != nil {
 		return err
 	}
+	metrics.IncRunFinished(string(model.RunCancelled))
 	tis, err := s.store.ListTaskInstances(ctx, runID)
 	if err != nil {
 		return err
@@ -902,6 +947,23 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.gcWorkspaces(ctx, 0)
 	s.housekeeping(ctx)
 	s.log.Info("scheduler started", "tick", s.opts.Tick.String(), "dags", len(s.allDAGs()))
+	go s.watchExecutorHealth(ctx) // edge-triggered down/recovered alerts to the system webhook
+	if s.opts.ReloadInterval > 0 {
+		go func() { // GitOps: changed files in DagDir go live without a restart
+			rt := time.NewTicker(s.opts.ReloadInterval)
+			defer rt.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-rt.C:
+					if err := s.ReloadDAGs(ctx); err != nil {
+						s.log.Error("reload dags", "err", err)
+					}
+				}
+			}
+		}()
+	}
 	t := time.NewTicker(s.opts.Tick)
 	defer t.Stop()
 	// …and periodically, for workspaces of recovered tasks that finalize outside
@@ -919,6 +981,40 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.gcWorkspaces(ctx, time.Hour) // age guard: skip anything mid-launch
 			s.housekeeping(ctx)
 		case <-t.C:
+		}
+	}
+}
+
+// watchExecutorHealth polls the executor's health (when it exposes one — the
+// gRPC client does; the in-process executor doesn't need it) and alerts the
+// system webhook on the down/up EDGES only, so a dead executor is one alert,
+// not one per probe. Previously this failure mode only reached stderr.
+func (s *Scheduler) watchExecutorHealth(ctx context.Context) {
+	hc, ok := s.exec.(interface{ Health(context.Context) error })
+	if !ok {
+		return
+	}
+	const interval = 30 * time.Second
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	healthy := true
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := hc.Health(hctx)
+		cancel()
+		if err != nil && healthy {
+			healthy = false
+			s.log.Error("executor unreachable", "err", err)
+			s.notifySystem("executor_unreachable", fmt.Sprintf("executor unreachable: %v — running tasks keep going, new tasks cannot dispatch", err))
+		} else if err == nil && !healthy {
+			healthy = true
+			s.log.Info("executor recovered")
+			s.notifySystem("executor_recovered", "executor reachable again")
 		}
 	}
 }
@@ -954,6 +1050,7 @@ func (s *Scheduler) pruneOldRuns(ctx context.Context) {
 	pruned, err := s.store.PruneRuns(ctx, cutoff)
 	if err != nil {
 		s.log.Error("retention prune failed", "err", err)
+		s.notifySystem("retention_prune_failed", fmt.Sprintf("retention prune failed: %v", err))
 		return
 	}
 	if len(pruned) == 0 {
@@ -974,15 +1071,106 @@ func (s *Scheduler) tickOnce(ctx context.Context) {
 	// Give previously-deferred dependency runs first access to newly-available
 	// queue capacity, then pick up events published by runs finalized this tick.
 	s.processPendingDependencyEvents(ctx)
+	s.processPendingExternalEvents(ctx)
 	s.createDueRuns(ctx, now)
 	s.processActiveRuns(ctx)
 	s.processPendingDependencyEvents(ctx)
+	// stamp AFTER the work: /readyz treats a stale stamp as a stalled loop.
+	metrics.SetLastTick(time.Now().UTC())
+}
+
+// processPendingExternalEvents turns durable external events (POST /api/events,
+// inbound webhooks) into event-triggered runs for every subscribed DAG
+// (trigger_on_event). An event is consumed only once every live subscriber got
+// its run — a queue-full defers the whole event to the next tick, and the
+// deterministic run id (dag + event id) makes redelivery idempotent.
+func (s *Scheduler) processPendingExternalEvents(ctx context.Context) {
+	events, err := s.store.ListPendingEvents(ctx, model.EventSourceExternal, 1000)
+	if err != nil {
+		s.log.Error("list external events", "err", err)
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+	subs := map[string][]string{}
+	for _, d := range s.allDAGs() {
+		for _, k := range d.TriggerOnEvent {
+			subs[k] = append(subs[k], d.DagID)
+		}
+	}
+	for _, ev := range events {
+		dagIDs := subs[ev.EventKey]
+		if len(dagIDs) == 0 {
+			// No subscriber: drop it (an event is a signal, not a queue to hold
+			// forever). A DAG subscribing later starts from future events.
+			if err := s.store.ConsumeEvent(ctx, ev.ID); err != nil {
+				s.log.Error("consume unsubscribed event", "event", ev.ID, "err", err)
+			}
+			continue
+		}
+		deferred := false
+		for _, dagID := range dagIDs {
+			d, _, ok := s.cachedDAG(dagID)
+			if !ok || d.Paused || len(d.Tasks) == 0 {
+				continue // paused/empty subscribers simply miss the event
+			}
+			run := &model.DagRun{
+				RunID:       fmt.Sprintf("%s__event_%d", dagID, ev.ID),
+				DagID:       dagID,
+				LogicalDate: time.Now().UTC(),
+				State:       model.RunQueued,
+				TriggerType: model.TriggerEvent,
+				Params:      eventRunParams(ev),
+			}
+			snapshotRun(run, d)
+			err := s.store.CreateDagRunBounded(ctx, run, s.opts.MaxQueuedRunsGlobal)
+			switch {
+			case err == nil:
+				s.log.Info("event run created", "dag", dagID, "run", run.RunID, "event_key", ev.EventKey)
+			case errors.Is(err, store.ErrAlreadyExists):
+				// re-delivery after a partial failure — this subscriber is done
+			case errors.Is(err, model.ErrQueueFull):
+				deferred = true
+			default:
+				s.log.Error("create event run", "dag", dagID, "event", ev.ID, "err", err)
+				deferred = true // transient (e.g. DB hiccup): retry next tick
+			}
+		}
+		if !deferred {
+			if err := s.store.ConsumeEvent(ctx, ev.ID); err != nil {
+				s.log.Error("consume external event", "event", ev.ID, "err", err)
+			}
+		}
+	}
+}
+
+// eventRunParams exposes the event to the run's command templates: the key as
+// {{ params.event_key }}, and — when the payload is a flat JSON string map —
+// each payload field as a param too (explicit fields win over the key).
+func eventRunParams(ev *model.Event) map[string]string {
+	params := map[string]string{}
+	if ev.Payload != "" {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(ev.Payload), &m); err == nil {
+			for k, v := range m {
+				params[k] = v
+			}
+		}
+	}
+	if _, taken := params["event_key"]; !taken {
+		params["event_key"] = ev.EventKey
+	}
+	return params
 }
 
 // createDueRuns creates the next scheduled run for each scheduled DAG that is
 // due. M1 is catchup-free: it anchors on the latest scheduled run (or boot
 // time) so it only ever creates the single next run, never a backfill storm.
 func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
+	// One GROUP BY replaces a per-DAG COUNT: activeBy is a consistent snapshot
+	// for this tick (runs we create below are accounted for locally).
+	activeBy, actErr := s.activeRunCounts(ctx)
 	for _, d := range s.allDAGs() {
 		// d comes from the cache (allDAGs), so d.Tasks is the parsed task set; a
 		// 0-task shell is never scheduled.
@@ -1000,12 +1188,15 @@ func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
 		if now.Before(next) {
 			continue
 		}
-		active, err := s.store.CountActiveRuns(ctx, d.DagID)
-		if err != nil {
-			s.log.Error("count active runs", "dag", d.DagID, "err", err)
-			continue
+		if actErr != nil { // snapshot failed: fall back to the per-DAG count
+			n, err := s.store.CountActiveRuns(ctx, d.DagID)
+			if err != nil {
+				s.log.Error("count active runs", "dag", d.DagID, "err", err)
+				continue
+			}
+			activeBy[d.DagID] = n
 		}
-		if active >= d.MaxActiveRuns {
+		if activeBy[d.DagID] >= d.MaxActiveRuns {
 			continue
 		}
 		run := &model.DagRun{
@@ -1026,8 +1217,24 @@ func (s *Scheduler) createDueRuns(ctx context.Context, now time.Time) {
 			}
 			continue
 		}
+		activeBy[d.DagID]++ // keep the tick-local snapshot honest
 		s.log.Info("scheduled run created", "dag", d.DagID, "logical_date", next.Format(time.RFC3339))
 	}
+}
+
+// activeRunCounts snapshots queued+running counts per DAG in one GROUP BY when
+// the store supports it; the returned map is always non-nil.
+func (s *Scheduler) activeRunCounts(ctx context.Context) (map[string]int, error) {
+	if agg, ok := s.store.(interface {
+		CountActiveRunsByDag(context.Context) (map[string]int, error)
+	}); ok {
+		m, err := agg.CountActiveRunsByDag(ctx)
+		if m == nil {
+			m = map[string]int{}
+		}
+		return m, err
+	}
+	return map[string]int{}, errors.New("store lacks CountActiveRunsByDag")
 }
 
 // scheduleAnchor returns the point from which the next scheduled run's logical
@@ -1051,7 +1258,13 @@ func (s *Scheduler) scheduleAnchor(ctx context.Context, d *model.DAG) time.Time 
 }
 
 func (s *Scheduler) processActiveRuns(ctx context.Context) {
-	queued, err := s.store.ListDagRunsByState(ctx, model.RunQueued)
+	// Cap how much queued backlog one tick materializes: with the admission
+	// window full (10k rows) an unbounded fetch would page it ALL through
+	// memory each tick even though only MaxActiveRunsGlobal can start. The
+	// headroom absorbs rows skipped by per-DAG max_active_runs; a backlog
+	// beyond it just waits one more tick (logical_date ASC keeps it fair).
+	queuedLimit := s.opts.MaxActiveRunsGlobal + 500
+	queued, err := s.listQueuedLimited(ctx, queuedLimit)
 	if err != nil {
 		s.log.Error("list runs by state", "state", model.RunQueued, "err", err)
 	}
@@ -1091,6 +1304,17 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 			s.log.Error("process run", "run", run.RunID, "err", err)
 		}
 	}
+}
+
+// listQueuedLimited uses the store's LIMIT-aware query when available (the
+// sqlite store), falling back to the interface method for other stores.
+func (s *Scheduler) listQueuedLimited(ctx context.Context, limit int) ([]*model.DagRun, error) {
+	if lim, ok := s.store.(interface {
+		ListDagRunsByStateLimited(context.Context, model.RunState, int) ([]*model.DagRun, error)
+	}); ok {
+		return lim.ListDagRunsByStateLimited(ctx, model.RunQueued, limit)
+	}
+	return s.store.ListDagRunsByState(ctx, model.RunQueued)
 }
 
 // processRun advances a single run: expands task instances, promotes the run to
@@ -1135,6 +1359,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunFailed, started, &fin); err != nil {
 			return err
 		}
+		metrics.IncRunFinished(string(model.RunFailed))
 		s.log.Warn("run failed: dag has no tasks to run", "run", run.RunID, "dag", run.DagID)
 		return nil
 	}
@@ -1210,6 +1435,19 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			continue
 		}
 		if r, _ := taskGate(t, tiByTask); r {
+			// when: gate — evaluated once the task is otherwise ready (upstream
+			// outputs exist by then). A falsy render marks it SKIPPED, and
+			// trigger rules downstream take it from there.
+			if t.When != "" && !s.evalWhen(ctx, run, t, ti.TryNumber+1) {
+				now := time.Now().UTC()
+				ti.State = model.TaskSkipped
+				ti.FinishedAt = &now
+				if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+					return err
+				}
+				s.log.Info("task skipped by when-condition", "run", run.RunID, "task", t.ID)
+				continue
+			}
 			ready = append(ready, ti)
 		}
 	}
@@ -1225,9 +1463,24 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		return err
 	}
 	globalRemaining := s.opts.MaxConcurrentTasks - activeTasks
+	// max_active_tasks: a per-DAG concurrency budget across all of this DAG's
+	// runs (0 = unlimited). Counted once per run per tick, decremented locally.
+	dagRemaining := -1
+	if d.MaxActiveTasks > 0 {
+		if counter, ok := s.store.(interface {
+			CountActiveTasksForDag(context.Context, string) (int, error)
+		}); ok {
+			if used, err := counter.CountActiveTasksForDag(ctx, run.DagID); err == nil {
+				dagRemaining = d.MaxActiveTasks - used
+			}
+		}
+	}
 	for _, ti := range ready {
 		if globalRemaining <= 0 {
 			break
+		}
+		if dagRemaining == 0 {
+			break // DAG budget exhausted; remaining tasks wait for a later tick
 		}
 		rem, ok := poolRemaining[ti.Pool]
 		if !ok {
@@ -1246,6 +1499,9 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		}
 		poolRemaining[ti.Pool] = rem - 1
 		globalRemaining--
+		if dagRemaining > 0 {
+			dagRemaining--
+		}
 	}
 
 	// 4. Finalize the run if every task is terminal.
@@ -1292,6 +1548,10 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 			}
 		} else if err := s.store.UpdateDagRunState(ctx, run.RunID, final, run.StartedAt, &fin); err != nil {
 			return err
+		}
+		metrics.IncRunFinished(string(final))
+		if run.StartedAt != nil {
+			metrics.ObserveRunDuration(run.DagID, fin.Sub(*run.StartedAt))
 		}
 		s.log.Info("run finished", "run", run.RunID, "state", final)
 		// A mark-driven re-finalize is a silent recorded-outcome override (like
@@ -1354,6 +1614,10 @@ func (s *Scheduler) timeoutRun(ctx context.Context, d *model.DAG, run *model.Dag
 	if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunTimedOut, run.StartedAt, &fin); err != nil {
 		s.log.Error("timeout run", "run", run.RunID, "err", err)
 		return
+	}
+	metrics.IncRunFinished(string(model.RunTimedOut))
+	if run.StartedAt != nil {
+		metrics.ObserveRunDuration(run.DagID, fin.Sub(*run.StartedAt))
 	}
 	for _, ti := range tis {
 		if ti.State.IsTerminal() {
@@ -1600,8 +1864,11 @@ func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Tas
 // and recovery re-attaches to it on restart.
 func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance) {
 	base := templateVars(run, t, ti.TryNumber)
-	resolve := s.templateResolver(ctx, base, run.Params)
+	resolve := s.templateResolver(ctx, run.RunID, base, run.Params)
 	env := taskEnv(base, run.Params)
+	// Output channel: the task may write a small JSON string-map here; it is
+	// collected at success-finalize and exposed downstream as {{ ti.<id>.<key> }}.
+	env["CRONOVA_OUTPUT"] = outputPath(ti.LogPath, ti.TryNumber)
 	// secrets accumulates every connection-password value substituted into this
 	// task, so we can mask them from anything echoed to the log (the "$ ..." line
 	// and, for http tasks, the request URL). The command still runs with the real
@@ -1775,16 +2042,83 @@ func (s *Scheduler) finalizeWrite(ctx context.Context, ti *model.TaskInstance, w
 	}
 }
 
+// evalWhen renders a task's when: template and decides run-vs-skip. Falsy is
+// "", "false", "0", "no" (case-insensitive) — and any UNRESOLVED placeholder,
+// so a typo'd variable skips visibly instead of running on garbage.
+func (s *Scheduler) evalWhen(ctx context.Context, run *model.DagRun, t model.Task, try int) bool {
+	base := templateVars(run, t, try)
+	rendered := strings.TrimSpace(renderCommand(t.When, s.templateResolver(ctx, run.RunID, base, run.Params)))
+	if strings.Contains(rendered, "{{") {
+		return false
+	}
+	switch strings.ToLower(rendered) {
+	case "", "false", "0", "no":
+		return false
+	}
+	return true
+}
+
+// SkipExitCode lets a task short-circuit itself: exiting with this code marks
+// the attempt SKIPPED instead of failed, so downstream trigger rules
+// (all_success treats skip as not-success; none_failed lets it pass) decide the
+// rest of the run. Chosen well away from common shell/tool exit codes.
+const SkipExitCode = 99
+
 func (s *Scheduler) finalizeTask(ctx context.Context, ti *model.TaskInstance, exitCode int) {
-	if exitCode == 0 {
+	if exitCode == 0 || exitCode == SkipExitCode {
 		now := time.Now().UTC()
 		ti.State = model.TaskSuccess
+		if exitCode == SkipExitCode {
+			ti.State = model.TaskSkipped
+		}
 		ti.FinishedAt = &now
 		s.finalizeWrite(ctx, ti, "finalize task")
-		s.log.Info("task finished", "ref", ti.ExecutorRef, "state", model.TaskSuccess, "exit", 0)
+		if exitCode == 0 {
+			s.collectTaskOutput(ctx, ti)
+		}
+		s.log.Info("task finished", "ref", ti.ExecutorRef, "state", ti.State, "exit", exitCode)
 		return
 	}
 	s.recordFailure(ctx, ti, fmt.Sprintf("exit %d", exitCode))
+}
+
+// maxTaskOutputBytes bounds a task's emitted output: it is metadata (counts,
+// paths, ids) passed between tasks — not a data channel.
+const maxTaskOutputBytes = 64 << 10
+
+// outputPath is where an attempt may leave its output JSON (next to its log,
+// per-try so a retry can't read a stale file from the previous attempt).
+func outputPath(logPath string, try int) string {
+	return fmt.Sprintf("%s.out%d.json", logPath, try)
+}
+
+// collectTaskOutput ingests $CRONOVA_OUTPUT after a successful attempt: a flat
+// JSON string map up to 64KB becomes the task's output row; anything else is
+// logged and dropped (never fails the already-successful task).
+func (s *Scheduler) collectTaskOutput(ctx context.Context, ti *model.TaskInstance) {
+	if ti.LogPath == "" {
+		return
+	}
+	path := outputPath(ti.LogPath, ti.TryNumber)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return // no output emitted — the common case
+	}
+	defer func() { _ = os.Remove(path) }()
+	if len(b) > maxTaskOutputBytes {
+		s.log.Warn("task output too large, dropped", "ref", ti.ExecutorRef, "bytes", len(b), "max", maxTaskOutputBytes)
+		return
+	}
+	var m map[string]string
+	if err := json.Unmarshal(b, &m); err != nil {
+		s.log.Warn("task output is not a flat JSON string map, dropped", "ref", ti.ExecutorRef, "err", err)
+		return
+	}
+	if err := s.store.SetTaskOutput(ctx, ti.RunID, ti.TaskID, string(b)); err != nil {
+		s.log.Error("store task output", "ref", ti.ExecutorRef, "err", err)
+		return
+	}
+	s.log.Info("task output collected", "ref", ti.ExecutorRef, "keys", len(m))
 }
 
 // finalizeTaskLost handles a task whose executor record vanished (e.g. the
@@ -2040,7 +2374,7 @@ func (s *Scheduler) sqlOpSpec(ctx context.Context, connID, query string, secrets
 // templateResolver resolves a placeholder name to its value: base vars first,
 // then params.KEY, then var.KEY and conn.ID.field which hit the store lazily
 // (only referenced values are fetched, and only referenced secrets are exposed).
-func (s *Scheduler) templateResolver(ctx context.Context, base, params map[string]string) func(string) (string, bool) {
+func (s *Scheduler) templateResolver(ctx context.Context, runID string, base, params map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		if v, ok := base[key]; ok {
 			return v, true
@@ -2048,6 +2382,22 @@ func (s *Scheduler) templateResolver(ctx context.Context, base, params map[strin
 		if name, ok := strings.CutPrefix(key, "params."); ok {
 			v, ok := params[name]
 			return v, ok
+		}
+		// {{ ti.<task_id>.<key> }}: a field of an upstream task's emitted output
+		// (this run only — trigger rules guarantee the upstream already finished).
+		if rest, ok := strings.CutPrefix(key, "ti."); ok && runID != "" {
+			taskID, field, ok2 := strings.Cut(rest, ".")
+			if !ok2 {
+				return "", false
+			}
+			if out, err := s.store.GetTaskOutput(ctx, runID, taskID); err == nil {
+				var m map[string]string
+				if json.Unmarshal([]byte(out), &m) == nil {
+					v, ok3 := m[field]
+					return v, ok3
+				}
+			}
+			return "", false
 		}
 		if name, ok := strings.CutPrefix(key, "var."); ok {
 			if vr, err := s.store.GetVariable(ctx, name); err == nil {

@@ -96,10 +96,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// with "duplicate column name" if already present, which we ignore.
 	for _, alter := range []string{
 		`ALTER TABLE dags ADD COLUMN deleted_at DATETIME`,
+		`ALTER TABLE dags ADD COLUMN timezone TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dag_runs ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dag_runs ADD COLUMN definition_yaml TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dag_runs ADD COLUMN definition_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE task_instances ADD COLUMN definition_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE api_tokens ADD COLUMN expires_at DATETIME`,
+		`ALTER TABLE api_tokens ADD COLUMN dag_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
@@ -189,10 +192,10 @@ func isUniqueErr(err error) bool {
 
 func (s *Store) UpsertDAG(ctx context.Context, d *model.DAG) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO dags (dag_id, schedule, start_date, catchup, paused, max_active_runs, definition_yaml, owner, project, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+INSERT INTO dags (dag_id, schedule, timezone, start_date, catchup, paused, max_active_runs, definition_yaml, owner, project, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(dag_id) DO UPDATE SET
-  schedule=excluded.schedule, start_date=excluded.start_date, catchup=excluded.catchup,
+  schedule=excluded.schedule, timezone=excluded.timezone, start_date=excluded.start_date, catchup=excluded.catchup,
   max_active_runs=excluded.max_active_runs, definition_yaml=excluded.definition_yaml,
   updated_at=CURRENT_TIMESTAMP, deleted_at=NULL`,
 		// paused/owner/project are operational state, not part of the YAML
@@ -200,7 +203,7 @@ ON CONFLICT(dag_id) DO UPDATE SET
 		// edit or a restart) so a save/reload never silently un-pauses a DAG.
 		// deleted_at is cleared: creating/registering a dag_id makes it active
 		// (re-creating a previously soft-deleted id revives it).
-		d.DagID, d.Schedule, fmtTime(d.StartDate), boolToInt(d.Catchup), boolToInt(d.Paused),
+		d.DagID, d.Schedule, d.Timezone, fmtTime(d.StartDate), boolToInt(d.Catchup), boolToInt(d.Paused),
 		d.MaxActiveRuns, d.DefinitionYAML, d.Owner, d.Project)
 	if err != nil {
 		return fmt.Errorf("upsert dag %q: %w", d.DagID, err)
@@ -208,14 +211,14 @@ ON CONFLICT(dag_id) DO UPDATE SET
 	return nil
 }
 
-const dagCols = `dag_id, schedule, start_date, catchup, paused, max_active_runs, definition_yaml, owner, project, created_at, updated_at, deleted_at`
+const dagCols = `dag_id, schedule, timezone, start_date, catchup, paused, max_active_runs, definition_yaml, owner, project, created_at, updated_at, deleted_at`
 
 func scanDAG(sc scanner) (*model.DAG, error) {
 	var d model.DAG
 	var startStr, createdStr, updatedStr string
 	var catchup, paused int
 	var deletedNS sql.NullString
-	err := sc.Scan(&d.DagID, &d.Schedule, &startStr, &catchup, &paused, &d.MaxActiveRuns,
+	err := sc.Scan(&d.DagID, &d.Schedule, &d.Timezone, &startStr, &catchup, &paused, &d.MaxActiveRuns,
 		&d.DefinitionYAML, &d.Owner, &d.Project, &createdStr, &updatedStr, &deletedNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -775,6 +778,58 @@ func (s *Store) ConsumeEvent(ctx context.Context, id int64) error {
 	return err
 }
 
+// PublishEvent durably records an event. (source, event_key) is the
+// idempotency key: re-publishing an existing key — consumed or not — is a
+// no-op, so an external caller retrying a delivery cannot double-trigger.
+func (s *Store) PublishEvent(ctx context.Context, source, key, payload string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO events(source, event_key, payload, consumed) VALUES (?, ?, ?, 0)
+ON CONFLICT(source, event_key) DO NOTHING`, source, key, payload)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// --- inbound webhook secrets (per-DAG) ---
+
+// SetDagHook stores (replaces) the hook secret hash for a DAG.
+func (s *Store) SetDagHook(ctx context.Context, dagID, secretHash, prefix string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO dag_hooks(dag_id, secret_hash, prefix, created_at) VALUES (?,?,?,?)
+ON CONFLICT(dag_id) DO UPDATE SET secret_hash=excluded.secret_hash, prefix=excluded.prefix, created_at=excluded.created_at`,
+		dagID, secretHash, prefix, fmtTime(time.Now().UTC()))
+	return err
+}
+
+// GetDagHook returns the stored secret hash + display prefix, or ErrNotFound.
+func (s *Store) GetDagHook(ctx context.Context, dagID string) (secretHash, prefix string, createdAt time.Time, err error) {
+	var created string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT secret_hash, prefix, created_at FROM dag_hooks WHERE dag_id=?`, dagID).
+		Scan(&secretHash, &prefix, &created)
+	if err == sql.ErrNoRows {
+		return "", "", time.Time{}, store.ErrNotFound
+	}
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return secretHash, prefix, parseLoose(created), nil
+}
+
+// DeleteDagHook removes a DAG's hook secret (the URL stops working immediately).
+func (s *Store) DeleteDagHook(ctx context.Context, dagID string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM dag_hooks WHERE dag_id=?`, dagID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) queryStrings(ctx context.Context, query string, args ...any) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1305,21 +1360,24 @@ func (s *Store) RecordAudit(ctx context.Context, e *model.AuditEntry) error {
 
 // ListAudit returns audit entries newest-first (by id); target != "" filters to
 // one dag/run. limit is clamped to [1,500] (default 100).
-func (s *Store) ListAudit(ctx context.Context, target string, limit int) ([]*model.AuditEntry, error) {
+func (s *Store) ListAudit(ctx context.Context, target string, limit, offset int) ([]*model.AuditEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > 500 {
 		limit = 500
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if target != "" {
-		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log WHERE target=? ORDER BY id DESC LIMIT ?`, target, limit)
+		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log WHERE target=? ORDER BY id DESC LIMIT ? OFFSET ?`, target, limit, offset)
 	} else {
-		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log ORDER BY id DESC LIMIT ?`, limit)
+		rows, err = s.db.QueryContext(ctx, `SELECT id, ts, actor, action, target, detail FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	}
 	if err != nil {
 		return nil, err
@@ -1350,8 +1408,8 @@ func (s *Store) PruneAudit(ctx context.Context, cutoff time.Time) (int64, error)
 // persisted (the caller returns it once in the create response).
 func (s *Store) CreateAPIToken(ctx context.Context, t *model.APIToken, hash string) error {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_tokens (name, role, token_hash, prefix, created_at) VALUES (?,?,?,?,?)`,
-		t.Name, string(t.Role), hash, t.Prefix, fmtTime(time.Now().UTC()))
+		`INSERT INTO api_tokens (name, role, token_hash, prefix, created_at, expires_at, dag_id) VALUES (?,?,?,?,?,?,?)`,
+		t.Name, string(t.Role), hash, t.Prefix, fmtTime(time.Now().UTC()), fmtNullTime(t.ExpiresAt), t.DagID)
 	if err != nil {
 		return err
 	}
@@ -1360,27 +1418,40 @@ func (s *Store) CreateAPIToken(ctx context.Context, t *model.APIToken, hash stri
 	return nil
 }
 
+// scanAPIToken decodes one api_tokens row (shared by List and GetByHash).
+func scanAPIToken(row scanner) (*model.APIToken, error) {
+	t := &model.APIToken{}
+	var role, created string
+	var lastUsed, expires sql.NullString
+	if err := row.Scan(&t.ID, &t.Name, &role, &t.Prefix, &created, &lastUsed, &expires, &t.DagID); err != nil {
+		return nil, err
+	}
+	t.Role = model.Role(role)
+	t.CreatedAt = parseLoose(created)
+	if lastUsed.Valid && lastUsed.String != "" {
+		lt := parseLoose(lastUsed.String)
+		t.LastUsedAt = &lt
+	}
+	if expires.Valid && expires.String != "" {
+		et := parseLoose(expires.String)
+		t.ExpiresAt = &et
+	}
+	return t, nil
+}
+
 // ListAPITokens returns all tokens newest-first (never the hash or plaintext).
 func (s *Store) ListAPITokens(ctx context.Context) ([]*model.APIToken, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, role, prefix, created_at, last_used_at FROM api_tokens ORDER BY id DESC`)
+		`SELECT id, name, role, prefix, created_at, last_used_at, expires_at, dag_id FROM api_tokens ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*model.APIToken
 	for rows.Next() {
-		t := &model.APIToken{}
-		var role, created string
-		var lastUsed sql.NullString
-		if err := rows.Scan(&t.ID, &t.Name, &role, &t.Prefix, &created, &lastUsed); err != nil {
+		t, err := scanAPIToken(rows)
+		if err != nil {
 			return nil, err
-		}
-		t.Role = model.Role(role)
-		t.CreatedAt = parseLoose(created)
-		if lastUsed.Valid && lastUsed.String != "" {
-			lt := parseLoose(lastUsed.String)
-			t.LastUsedAt = &lt
 		}
 		out = append(out, t)
 	}
@@ -1390,23 +1461,13 @@ func (s *Store) ListAPITokens(ctx context.Context) ([]*model.APIToken, error) {
 // GetAPITokenByHash resolves an incoming bearer token's hash to its record, or
 // ErrNotFound. Used on every Bearer-authenticated request.
 func (s *Store) GetAPITokenByHash(ctx context.Context, hash string) (*model.APIToken, error) {
-	t := &model.APIToken{}
-	var role, created string
-	var lastUsed sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, role, prefix, created_at, last_used_at FROM api_tokens WHERE token_hash=?`, hash).
-		Scan(&t.ID, &t.Name, &role, &t.Prefix, &created, &lastUsed)
+	t, err := scanAPIToken(s.db.QueryRowContext(ctx,
+		`SELECT id, name, role, prefix, created_at, last_used_at, expires_at, dag_id FROM api_tokens WHERE token_hash=?`, hash))
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
-	}
-	t.Role = model.Role(role)
-	t.CreatedAt = parseLoose(created)
-	if lastUsed.Valid && lastUsed.String != "" {
-		lt := parseLoose(lastUsed.String)
-		t.LastUsedAt = &lt
 	}
 	return t, nil
 }

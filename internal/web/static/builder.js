@@ -89,7 +89,10 @@ function schedBodyHtml(state, idp) {
   const prev = d.schedMode !== "manual" ? `<div class="sched-preview" id="${idp}-schedprev" aria-live="polite"></div>` : "";
   const sd = d.schedMode !== "manual"
     ? `<div class="b-field" style="max-width:220px;margin-top:12px"><label>${t("f_start")}</label><input id="${idp}-start" type="date" value="${esc(d.start_date || "")}"></div>` : "";
-  const cu = `<div class="b-field b-check" style="margin-top:12px"><input type="checkbox" id="${idp}-catchup" ${d.catchup ? "checked" : ""} disabled><label for="${idp}-catchup" style="color:var(--faint)">${t("f_catchup")} ${t("disabled_note")}</label></div>`;
+  // catchup only makes sense for a scheduled DAG (it backfills missed periods)
+  const cu = d.schedMode !== "manual"
+    ? `<div class="b-field b-check" style="margin-top:12px"><input type="checkbox" id="${idp}-catchup" ${d.catchup ? "checked" : ""}><label for="${idp}-catchup">${t("f_catchup")}</label><div class="field-hint">${esc(t("f_catchup_hint"))}</div></div>`
+    : "";
   return body + prev + sd + cu;
 }
 // plain-language gloss of the schedule — ONLY for shapes we know for sure
@@ -156,6 +159,7 @@ function wireSchedBody() {
   const hc = $(idp + "-cronclose"); if (hc) hc.onclick = () => { const p = $(idp + "-cronpop"); if (p) p.hidden = true; };
   body.querySelectorAll(".ch-ex").forEach((c) => c.onclick = () => { d.schedCron = c.dataset.cron; computeSchedule(state); renderSchedBody(); fire(); });
   const sd = $(idp + "-start"); if (sd) sd.oninput = () => { d.start_date = sd.value; schedPreviewSoon(); fire(); };
+  const cu = $(idp + "-catchup"); if (cu) cu.onchange = () => { d.catchup = cu.checked; fire(); };
   updateSchedPreview(); // initial fill (renderSchedBody re-runs this on preset clicks/mode switches)
 }
 
@@ -289,7 +293,7 @@ async function submitNewDag() {
   computeSchedule(ND);
   const tp = DAG_TEMPLATES.find((x) => x.key === ND.template) || DAG_TEMPLATES[0];
   const tasks = (tp.tasks || []).map((tk) => ({ id: tk.id, type: tk.type || "shell", command: tk.command, deps: tk.deps || [], pool: "default", priority: 0, timeout: 0, trigger_rule: "all_success", retries: null, retry_delay: null }));
-  const spec = { dag_id: ND.dag.dag_id, schedule: ND.dag.schedule, start_date: ND.dag.start_date, catchup: false, max_active_runs: 1, default_retries: 0, trigger_after: [], tasks };
+  const spec = { dag_id: ND.dag.dag_id, schedule: ND.dag.schedule, start_date: ND.dag.start_date, catchup: !!(ND.dag.schedule && ND.dag.catchup), max_active_runs: 1, default_retries: 0, trigger_after: [], tasks };
   try { await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }); if (tasks.length) coachDag = ND.dag.dag_id; $("modal-root").innerHTML = ""; showDag(ND.dag.dag_id); }
   catch (e) { $("nd-srv").textContent = e.message; btn.disabled = false; }
 }

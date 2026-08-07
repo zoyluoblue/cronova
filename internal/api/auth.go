@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zoyluo/cronova/internal/auth"
+	"github.com/zoyluo/cronova/internal/metrics"
 	"github.com/zoyluo/cronova/internal/model"
 )
 
@@ -72,10 +73,13 @@ func (s *Server) authenticate(r *http.Request) (*model.User, error) {
 		if err != nil {
 			return nil, err
 		}
+		if tok.ExpiresAt != nil && time.Now().After(*tok.ExpiresAt) {
+			return nil, errors.New("token expired")
+		}
 		if tok.LastUsedAt == nil || time.Since(*tok.LastUsedAt) > tokenTouchInterval {
 			_ = s.store.TouchAPIToken(r.Context(), tok.ID) // best-effort, throttled
 		}
-		return &model.User{Username: "token:" + tok.Name, Role: tok.Role}, nil
+		return &model.User{Username: "token:" + tok.Name, Role: tok.Role, TokenDagScope: tok.DagID}, nil
 	}
 	return s.currentUser(r)
 }
@@ -102,7 +106,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		p := r.URL.Path
-		if public[p] || !strings.HasPrefix(p, "/api/") {
+		// Inbound webhooks authenticate by their path secret (rate-limited,
+		// constant-time hash compare in the handler) — no session or bearer.
+		if public[p] || strings.HasPrefix(p, "/api/hooks/") || !strings.HasPrefix(p, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -111,12 +117,61 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		if r.Method != http.MethodGet && p != "/api/logout" && user.Role != model.RoleAdmin {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: admin role required"})
-			return
+		if r.Method != http.MethodGet && p != "/api/logout" {
+			switch {
+			case user.Role == model.RoleAdmin:
+				// full write access
+			case user.Role == model.RoleOperator && isOperatorWrite(p):
+				// run-driving writes only; definition/config writes need admin
+			default:
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: insufficient role"})
+				return
+			}
+			// A dag-scoped token confines every write to its DAG, whatever the role.
+			if user.TokenDagScope != "" && !writeTargetsDag(p, user.TokenDagScope) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: token is scoped to dag " + user.TokenDagScope})
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(withUser(r.Context(), user)))
 	})
+}
+
+// isOperatorWrite reports whether path is a run-driving operation (trigger,
+// backfill, pause, cancel/retry/mark) — the write surface the operator role
+// may use. Everything else (DAG definitions, variables, connections, pools,
+// projects, tokens) stays admin-only.
+func isOperatorWrite(p string) bool {
+	if strings.HasPrefix(p, "/api/runs/") {
+		return true // cancel, retry, mark, task retry/mark
+	}
+	if p == "/api/events" {
+		return true // publishing an event is run-driving, not config
+	}
+	if strings.HasPrefix(p, "/api/dags/") {
+		switch {
+		case strings.HasSuffix(p, "/trigger"), strings.HasSuffix(p, "/backfill"), strings.HasSuffix(p, "/pause"):
+			return true
+		}
+	}
+	return false
+}
+
+// writeTargetsDag reports whether a WRITE to path stays inside dagID: the
+// DAG's own op endpoints, or a run belonging to it (run ids are
+// "<dag>__<suffix>" by construction). Any other write is out of scope.
+func writeTargetsDag(p, dagID string) bool {
+	if rest, ok := strings.CutPrefix(p, "/api/dags/"); ok {
+		id, _, _ := strings.Cut(rest, "/")
+		unescaped, err := url.PathUnescape(id)
+		return err == nil && unescaped == dagID
+	}
+	if rest, ok := strings.CutPrefix(p, "/api/runs/"); ok {
+		runID, _, _ := strings.Cut(rest, "/")
+		unescaped, err := url.PathUnescape(runID)
+		return err == nil && strings.HasPrefix(unescaped, dagID+"__")
+	}
+	return false
 }
 
 // isUnsafeMethod reports whether the HTTP method mutates state (so it warrants a
@@ -250,7 +305,8 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// GET /readyz — readiness (DB and configured runtime dependencies reachable).
+// GET /readyz — readiness (DB and configured runtime dependencies reachable,
+// AND the scheduling loop itself is alive).
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.CountUsers(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
@@ -265,5 +321,26 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Scheduler-loop liveness: DB and executor answering means nothing if the
+	// tick goroutine is stuck — the one failure mode nothing external can see.
+	// A stale last-tick stamp (beyond a generous multiple of the tick interval)
+	// reports not-ready so supervisors restart the process.
+	if s.schedulerTick > 0 {
+		if lt := metrics.LastTick(); lt > 0 && time.Since(time.Unix(lt, 0)) > s.schedulerStallAfter() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready", "component": "scheduler", "detail": "scheduling loop stalled"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// schedulerStallAfter is how stale the last-tick stamp may get before /readyz
+// reports the loop stalled: 5 ticks, floored at 30s so a tiny tick interval
+// doesn't flap on a briefly busy loop (a long tick's work delays the stamp).
+func (s *Server) schedulerStallAfter() time.Duration {
+	d := 5 * s.schedulerTick
+	if d < 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
 }

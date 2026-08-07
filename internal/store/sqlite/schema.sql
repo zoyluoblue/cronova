@@ -3,6 +3,7 @@
 CREATE TABLE IF NOT EXISTS dags (
     dag_id          TEXT PRIMARY KEY,
     schedule        TEXT,
+    timezone        TEXT NOT NULL DEFAULT '', -- IANA zone the cron fields evaluate in ('' = UTC)
     start_date      DATETIME,
     catchup         INTEGER NOT NULL DEFAULT 0,
     paused          INTEGER NOT NULL DEFAULT 0,
@@ -147,3 +148,45 @@ CREATE INDEX IF NOT EXISTS idx_ti_run     ON task_instances(run_id);
 CREATE INDEX IF NOT EXISTS idx_ti_pool    ON task_instances(pool, state);
 CREATE INDEX IF NOT EXISTS idx_runs_state ON dag_runs(state);
 CREATE INDEX IF NOT EXISTS idx_runs_dag   ON dag_runs(dag_id);
+
+-- Single-row scheduler lease: prevents two `cronova serve` processes from
+-- scheduling against the same database (which would double-dispatch tasks).
+-- The holder renews expires_at on a heartbeat; a stale lease left by a crashed
+-- holder is taken over on the next start.
+CREATE TABLE IF NOT EXISTS scheduler_lease (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    holder     TEXT NOT NULL,
+    expires_at DATETIME NOT NULL
+);
+
+-- Per-DAG inbound-webhook secrets: POST /api/hooks/{dag}/{secret} triggers the
+-- DAG without a bearer token (the secret IS the credential; only its SHA-256
+-- is stored, prefix is for display). One hook per DAG; setting rotates it.
+CREATE TABLE IF NOT EXISTS dag_hooks (
+    dag_id      TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    prefix      TEXT NOT NULL DEFAULT '',
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Task outputs (XCom-equivalent): a small JSON string-map a task emits by
+-- writing to the file named in $CRONOVA_OUTPUT. Collected at success-finalize;
+-- downstream commands read fields via {{ ti.<task_id>.<key> }} templates.
+CREATE TABLE IF NOT EXISTS task_outputs (
+    run_id  TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    output  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (run_id, task_id)
+);
+
+-- Append-only DAG definition history: one row per distinct definition (same
+-- consecutive hash is skipped). Runs link to a version via definition_hash;
+-- restore re-registers an old version through the normal validated path.
+CREATE TABLE IF NOT EXISTS dag_versions (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    dag_id  TEXT NOT NULL,
+    hash    TEXT NOT NULL,
+    yaml    TEXT NOT NULL,
+    ts      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_dag_versions ON dag_versions(dag_id, id DESC);

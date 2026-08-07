@@ -30,6 +30,10 @@ import (
 type Runner struct {
 	mu    sync.Mutex
 	tasks map[string]*procTask
+	// stateDir enables attempt-state persistence (see state.go): launched
+	// attempts survive an executor restart via re-adoption instead of being
+	// reported PhaseUnknown (which costs the task a retry). "" = off.
+	stateDir string
 }
 
 // finishedTaskTTL is how long a completed task's result is retained in the
@@ -41,6 +45,7 @@ const finishedTaskTTL = time.Hour
 
 type procTask struct {
 	cmd        *exec.Cmd
+	pgid       int // survives re-adoption (cmd is nil for adopted tasks)
 	finished   bool
 	exitCode   int
 	finishedAt time.Time
@@ -49,6 +54,17 @@ type procTask struct {
 // NewRunner creates an empty Runner.
 func NewRunner() *Runner {
 	return &Runner{tasks: map[string]*procTask{}}
+}
+
+// NewRunnerWithState creates a Runner that persists attempt state under dir so
+// a restarted executor re-adopts running tasks (call RecoverState after).
+func NewRunnerWithState(dir string) (*Runner, error) {
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("executor state dir: %w", err)
+		}
+	}
+	return &Runner{tasks: map[string]*procTask{}, stateDir: dir}, nil
 }
 
 // Launch starts the task and returns its ref. If a task with the same ref is
@@ -82,7 +98,15 @@ func (r *Runner) Launch(spec Spec) (string, error) {
 	fmt.Fprintf(sink, "=== cronova task %s started at %s ===\n", ref, time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(sink, "$ %s\n", spec.Command)
 
-	cmd := exec.Command("sh", "-c", spec.Command)
+	// With state persistence on, wrap the command so the SHELL writes the exit
+	// code to a sidecar file — it survives even if this executor process dies
+	// before the task finishes, letting a restarted executor report the real
+	// outcome instead of failing the task on principle.
+	script := spec.Command
+	if r.stateDir != "" {
+		script = fmt.Sprintf("(\n%s\n)\n__cronova_ec=$?\nprintf '%%d' \"$__cronova_ec\" > %q\nexit \"$__cronova_ec\"", spec.Command, exitFile(r.stateDir, ref))
+	}
+	cmd := exec.Command("sh", "-c", script)
 	cmd.Stdout = sink
 	cmd.Stderr = sink
 	cmd.Env = buildEnv(spec.Env)
@@ -113,7 +137,12 @@ func (r *Runner) Launch(spec Spec) (string, error) {
 
 	r.mu.Lock()
 	t.cmd = cmd
+	if cmd.Process != nil {
+		t.pgid = cmd.Process.Pid // Setpgid: the child leads its own group (pgid == pid)
+	}
+	pgid := t.pgid
 	r.mu.Unlock()
+	r.saveState(attemptState{Ref: ref, PID: pgid, PGID: pgid, StartedAt: time.Now().UTC()})
 
 	go r.wait(ref, cmd, sink, spec.Timeout)
 	return ref, nil
@@ -143,12 +172,15 @@ func (r *Runner) wait(ref string, cmd *exec.Cmd, sink logSink, timeout time.Dura
 	}
 
 	r.mu.Lock()
+	var pgid int
 	if t, ok := r.tasks[ref]; ok {
 		t.finished = true
 		t.exitCode = code
 		t.finishedAt = time.Now()
+		pgid = t.pgid
 	}
 	r.mu.Unlock()
+	r.saveState(attemptState{Ref: ref, PID: pgid, PGID: pgid, Finished: true, ExitCode: code})
 }
 
 // sweepFinishedLocked evicts completed tasks whose result has outlived
@@ -159,6 +191,7 @@ func (r *Runner) sweepFinishedLocked(now time.Time) {
 	for ref, t := range r.tasks {
 		if t.finished && now.Sub(t.finishedAt) > finishedTaskTTL {
 			delete(r.tasks, ref)
+			r.removeState(ref)
 		}
 	}
 }
@@ -186,14 +219,19 @@ func (r *Runner) Cancel(ref string) error {
 	r.mu.Lock()
 	t, ok := r.tasks[ref]
 	var cmd *exec.Cmd
+	var pgid int
 	if ok {
 		cmd = t.cmd
+		pgid = t.pgid
 	}
 	r.mu.Unlock()
-	if cmd == nil {
+	if cmd != nil {
+		killGroup(cmd)
 		return nil
 	}
-	killGroup(cmd)
+	if pgid > 0 { // adopted after a restart: no cmd handle, kill by group id
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
 	return nil
 }
 
@@ -206,6 +244,14 @@ func (r *Runner) forget(ref string) {
 // Shutdown kills the process group of every still-running task. Call it on a
 // graceful executor shutdown so tasks are not left as orphans.
 func (r *Runner) Shutdown() {
+	// With state persistence, a graceful stop KEEPS tasks running: the restart
+	// re-adopts their process groups (RecoverState) and the sidecar exit file
+	// carries the outcome — this is what makes an executor upgrade invisible
+	// to in-flight work. Without persistence the historic kill-on-shutdown
+	// stands (orphans could not be re-attached and would break idempotency).
+	if r.stateDir != "" {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range r.tasks {

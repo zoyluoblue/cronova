@@ -66,6 +66,14 @@ func main() {
 		err = cmdPools(args)
 	case "prune":
 		err = cmdPrune(args)
+	case "backup":
+		err = cmdBackup(args)
+	case "apply":
+		err = cmdApply(args)
+	case "export":
+		err = cmdExport(args)
+	case "import":
+		err = cmdImport(args)
 	case "backfill":
 		err = cmdBackfill(args)
 	case "api":
@@ -194,6 +202,9 @@ usage:
   cronova tokens list | delete <id>           manage API tokens (local)
   cronova mcp [-read-only]                     run an MCP server (stdio) for AI clients
   cronova prune [-older-than 2160h] [-yes]    delete finished runs + logs older than the window
+  cronova backup <dest-dir>                   consistent live snapshot: DB (VACUUM INTO) + key + dags/ + projects/
+  cronova apply <dir> [-dry-run]              GitOps push: validate, diff, and apply DAG YAML to a running server
+  cronova export <dir> | import <dir>         portable bundle: DAG YAML + pools + variables (+conns, sans passwords)
 
   cronova start|stop|restart control the installed service (auto-elevates via sudo)
   cronova status             show the installed service's status
@@ -222,6 +233,16 @@ func parsePositionals(fs *flag.FlagSet, args []string) []string {
 		_ = fs.Parse(rest[i:])
 	}
 	return pos
+}
+
+// leaseHolderID identifies this scheduler process in the lease row: useful in
+// the "already running" error so the operator can find the other instance.
+func leaseHolderID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown-host"
+	}
+	return fmt.Sprintf("%s:pid-%d:%d", host, os.Getpid(), time.Now().UnixNano())
 }
 
 func openStore(dbPath string) (*sqlite.Store, error) {
@@ -277,9 +298,11 @@ func cmdServe(args []string) error {
 	projectsDir := fs.String("projects", "", "directory for uploaded project files (default ~/.cronova/projects)")
 	workspacesDir := fs.String("workspaces", "", "shared per-attempt project workspace directory")
 	tick := fs.Duration("tick", 2*time.Second, "scheduling loop interval")
+	reload := fs.Duration("reload", 0, "re-scan the dags dir for changed YAML this often (0 = off)")
 	executorAddr := fs.String("executor", "", "executor target (absolute unix:///path socket only); empty = in-process executor")
 	httpAddr := fs.String("http", "127.0.0.1:8090", "HTTP address for the console API + web UI (empty to disable)")
 	authFlag := fs.Bool("auth", false, "require login for the console/API (overrides config)")
+	standby := fs.Bool("standby", false, "if another scheduler holds the lease, wait and take over when it dies (active-standby HA) instead of exiting")
 	allowUnauthenticatedRemote := fs.Bool("allow-unauthenticated-remote", false, "DANGEROUS: allow an unauthenticated console on a non-loopback address")
 	retention := fs.Duration("retention", 90*24*time.Hour, "delete finished runs + their logs older than this (0 = keep forever)")
 	auditRetention := fs.Duration("audit-retention", 365*24*time.Hour, "delete audit entries older than this (0 = keep forever)")
@@ -301,7 +324,7 @@ func cmdServe(args []string) error {
 	}
 	applyEnv(&cfg)
 	overlaySetFlags(&cfg, fs, map[string]any{
-		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "workspaces": workspacesDir, "tick": tick,
+		"db": dbPath, "dags": dagDir, "logs": logDir, "projects": projectsDir, "workspaces": workspacesDir, "tick": tick, "reload": reload,
 		"executor": executorAddr, "http": httpAddr, "auth": authFlag, "retention": retention, "audit-retention": auditRetention,
 		"max-queued-runs": maxQueuedRuns, "max-active-runs": maxActiveRuns, "max-concurrent-tasks": maxConcurrentTasks,
 		"allow-unauthenticated-remote": allowUnauthenticatedRemote,
@@ -321,6 +344,10 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	reloadDur, err := parseRetention(cfg.Reload) // same "duration or 0" shape
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
 	auditRetentionDur, err := parseRetention(cfg.AuditRetention)
 	if err != nil {
 		return fmt.Errorf("audit retention: %w", err)
@@ -331,12 +358,59 @@ func cmdServe(args []string) error {
 	if cfg.MaxQueuedRunsGlobal <= 0 || cfg.MaxActiveRunsGlobal <= 0 || cfg.MaxConcurrentTasks <= 0 {
 		return fmt.Errorf("global run/task limits must be positive")
 	}
+	if cfg.Notify.URL != "" && !strings.HasPrefix(cfg.Notify.URL, "http://") && !strings.HasPrefix(cfg.Notify.URL, "https://") {
+		return fmt.Errorf("notify.url must start with http:// or https://")
+	}
+	logger, err := buildLogger(cfg.Log.Level, cfg.Log.Format)
+	if err != nil {
+		return err
+	}
 
 	st, err := openStore(cfg.DB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+
+	// Single-scheduler lease: a second `cronova serve` against the same DB
+	// would double-dispatch tasks, so refuse to start while another live
+	// instance holds the lease. A stale lease (crashed holder) is taken over.
+	leaseHolder := leaseHolderID()
+	const leaseTTL = 15 * time.Second
+	if err := st.AcquireLease(context.Background(), leaseHolder, leaseTTL); err != nil {
+		if !errors.Is(err, store.ErrLeaseHeld) {
+			return fmt.Errorf("acquire scheduler lease: %w", err)
+		}
+		if !*standby {
+			return fmt.Errorf("another cronova scheduler is already running against %s (%v); stop it first, wait ~%s for a crashed instance's lease to expire, or run with -standby to take over automatically", cfg.DB, err, leaseTTL)
+		}
+		// Active-standby: park until the active holder's lease expires (its
+		// heartbeat stops on crash/stop), then take over and start scheduling.
+		// Interruptible so a Ctrl-C during standby exits cleanly.
+		waitCtx, waitCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		log.Printf("cronova: standby — another scheduler holds the lease; waiting to take over (%v)", err)
+		for {
+			select {
+			case <-waitCtx.Done():
+				waitCancel()
+				return nil // clean shutdown while parked
+			case <-time.After(leaseTTL / 3):
+			}
+			if aerr := st.AcquireLease(context.Background(), leaseHolder, leaseTTL); aerr == nil {
+				log.Printf("cronova: standby takeover — previous scheduler's lease expired; becoming active")
+				break
+			} else if !errors.Is(aerr, store.ErrLeaseHeld) {
+				waitCancel()
+				return fmt.Errorf("acquire scheduler lease: %w", aerr)
+			}
+		}
+		waitCancel()
+	}
+	defer func() {
+		relCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
+		defer c()
+		_ = st.ReleaseLease(relCtx, leaseHolder)
+	}()
 
 	// At-rest encryption for connection passwords: load (or mint) the key file
 	// and seal any legacy plaintext rows. "none" opts out explicitly.
@@ -426,10 +500,38 @@ func cmdServe(args []string) error {
 		MaxQueuedRunsGlobal:  cfg.MaxQueuedRunsGlobal,
 		MaxActiveRunsGlobal:  cfg.MaxActiveRunsGlobal,
 		MaxConcurrentTasks:   cfg.MaxConcurrentTasks,
+		DefaultNotifyURL:     cfg.Notify.URL,
+		DefaultNotifyFormat:  cfg.Notify.Format,
+		ReloadInterval:       reloadDur,
+		Logger:               logger,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Lease heartbeat: renew well inside the TTL. Losing the lease means another
+	// instance took over — stop scheduling immediately rather than double-dispatch.
+	go func() {
+		t := time.NewTicker(leaseTTL / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				rctx, c := context.WithTimeout(ctx, leaseTTL/3)
+				err := st.RenewLease(rctx, leaseHolder, leaseTTL)
+				c()
+				if errors.Is(err, store.ErrLeaseLost) {
+					log.Printf("cronova: scheduler lease lost to another instance — shutting down to avoid double-dispatch")
+					cancel()
+					return
+				} else if err != nil && ctx.Err() == nil {
+					log.Printf("cronova: lease renew failed (will retry): %v", err)
+				}
+			}
+		}
+	}()
 
 	// Console (REST API + web UI) runs in-process alongside the scheduler loop.
 	var httpSrv *http.Server
@@ -444,6 +546,9 @@ func cmdServe(args []string) error {
 		if hc, ok := exec.(interface{ Health(context.Context) error }); ok {
 			apiSrv.SetReadinessCheck(hc.Health)
 		}
+		apiSrv.SetSchedulerTick(tickDur)
+		apiSrv.SetLimits(cfg.MaxQueuedRunsGlobal, cfg.MaxActiveRunsGlobal, cfg.MaxConcurrentTasks)
+		apiSrv.SetAccessLogger(logger)
 		httpSrv = newConsoleHTTPServer(cfg.HTTP, apiSrv.Handler())
 		go func() {
 			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)

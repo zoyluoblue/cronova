@@ -1,0 +1,6 @@
+dag_id: order_sync
+schedule: "0 2 * * *"
+tasks:
+  - id: sync
+    type: shell
+    command: "echo syncing; sleep 1; exit 1"
