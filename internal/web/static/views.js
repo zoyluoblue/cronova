@@ -18,8 +18,8 @@ function renderDags() {
     main.innerHTML = `<div class="ov-wrap">
       <div class="page-h"><h1>${t("nav_dags")}${hlp("hlp_dag", "b")}</h1><span class="num">0</span></div>
       <div class="page-sub">${t("dags_sub")}</div>
-      <div class="empty-state" style="margin-top:20px"><div class="es-ic">✦</div><div class="es-t">${t("no_dags_title")}</div><div class="es-s">${t("no_dags_sub")}</div><div style="margin-top:16px"><button class="primary" id="es-new">${t("newdag")}</button></div></div></div>`;
-    $("es-new").onclick = () => newDagModal();
+      <div class="empty-state" style="margin-top:20px"><div class="es-ic">✦</div><div class="es-t">${t("no_dags_title")}</div><div class="es-s">${t("no_dags_sub")}</div>${document.body.dataset.role === "viewer" ? "" : `<div style="margin-top:16px"><button class="primary" id="es-new">${t("newdag")}</button></div>`}</div></div>`;
+    const esNew = $("es-new"); if (esNew) esNew.onclick = () => newDagModal();
     return;
   }
   // dashboard-wide longest run → sparkline bars scale consistently across DAGs
@@ -277,7 +277,7 @@ async function showDag(id, tab) {
   setHash("#/dag/" + encodeURIComponent(id) + (tab && tab !== "runs" ? "/" + tab : ""));
   await flushPendingSaves(); // land any debounced edit before we refetch + replace D
   let dag, runs, allDags = [];
-  try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=${runsLimit()}`)]); }
+  try { [dag, runs] = await Promise.all([api(`/api/dags/${id}`), api(`/api/dags/${id}/runs?limit=25`)]); }
   catch (e) { D = null; view = "dag"; activeDag = id; setNav("dags", id); main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   if (dag.deleted_at) { // archived DAG: do NOT open the editor (a save would silently revive it)
     D = null; view = "dag"; activeDag = id; setNav("dags", id);
@@ -368,7 +368,7 @@ function renderDagPage() {
           <button class="icon" id="trig-params" title="${t("trig_params")}" ${noTasks ? "disabled" : ""} aria-label="${t("trig_params")}">⋯</button>
           ${d.schedule ? `<button id="backfill-btn" ${noTasks ? "disabled" : ""}>${t("btn_backfill")}</button>` : ""}
           <button id="pause">${d.paused ? t("btn_resume") : t("btn_pause")}</button>
-          <button class="icon" id="dup" title="${t("btn_duplicate")}">⧉ ${t("btn_duplicate")}</button>
+          <button class="icon" id="dup" title="${t("btn_duplicate")}">${t("btn_duplicate")}</button>
           <button class="icon" id="yaml-btn">YAML</button>
         </div>
       </div>
@@ -435,6 +435,9 @@ function renderDagPageNovice() {
       <a style="font-size:12.5px" id="nv-see-log" role="button" tabindex="0">${esc(t("nv_see_log"))}</a>
       <button class="primary" id="nv-rerun">${esc(t("nvr_rerun"))}</button>
     </div>` : ""}
+    <!-- the shared save pipeline (saveDag/reflectSaveState) reports validation
+         errors into #dag-errors; without it a blocked save would fail silently -->
+    <div class="b-errors" id="dag-errors"></div>
     <div class="section-h">${esc(t("nv_steps_h"))} <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400">${esc(t("nv_steps_hint"))}</span></div>
     <div class="nv-panel">
       ${ordered.map((tk, i) => `<div class="nv-item">
@@ -864,7 +867,7 @@ async function refreshDagRuns() {
   const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
   // With a filter active, D.runs is a filtered subset — rebuilding the whole
   // page would compute hero stats from it; re-render only the runs table.
-  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; if (D.editKey || D.runFilter) renderDagRuns(); else renderDagPage(); } catch (_) {}
+  try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; if (D.editKey || D.runFilter) { renderDagRuns(); maybePollDagRuns(); } else renderDagPage(); } catch (_) {}
 }
 // Runs-tab state filter chips: label key -> API state list ("" = no filter).
 const RUN_FILTERS = [["rf_all", ""], ["rf_running", "queued,running"], ["rf_failed", "failed,cancelled,timed_out"], ["rf_success", "success"]];
@@ -902,6 +905,7 @@ function renderDagRuns() {
         const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
         try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; } catch (_) {}
         renderDagRuns();
+        maybePollDagRuns(); // the freshly-fetched list may contain live runs
       };
       c.onclick = go; chipKeyActivate(c, go);
     });
@@ -922,6 +926,7 @@ function renderDagRuns() {
     const q = D.runFilter ? `&state=${encodeURIComponent(D.runFilter)}` : "";
     try { D.runs = (await api(`/api/dags/${D.dag.dag_id}/runs?limit=${runsLimit()}${q}`)) || []; } catch (_) {}
     renderDagRuns();
+    maybePollDagRuns();
   };
   el.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showRun(tr.dataset.run); });
   el.querySelectorAll(".dt-bar[data-run]").forEach((b) => b.onclick = () => showRun(b.dataset.run));
@@ -1312,7 +1317,10 @@ function varChip(name, kind, label) {
   return `<span class="chip varchip" data-var="${esc(name)}" data-kind="${esc(kind)}" role="button" tabindex="0" draggable="true" title="${esc(name)}">${esc(label || name)}</span>`;
 }
 // chips are role=button spans; make Enter/Space activate them like a real button.
-function chipKeyActivate(el, fn) { el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } }); }
+// stopPropagation: boot.js has a document-level Enter/Space delegate for
+// [tabindex="0"][role] elements — without it a chip carrying both would
+// activate TWICE per keypress (double insert, double fetch).
+function chipKeyActivate(el, fn) { el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); fn(); } }); }
 function varPaletteHtml() {
   const builtins = TEMPLATE_VARS.map((v) => varChip(v, "builtin", "{{ " + v + " }}")).join("");
   const group = (vg, label, inner) => `<div class="vp-group" data-vg="${vg}"><span class="vp-label">${label}</span>${inner}</div>`;
@@ -1867,9 +1875,10 @@ async function showRunNovice(runID) {
 }
 function startNovRunPoll(runID, gen) {
   const p = setInterval(async () => {
-    if (gen !== runPollGen) { clearInterval(p); return; } // superseded by a later run view
+    // superseded by a later run view, or the user navigated away — stop either way
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) { clearInterval(p); return; }
     let data; try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (_) { return; }
-    if (gen !== runPollGen || view !== "run" || currentRun !== runID) return;
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) { clearInterval(p); return; }
     renderNovRun(data);
     if (!runLive(data.run.state)) clearInterval(p);
   }, 2000);
@@ -2011,7 +2020,10 @@ async function showRun(runID) {
   let data;
   try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   const r = data.run;
-  runDag = await api(`/api/dags/${r.dag_id}`);
+  // archived/racing delete or a transient failure must not strand the page:
+  // fall back to building the graph from the run's own task instances.
+  try { runDag = await api(`/api/dags/${r.dag_id}`); }
+  catch (_) { runDag = { tasks: (data.tasks || []).map((tk) => ({ id: tk.task_id, deps: [] })) }; }
   setNav("dags", `${r.dag_id} / ${t("run_word")}`);
   const initSbt = {}; (data.tasks || []).forEach((tk) => initSbt[tk.task_id] = tk.state);
   // static shell — the graph and #logwrap are built ONCE; polling patches only
@@ -2063,9 +2075,11 @@ function startRunPoll(runID, gen) {
   const p = setInterval(async () => {
     // gen guards against a stale callback (a later showRun — e.g. after retry —
     // started a fresh poll); clearInterval can't abort an already-parked await.
-    if (gen !== runPollGen) { clearInterval(p); return; }
+    // Navigating AWAY from the run page must also stop this interval — without
+    // the clearInterval it would keep fetching every 2s forever.
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) { clearInterval(p); return; }
     let data; try { data = await api(`/api/runs/${encodeURIComponent(runID)}`); } catch (_) { return; }
-    if (gen !== runPollGen || view !== "run" || currentRun !== runID) return;
+    if (gen !== runPollGen || view !== "run" || currentRun !== runID) { clearInterval(p); return; }
     renderRunDynamic(data);
     if (!runLive(data.run.state)) {
       clearInterval(p);

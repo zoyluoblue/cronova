@@ -70,7 +70,7 @@ setInterval(async () => {
 // describe themselves via title, which never shows on touch. A tap surfaces
 // the same text as a toast (harmless no-op for mouse users who saw the tooltip).
 document.addEventListener("click", (e) => {
-  const el = e.target.closest && e.target.closest(".spark i[title], .dt-bar[title]:not([data-run]), .gantt-bar[title]");
+  const el = e.target.closest && e.target.closest(".spark i[title], .gantt-bar[title]");
   if (!el || !el.title) return;
   if (window.matchMedia && window.matchMedia("(hover: none)").matches) { e.stopPropagation(); toast(el.title, "info"); }
 }, true);
