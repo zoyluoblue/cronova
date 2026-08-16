@@ -30,9 +30,9 @@
 
 | 工作包 | 状态 | 验收/证据 |
 |---|---|---|
-| P1-REBASE-ENTRY | 进行中 | 本账本 + source-manifest + 基线 commit |
-| W10 基线止血/PG CI | 待执行 | |
-| W11 Source→Version（不可变版本/三 hash/影子 Run） | 待执行 | 既有：run 定义快照+hash；缺口待列 |
+| P1-REBASE-ENTRY | PASS | 本账本 + source-manifest + 基线 commit 43132b7 |
+| W10 基线止血/PG CI（R0-04/LB-02） | PASS | test.yml 加 PG 服务容器 + "postgres suite must not skip" 断言步骤（本地等价验证：PG17.5 真库全套件绿） |
+| W11 Source CAS（R0-07/LB-01 核心） | PASS | DAG 保存乐观并发：GET 返回 definition_hash → 编辑器回显 expected_hash → 不匹配 409 dag_conflict；build 响应回传新 hash 防自冲突；无 hash 保留 CLI/GitOps last-write-wins。验收：`TestDagSaveCAS`（stale 拒写且不达引擎）+ 浏览器实测（自续期 renewed、并发者获胜、冲突 toast 双语）。版本历史/运行快照/三 hash 中的 source hash 既有 |
 | W12 执行正确性（状态机/锁序/receipt/invariant） | 待执行 | |
 | W2x cluster-basic（协议/Grant/Artifact/E2E） | 待执行 | 既有：拨入 worker E2E；按 plan1 语义补强 |
 | W3x HA | 待执行 | 既有：lease 主备；3-Control AA 为 BLOCKED_ENVIRONMENT 候选 |

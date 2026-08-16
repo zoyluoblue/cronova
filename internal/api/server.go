@@ -7,6 +7,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -463,6 +464,15 @@ type editTask struct {
 type dagDetail struct {
 	*model.DAG
 	Tasks []editTask `json:"tasks"`
+	// DefinitionHash is the sha256 of the stored canonical YAML — the CAS
+	// token an editor echoes back as expected_hash so two concurrent editors
+	// cannot silently overwrite each other (plan1 LB-01).
+	DefinitionHash string `json:"definition_hash"`
+}
+
+func definitionHash(yamlText string) string {
+	sum := sha256.Sum256([]byte(yamlText))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +517,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.Tasks = nil // emit via dagDetail.Tasks instead
-	writeJSON(w, http.StatusOK, dagDetail{DAG: d, Tasks: tasks})
+	writeJSON(w, http.StatusOK, dagDetail{DAG: d, Tasks: tasks, DefinitionHash: definitionHash(d.DefinitionYAML)})
 }
 
 func (s *Server) deleteDAG(w http.ResponseWriter, r *http.Request) {
@@ -740,6 +750,11 @@ type dagSpec struct {
 	NotifyGroup     string     `json:"notify_group"`  // alert group name; wins over notify_url
 	SLA             int        `json:"sla"`
 	DagrunTimeout   int        `json:"dagrun_timeout"`
+	// ExpectedHash is the CAS token: the definition_hash the editor loaded.
+	// When set on an update, a mismatch returns 409 dag_conflict instead of
+	// silently overwriting a concurrent editor's save. Empty = legacy
+	// last-write-wins (CLI/apply/GitOps).
+	ExpectedHash string `json:"expected_hash,omitempty"`
 }
 
 // buildDAG accepts a structured DAG spec from the UI form, renders it to the
@@ -765,6 +780,17 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 		mapErr(w, existsErr)
 		return
 	}
+	// Optimistic concurrency (CAS): an editor that loaded the DAG echoes the
+	// definition_hash it saw; a mismatch means someone else saved in between —
+	// refuse instead of silently overwriting their work. Absent hash keeps the
+	// legacy last-write-wins for CLI/apply/GitOps flows.
+	if spec.ExpectedHash != "" && !isNew {
+		if cur := definitionHash(existing.DefinitionYAML); cur != spec.ExpectedHash {
+			httpErrCode(w, http.StatusConflict, "dag_conflict",
+				"the workflow changed since you loaded it — reload to merge your edits")
+			return
+		}
+	}
 	dagID, err := s.eng.CreateDAG(r.Context(), string(yml))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -775,7 +801,9 @@ func (s *Server) buildDAG(w http.ResponseWriter, r *http.Request) {
 	} else if existing.DefinitionYAML != string(yml) {
 		s.audit(r, "update_dag", dagID, fmt.Sprintf("tasks=%d", len(spec.Tasks)))
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID})
+	// Return the new CAS token so the editor's next save carries a fresh hash
+	// instead of conflicting with its own write.
+	writeJSON(w, http.StatusOK, map[string]string{"dag_id": dagID, "definition_hash": definitionHash(string(yml))})
 }
 
 // validateDAG is a dry run of buildDAG: it renders + validates a spec (same

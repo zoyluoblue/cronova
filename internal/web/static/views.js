@@ -298,6 +298,9 @@ async function showDag(id, tab) {
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(), notify_format: dag.notify_format || "",
       notify_group: dag.notify_group || "",
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
+      // CAS token: echoed back as expected_hash so a concurrent editor's save
+      // conflicts loudly (409) instead of being silently overwritten.
+      definition_hash: dag.definition_hash || "",
     }),
     tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}, dd = tk.depends_on_dag || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", retry_backoff: tk.retry_backoff || "", retry_delay_max: tk.retry_delay_max || "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
       subdag: tk.subdag || "", worker_group: tk.worker_group || "",
@@ -2110,6 +2113,8 @@ function dagSpecFrom(st) {
     notify_on: ((d.notify_url || "").trim() || (d.notify_group || "").trim()) ? (d.notify_on || []).slice() : [],
     notify_format: d.notify_format || "",
     execution_policy: d.execution_policy || "",
+    // CAS token: refuse to silently overwrite a concurrent editor's save.
+    expected_hash: d.definition_hash || "",
     sla: Math.max(0, +d.sla || 0), dagrun_timeout: Math.max(0, +d.dagrun_timeout || 0),
     tasks: st.tasks.filter((tk) => tk.id).map((tk) => {
       const o = {
@@ -2195,10 +2200,16 @@ async function flushSave() {
   computeSchedule(D);
   const spec = dagSpecFrom(D);
   try {
-    await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+    const res = await api("/api/dags/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+    // Adopt the fresh CAS token so the next debounced save doesn't conflict
+    // with this one.
+    if (D && D.dag && res && res.definition_hash) D.dag.definition_hash = res.definition_hash;
     if (seq === saveSeq) setSaveState("saved");
   } catch (e) {
     if (seq === saveSeq) setSaveState("error", e.message);
+    // A concurrent editor won the race: surface it loudly — the user must
+    // reload to merge rather than retry into the same conflict.
+    if (e && e.code === "dag_conflict") toast(t("err_code_dag_conflict"), "warn");
   } finally {
     saveInflight = false;
     if (savePending) { savePending = false; flushSave(); }
