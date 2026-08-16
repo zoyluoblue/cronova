@@ -46,6 +46,47 @@ type Endpoint struct {
 	BodyType     string // "json" (default) or "yaml"
 	OptionalBody bool
 	NoAuth       bool
+	// Classification is the plan3 six-class action policy for AI/agent
+	// surfaces: DIRECT_READ, DIRECT_DRAFT, PREPARE_APPROVE_EXECUTE,
+	// HUMAN_ONLY, INTERNAL_ONLY. Every public endpoint carries exactly one
+	// (coverage closure is CI-enforced); the MCP layer filters on it.
+	Classification string
+}
+
+// Plan3 action classifications (see plans/plan3-executable.md §1).
+const (
+	ClassDirectRead     = "DIRECT_READ"              // queries within AuthZ/budget
+	ClassDirectDraft    = "DIRECT_DRAFT"             // touches only non-executable drafts/dry-runs
+	ClassPrepareApprove = "PREPARE_APPROVE_EXECUTE"  // mutation an agent may PREPARE; a human confirms
+	ClassHumanOnly      = "HUMAN_ONLY"               // never exposed to agents (credential minting, break-glass)
+	ClassInternalOnly   = "INTERNAL_ONLY"            // machine-to-machine (worker join), not a user action
+)
+
+// classify assigns the classification for one endpoint: explicit overrides
+// first, then the method-shape default (GET reads; validate is a dry-run
+// draft; every other mutation is prepare/approve).
+func classify(method, path string) string {
+	if c, ok := classifyOverride[method+" "+path]; ok {
+		return c
+	}
+	if method == "GET" {
+		return ClassDirectRead
+	}
+	if strings.HasSuffix(path, "/validate") {
+		return ClassDirectDraft
+	}
+	return ClassPrepareApprove
+}
+
+var classifyOverride = map[string]string{
+	// Credential minting stays human-only: agents must never manage long-term
+	// tokens (plan3 §1 non-goals).
+	"POST /api/worker-tokens": ClassHumanOnly,
+	// Machine bootstrap endpoints — the one-time token/secret IS the caller's
+	// credential; these are not user actions.
+	"POST /api/workers/join":         ClassInternalOnly,
+	"POST /api/hooks/{id}/{secret}":  ClassInternalOnly,
+	"POST /api/login":                ClassInternalOnly,
 }
 
 // Param is a public projection of apiParam.
@@ -67,6 +108,7 @@ func Catalog() []Endpoint {
 			Summary: e.Summary, Desc: e.Desc,
 			HasBody: e.Request != nil, BodyExample: e.Request,
 			BodyType: e.RequestType, OptionalBody: e.OptionalBody, NoAuth: e.NoAuth,
+			Classification: classify(e.Method, e.Path),
 		}
 		if ep.HasBody && ep.BodyType == "" {
 			ep.BodyType = "json"

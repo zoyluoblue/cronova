@@ -54,7 +54,12 @@
 
 ## Plan3（AI Native 操作层）
 
-待执行（ActionIR/审批内核/MCP 分类；基于既有 MCP 34 工具与 openapi 单源目录）。
+| 工作包 | 状态 | 验收/证据 |
+|---|---|---|
+| R11A 六分类合同 + 覆盖闭合 CI | PASS | api.Catalog 每端点携带唯一分类（DIRECT_READ/DIRECT_DRAFT/PREPARE_APPROVE_EXECUTE/HUMAN_ONLY/INTERNAL_ONLY）；`TestActionCoverageClosure` 断言零未分类（含空目录永不 PASS，plan5 §0.2）+ 安全关键覆写抽查（worker-tokens=HUMAN_ONLY、join=INTERNAL_ONLY） |
+| R14A MCP 分类感知 | PASS | HUMAN_ONLY/INTERNAL_ONLY 永不成为 agent 工具（先于 allow-list 过滤）；`-read-only`=仅 DIRECT_READ；工具描述内嵌策略标注（mutating 需操作者确认 / dry-run 不落库）；单源目录（工具不可能漂移出 API，plan3 单向生成链） |
+| R12A Proposal/ApprovalGrant 内核 | BLOCKED_ENVIRONMENT + 部分等价 | 完整审批内核需多用户可信审批 UI/SoD；本环境等价物：mutation 全部经 RBAC+audit+幂等（operation 有 receipt=审计链），MCP mutating 工具描述强制"先向操作者确认"约定 |
+| R15 真实客户端认证/红队/31 天窗口 | BLOCKED_ENVIRONMENT | 需真实 Codex/Claude/OpenAI 账号矩阵、独立红队与连续窗口 |
 
 ## Plan4（部署/迁群/批量扩容）
 

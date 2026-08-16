@@ -73,11 +73,17 @@ type Tool struct {
 func BuildTools(cli *client.Client, readOnly bool) []Tool {
 	var tools []Tool
 	for _, ep := range api.Catalog() {
+		// Plan3 classification gate: HUMAN_ONLY (credential minting,
+		// break-glass) and INTERNAL_ONLY (machine bootstrap) surfaces are
+		// never agent tools, regardless of the allow-list below.
+		if ep.Classification == api.ClassHumanOnly || ep.Classification == api.ClassInternalOnly {
+			continue
+		}
 		name, ok := toolNames[ep.Method+" "+ep.Path]
 		if !ok {
 			continue
 		}
-		if readOnly && ep.Method != "GET" {
+		if readOnly && ep.Classification != api.ClassDirectRead {
 			continue
 		}
 		tools = append(tools, Tool{
@@ -108,8 +114,13 @@ func toolDesc(ep api.Endpoint) string {
 	if ep.Desc != "" {
 		d += " — " + ep.Desc
 	}
-	if ep.Method != "GET" {
-		d += " (mutating)"
+	// Surface the plan3 classification so an agent (and its operator) can see
+	// each tool's policy class without consulting external docs.
+	switch ep.Classification {
+	case api.ClassPrepareApprove:
+		d += " [mutating: confirm with the operator before invoking]"
+	case api.ClassDirectDraft:
+		d += " [dry-run: validates without persisting]"
 	}
 	return d
 }
