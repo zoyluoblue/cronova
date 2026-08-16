@@ -57,6 +57,16 @@
 - R00/R01 源冻结：**PASS**（source-manifest.txt，5 份 SHA-256）
 - R02+ 逐步验收：随各计划推进滚动记录于 `plan5/evidence/`。
 
+## 接续队列（下一步，按序执行；每步完成即验收+记账+commit）
+
+1. **P1-W12 执行正确性**：run/task 状态转移合法性守卫（非法转移拒绝并告警日志）+ 现有 guarded-CAS 写盘点为 evidence 文档；对抗性用例（乱序/重复 finalize）。
+2. **P1-W5x Authoring 收口**：graph 连线模式/删边浏览器验证（加节点/保存已验）；循环边拒绝实测；双标签冲突（CAS 已接入，验 graph 保存路径也带 expected_hash）。
+3. **P1 剩余项判定**：逐项把 plan1 §5 工作包标 PASS/PARTIAL/BLOCKED_ENVIRONMENT/N/A_SCOPE 写入账本（含 ADR 偏差：push-assign vs pull、lease 主备 vs 3-AA）。commit "plan1 closure"。
+4. **Plan2 阶段**：R5B hold/release intent + DecisionFact/Timeline（run 级审计时间线 API+UI）；R8 事件 Inbox 幂等已有→补 DLQ 语义；R10A WFQ（pool 加权公平出队）。逐项验收。
+5. **Plan3 阶段**：MCP 工具六分类（read/draft/approve/human-only 注解进 openapi catalog + mcp -read-only 强化为分类感知）；mutation 走 Proposal+确认（MCP 层 approve 参数）；审计链。
+6. **Plan4 阶段**：`cronova migrate-store`（SQLite→PG：逐表拷贝+计数/校验和+孤儿检查，对齐 plan5 §9）；bootstrap 收口文档。
+7. **Plan5 收口**：重验 adversarial-v2.md 的 7 条未决发现；全量回归+基准重跑；总核查表（§13）填实；FinalizationSnapshot（各 SHA/digest）；最终汇报（CORE 达成/BLOCKED_ENVIRONMENT 清单）。
+
 ## Commit 日志（阶段性提交索引）
 
 | # | commit | 内容 |
