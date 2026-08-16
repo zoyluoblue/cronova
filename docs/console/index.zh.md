@@ -27,6 +27,7 @@ cronova serve
 | **Graph** | 跨 DAG 的触发依赖（`trigger_after`）关系图。 |
 | **Pools** | 并发资源池，限制同时运行的任务实例数量——见[管理页面](admin.md)。 |
 | **Variables & Connections** | 可复用的变量、连接和参数，用于命令模板化——见[管理页面](admin.md)。 |
+| **Workers** | 拨入式远程工作节点集群：加入令牌、实时状态、排空/移除——见[管理页面](admin.md)。 |
 | **Audit** | 审计日志，记录谁修改或触发了什么。 |
 | **API** | API 令牌管理，以及内置的 OpenAPI 参考文档。 |
 

@@ -90,7 +90,8 @@ func (s *Server) authenticate(r *http.Request) (*model.User, error) {
 // needs /api/login and /api/me, and loadInfo() runs after auth resolves.
 // Reads (GET) allow any authenticated user; writes require the admin role.
 func (s *Server) withAuth(next http.Handler) http.Handler {
-	public := map[string]bool{"/api/login": true, "/healthz": true, "/readyz": true}
+	public := map[string]bool{"/api/login": true, "/healthz": true, "/readyz": true,
+		"/api/workers/join": true} // the one-time join token is the credential
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.auth.Enabled {
 			next.ServeHTTP(w, r)

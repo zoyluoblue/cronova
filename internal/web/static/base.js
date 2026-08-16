@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const main = $("main");
 
-let view = "dags";       // dags | dag | task | run | pools | graph
+let view = "dags";       // dags | dag | task | run | pools | graph | workers | …
 let activeDag = null;
 let currentRun = null;
 let filter = "all";
@@ -70,8 +70,11 @@ const DICT = {
     dh_last: "上次运行", dh_next: "调度", dh_rate: "近期成功率", dh_never: "还没有运行", dh_norate: "—",
     set_done: "完成", set_edit: "编辑", set_none: "无", set_sched: "调度", set_max: "最大并发", set_retries: "默认重试", set_deps: "上游依赖",
     set_deps_hint: "上游工作流成功后自动触发本工作流", set_no_deps_avail: "暂无其他工作流可选",
-    set_notify: "通知", set_notify_hint: "运行结束后向 Webhook 发送 JSON（兼容 Slack/飞书/Discord）", notify_failure: "失败", notify_success: "成功", notify_off: "未选择事件", notify_need_url: "先填写 Webhook URL，再选择触发事件", err_notify_url: "通知 URL 必须以 http:// 或 https:// 开头",
-    nf_label: "消息格式", nf_hint: "raw = 完整 JSON 载荷;其余按平台的入群机器人格式包装摘要文本", nf_feishu: "飞书", nf_dingtalk: "钉钉",
+    set_notify: "通知", set_notify_hint: "运行结束后向 Webhook 发送 JSON（兼容 Slack/飞书/Discord），或引用告警组一次通知多个渠道", notify_failure: "失败", notify_success: "成功", notify_off: "未选择事件", notify_need_url: "先填写 Webhook URL 或选择告警组，再选择触发事件", err_notify_url: "通知 URL 必须以 http://、https:// 或 mailto: 开头",
+    nf_label: "消息格式", nf_hint: "raw = 完整 JSON 载荷;其余按平台的入群机器人格式包装摘要文本;email 供 mailto: 地址使用", nf_feishu: "飞书", nf_dingtalk: "钉钉", nf_email: "邮件",
+    set_group: "告警组", ag_group_none: "不使用告警组", ag_opt_missing: (n) => `${n}（不存在）`,
+    ag_url_overridden: "已选择告警组，单独 URL 将被忽略",
+    notify_mailto_hint: "URL 也支持 mailto:地址1,地址2（需在服务端配置 smtp: 后才能发信）",
     btn_backfill: "回填", bf_hint: "为区间内每个调度周期补建一次运行(含首尾;已存在的周期自动跳过,执行受最大并发限制)", bf_from: "开始日期", bf_to: "结束日期", bf_go: "开始回填", bf_need_dates: "请选择起止日期",
     bf_done: (c, s) => `回填已入队:新建 ${c} 个运行,跳过 ${s} 个已存在`,
     rf_all: "全部", rf_running: "进行中", rf_failed: "失败", rf_success: "成功",
@@ -83,7 +86,7 @@ const DICT = {
     nd_more: "调度与更多选项", nd_less: "收起",
     nav_resources: "变量 & 连接", nav_audit: "审计", nav_api: "API",
     audit_sub: "运维操作记录:谁在何时对哪个工作流/运行做了什么。", audit_empty: "暂无操作记录", au_time: "时间", au_actor: "操作人", au_action: "操作", au_target: "对象",
-    act_trigger: "触发", act_cancel: "取消", act_retry_run: "重跑运行", act_retry_task: "重跑任务", act_mark_task: "标记任务", act_mark_run: "标记运行", act_update_dag: "保存工作流", act_create_dag: "创建工作流", act_delete_dag: "归档工作流", act_pause: "暂停", act_unpause: "恢复", act_create_token: "创建 Token", act_delete_token: "撤销 Token",
+    act_trigger: "触发", act_cancel: "取消", act_retry_run: "重跑运行", act_retry_task: "重跑任务", act_mark_task: "标记任务", act_mark_run: "标记运行", act_update_dag: "保存工作流", act_create_dag: "创建工作流", act_delete_dag: "归档工作流", act_pause: "暂停", act_unpause: "恢复", act_create_token: "创建 Token", act_delete_token: "撤销 Token", act_set_alert_group: "保存告警组", act_delete_alert_group: "删除告警组",
     api_title: "API 与集成", api_sub: "把 cronova 的全部能力对接到你的平台。查看交互式 API 文档,并管理机器访问用的 API Token。",
     api_docs_h: "API 文档", api_docs_hint: "完整的 OpenAPI 参考,内置 curl / Go / Python / Java 示例,可在页面内切换语言。", api_open_docs: "打开 API 文档 →", api_spec_link: "OpenAPI 规范",
     tok_title: "API Tokens", tok_sub: "机器访问凭据。以 Authorization: Bearer <token> 调用 API。明文仅在创建时显示一次。",
@@ -93,8 +96,19 @@ const DICT = {
     tok_created_ok: "Token 已创建", tok_revoked: "Token 已撤销",
     tok_reveal_h: "你的新 API Token", tok_reveal_warn: "请立即复制并妥善保存 —— 关闭后将无法再次查看明文。", tok_copy: "复制", tok_done: "我已保存",
     role_admin_full: "管理员(读写)", role_operator: "运维(触发/取消/重跑)", role_viewer_ro: "只读(仅 GET)",
-    res_vars: "变量", res_conns: "连接",
+    res_vars: "变量", res_conns: "连接", res_groups: "告警组",
     res_sub: "跨任务共享的配置。命令里用 {{ var.KEY }} / {{ conn.ID.字段 }} 引用，触发时用 {{ params.KEY }}。",
+    ag_hint: "把多个通知渠道打包成一个具名分组，工作流通过 notify.group 引用；值班渠道调整时只需改这里。",
+    ag_name: "组名", ag_channels: "渠道", ag_updated: "更新时间", ag_channel_n: (n) => `${n} 个渠道`,
+    ag_none: "还没有告警组", ag_add: "新建告警组", ag_edit: "编辑告警组",
+    ag_add_channel: "+ 添加渠道", ag_remove_channel: "移除渠道", ag_fmt: "格式",
+    ag_url_ph: "https://hooks.slack.com/… 或 mailto:oncall@example.com",
+    ag_max: (n) => `最多 ${n} 个渠道`,
+    ag_err_channels: "告警组需要 1-16 个通知渠道",
+    ag_err_url: "渠道 URL 必须以 http://、https:// 或 mailto: 开头",
+    ag_mailto_hint: "mailto: 渠道通过服务端 SMTP 发信，需先在配置文件的 smtp: 段配置邮件服务器",
+    ag_del_title: (n) => `删除告警组“${n}”？`,
+    ag_del_body: "引用它的工作流将退回使用各自的通知 URL 或实例默认通知，不会丢失告警。",
     v_key: "变量名", v_value: "值", v_add: "添加变量", v_none: "还没有变量", v_save: "保存",
     c_id: "连接 ID", c_type: "类型", c_host: "主机", c_port: "端口", c_login: "用户名", c_password: "密码", c_extra: "额外(JSON)",
     c_add: "新建连接", c_edit: "编辑连接", c_none: "还没有连接", c_pw_set: "已设置", c_pw_none: "未设置", c_pw_keep: "留空则不修改",
@@ -125,6 +139,10 @@ const DICT = {
     err_code_run_not_active: "这次运行已经结束，无法取消",
     err_code_nothing_to_retry: "这次运行没有失败的步骤，无需重跑",
     err_code_run_still_active: "这次运行还在进行中，结束后才能重跑",
+    err_code_bad_group_name: "告警组名称不合法（仅限字母、数字、_ . -，不超过 128 字符）",
+    err_code_group_channels: "告警组需要 1-16 个通知渠道",
+    err_code_group_channel_url: "渠道 URL 必须以 http://、https:// 或 mailto: 开头",
+    err_code_group_channel_format: "渠道格式不合法（raw / slack / feishu / dingtalk / email）",
     dt_hint: "运行时长趋势：越高越慢，颜色为结果；点击柱子打开该次运行",
     runs_more: "加载更多 ↓", audit_more: "加载更多 ↓", log_all: "全部任务",
     bulk_all: "全选（当前筛选）", bulk_pick: (id) => `选择 ${id}`,
@@ -168,10 +186,25 @@ const DICT = {
     var_pill_aria: (n) => `变量 ${n}`, var_pill_remove: (n) => `移除变量 ${n}`,
     var_empty: "无", var_add_key: "自定义…", var_conn_field: "选字段", var_goto_settings: "去设置",
     vd_logical_date: "本次运行的逻辑日期(到天)", vd_logical_datetime: "逻辑日期时间(RFC3339)",
+    vd_date_expr: "日期表达式：±N d/h/w/mo 偏移、.month_start/.month_end/.week_start/.week_end 锚点、| %Y%m%d 自定义格式，可组合",
     vd_run_id: "本次运行的唯一 ID", vd_dag_id: "所属 DAG 的 ID", vd_task_id: "当前任务 ID", vd_try_number: "第几次尝试(重试递增)",
     vd_var: "共享变量", vd_conn: "连接字段", vd_params: "手动触发参数",
     vg_builtin: "内置", vg_var: "变量", vg_conn: "连接", vg_params: "参数",
-    graph_connect_hint: "提示：点上游任务、再点下游任务，即可连接/断开依赖",
+    graph_connect_hint: "拖动节点右侧圆点到另一任务即可连线；点击节点打开任务编辑；Shift+点击两个节点（或开启连线模式后依次点击）同样可连接/断开；点击连线可移除依赖",
+    ge_addtask: "+ 添加任务", ge_connect: "连线模式",
+    ge_connect_tip: "开启后：点上游任务、再点下游任务即可连接/断开依赖（支持键盘操作）",
+    ge_new_id_title: "新任务 ID", ge_edge_remove: "移除依赖", ge_dup_dep: "依赖已存在",
+    ge_edge_aria: (a, b) => `依赖 ${a} → ${b}，回车移除`,
+    ge_node_aria: (id) => `任务 ${id}`,
+    diff_unsaved: (n) => `${n} 处修改未保存`, diff_save: "保存", diff_discard: "放弃",
+    diff_show: "查看差异", diff_hide: "收起差异", diff_loading: "正在生成差异预览…",
+    diff_invalid: "当前修改未通过校验", diff_same: "与已保存版本一致", diff_discarded: "已放弃未保存的修改",
+    t_subdag: "目标工作流", subdag_hint: "作为子流程运行另一个工作流：本任务跟随子运行的最终状态，取消会级联到子运行", subdag_none: "选择工作流…", err_subdag: "子流程任务必须选择目标工作流",
+    dod_title: "跨工作流依赖", dod_hint: "等待另一个工作流对应周期的运行成功后，此任务才就绪",
+    dod_dag: "依赖的工作流", dod_offset: "周期偏移", dod_offset_hint: "- 1d / .month_start / 留空=同周期",
+    dod_timeout: "等待超时（秒）", dod_timeout_hint: "0 = 一直等到运行超时", dod_on_timeout: "超时后",
+    dod_fail: "失败", dod_skip: "跳过",
+    parent_run: "父运行", child_run: "子运行",
     nav_graph: "关系图", graph_title: "工作流关系图", graph_sub: "按 trigger_after 展示工作流之间的触发依赖",
     graph_none: "暂无跨工作流依赖（没有工作流配置 trigger_after）", graph_view_hint: "提示：箭头表示「触发后」方向；点击节点查看该工作流；虚线节点为未找到的工作流",
     ss_saved: "已保存", ss_saving: "保存中…", ss_invalid: "待修复后保存", ss_error: "保存失败",
@@ -191,6 +224,44 @@ const DICT = {
     gs_title: "快速上手", gs_create: "创建第一个工作流", gs_trigger: "触发一次运行", gs_green: "拿到一次成功运行",
     adv_options: "高级选项", log_find_ph: "在日志中查找…", log_download: "下载完整日志", log_matches: (n) => `${n} 行匹配`, log_capped: (n) => `仅显示最近 ${n} 行`,
     back_dag: (d) => `← 返回 ${d}`, confirm_del_task_title: (id) => `删除任务 “${id}”？`,
+    // ---- workers fleet ----
+    nav_workers: "工作节点",
+    wk_sub: "接入本调度器的远程工作节点：实时状态、负载与排空/移除操作。任务通过 worker_group 路由到对应分组。",
+    wk_name: "名称", wk_group: "分组", wk_state: "状态", wk_active: "运行任务", wk_version: "版本", wk_heartbeat: "最近心跳", wk_created: "加入时间",
+    wk_online: "在线", wk_offline: "离线", wk_lost: "失联", wk_draining: "排空中", wk_unnamed: "（未命名）",
+    wk_drain: "排空", wk_undrain: "恢复分配",
+    wk_drain_title: (n) => `排空工作节点“${n}”？`,
+    wk_drain_body: "排空后不再分配新任务，正在运行的任务会继续跑完。可随时恢复。",
+    wk_undrain_title: (n) => `恢复工作节点“${n}”？`,
+    wk_undrain_body: "恢复后该节点重新参与任务分配。",
+    wk_drained_toast: "已开始排空", wk_undrained_toast: "已恢复分配",
+    wk_remove: "移除",
+    wk_remove_title: (n) => `移除工作节点“${n}”？`,
+    wk_remove_body: "移除立即生效且不可撤销：该节点的证书随即失效，无法重新连接；再次接入必须用新令牌重新加入。",
+    wk_removed_toast: "工作节点已移除",
+    wk_none_title: "还没有工作节点接入", wk_none_sub: "两步接入一个远程工作节点：",
+    wk_join_step1: "在本页生成一次性加入令牌", wk_join_step2: "在工作节点主机上运行：",
+    wk_token_btn: "生成加入令牌", wk_token_title: "生成一次性加入令牌",
+    wk_token_ttl: "有效期", wk_ttl_1h: "1 小时", wk_ttl_24h: "24 小时", wk_ttl_7d: "7 天",
+    wk_token_create: "生成",
+    wk_token_reveal_h: "你的加入令牌",
+    wk_token_warn: "令牌仅显示这一次，且只能使用一次——关闭后无法再次查看。",
+    wk_join_cmd_h: "在工作节点主机上运行：",
+    wk_expires: "过期时间",
+    err_code_workers_disabled: "工作节点接入未启用——需在服务端配置 worker_listen",
+    wk_disabled_hint: "服务端未启用工作节点接入。在 cronova.yaml 配置 worker_listen（或设置 CRONOVA_WORKER_LISTEN），重启后再试。",
+    rel_now: "刚刚", rel_ago: (s) => `${s}前`,
+    // ---- execution policy + trigger priority ----
+    set_policy: "运行策略",
+    set_policy_hint: "同一工作流多个运行同时就绪时如何准入。串行策略强制同一时间最多一个活跃运行（无视最大并发）。",
+    po_parallel: "并行", po_serial_wait: "串行等待", po_serial_discard: "串行丢弃", po_serial_priority: "串行优先",
+    pod_parallel: "并行：按「最大并发」允许多个运行同时执行（默认）",
+    pod_serial_wait: "串行等待：同一时间只跑一个，后到的运行排队，按逻辑时间依次执行",
+    pod_serial_discard: "串行丢弃：同一时间只跑一个，忙碌期间到来的运行会被取消（可见，不静默）",
+    pod_serial_priority: "串行优先：同一时间只跑一个，队列按运行优先级从高到低出队",
+    p_priority: "优先级",
+    p_priority_hint: "-100 到 100，默认 0；数值高者优先获得调度槽位（serial_priority 队列也按它出队）",
+    run_priority_tip: "运行优先级：高者优先获得调度槽位",
     // ---- novice mode ----
     mode_novice: "新手", mode_expert: "专家",
     mode_toggle_title: "界面模式：新手默认只保留必需信息，专家显示全部指标与操作",
@@ -299,8 +370,11 @@ const DICT = {
     dh_last: "Last run", dh_next: "Schedule", dh_rate: "Success rate", dh_never: "No runs yet", dh_norate: "—",
     set_done: "Done", set_edit: "Edit", set_none: "None", set_sched: "Schedule", set_max: "Max active runs", set_retries: "Default retries", set_deps: "Upstream workflows",
     set_deps_hint: "Triggered automatically after these workflows succeed", set_no_deps_avail: "No other workflows available",
-    set_notify: "Notifications", set_notify_hint: "POST a JSON webhook when a run finishes (Slack/Feishu/Discord compatible)", notify_failure: "Failure", notify_success: "Success", notify_off: "No events selected", notify_need_url: "Enter a webhook URL first, then pick events", err_notify_url: "Notify URL must start with http:// or https://",
-    nf_label: "Message format", nf_hint: "raw = full JSON payload; the others wrap the summary text in that platform's incoming-webhook envelope", nf_feishu: "Feishu", nf_dingtalk: "DingTalk",
+    set_notify: "Notifications", set_notify_hint: "POST a JSON webhook when a run finishes (Slack/Feishu/Discord compatible), or reference an alert group to notify several channels at once", notify_failure: "Failure", notify_success: "Success", notify_off: "No events selected", notify_need_url: "Enter a webhook URL or pick an alert group first, then pick events", err_notify_url: "Notify URL must start with http://, https:// or mailto:",
+    nf_label: "Message format", nf_hint: "raw = full JSON payload; the others wrap the summary text in that platform's incoming-webhook envelope; email is for mailto: targets", nf_feishu: "Feishu", nf_dingtalk: "DingTalk", nf_email: "Email",
+    set_group: "Alert group", ag_group_none: "No alert group", ag_opt_missing: (n) => `${n} (missing)`,
+    ag_url_overridden: "An alert group is selected — this standalone URL will be ignored",
+    notify_mailto_hint: "The URL also accepts mailto:addr1,addr2 (requires smtp: configured on the server)",
     btn_backfill: "Backfill", bf_hint: "Enqueue one run per schedule period in the window (inclusive; existing periods are skipped, execution obeys max active runs)", bf_from: "From", bf_to: "To", bf_go: "Backfill", bf_need_dates: "Pick both dates",
     bf_done: (c, s) => `Backfill enqueued: ${c} run(s) created, ${s} skipped`,
     rf_all: "All", rf_running: "Active", rf_failed: "Failed", rf_success: "Success",
@@ -312,7 +386,7 @@ const DICT = {
     nd_more: "Schedule & more options", nd_less: "Hide",
     nav_resources: "Variables & Connections", nav_audit: "Audit", nav_api: "API",
     audit_sub: "Operations log: who did what to which DAG/run, and when.", audit_empty: "No operations logged yet", au_time: "Time", au_actor: "Actor", au_action: "Action", au_target: "Target",
-    act_trigger: "trigger", act_cancel: "cancel", act_retry_run: "retry run", act_retry_task: "retry task", act_mark_task: "mark task", act_mark_run: "mark run", act_update_dag: "save workflow", act_create_dag: "create DAG", act_delete_dag: "delete DAG", act_pause: "pause", act_unpause: "unpause", act_create_token: "create token", act_delete_token: "revoke token",
+    act_trigger: "trigger", act_cancel: "cancel", act_retry_run: "retry run", act_retry_task: "retry task", act_mark_task: "mark task", act_mark_run: "mark run", act_update_dag: "save workflow", act_create_dag: "create DAG", act_delete_dag: "delete DAG", act_pause: "pause", act_unpause: "unpause", act_create_token: "create token", act_delete_token: "revoke token", act_set_alert_group: "save alert group", act_delete_alert_group: "delete alert group",
     api_title: "API & Integration", api_sub: "Drive cronova from your own platform. Browse the interactive API reference and manage API tokens for machine access.",
     api_docs_h: "API reference", api_docs_hint: "Full OpenAPI reference with built-in curl / Go / Python / Java samples and an in-page language switcher.", api_open_docs: "Open API reference →", api_spec_link: "OpenAPI spec",
     tok_title: "API Tokens", tok_sub: "Machine credentials. Call the API with Authorization: Bearer <token>. The plaintext is shown only once, at creation.",
@@ -322,8 +396,19 @@ const DICT = {
     tok_created_ok: "Token created", tok_revoked: "Token revoked",
     tok_reveal_h: "Your new API token", tok_reveal_warn: "Copy it now and store it securely — you won't be able to see the plaintext again.", tok_copy: "Copy", tok_done: "I've saved it",
     role_admin_full: "Admin (read-write)", role_operator: "Operator (trigger/cancel/retry)", role_viewer_ro: "Viewer (GET only)",
-    res_vars: "Variables", res_conns: "Connections",
+    res_vars: "Variables", res_conns: "Connections", res_groups: "Alert groups",
     res_sub: "Config shared across tasks. Reference in commands as {{ var.KEY }} / {{ conn.ID.field }}, or {{ params.KEY }} at trigger time.",
+    ag_hint: "Bundle several notify channels under one name and reference it from workflows via notify.group; when the on-call destinations change, edit them here once.",
+    ag_name: "Group name", ag_channels: "Channels", ag_updated: "Updated", ag_channel_n: (n) => `${n} channel${n > 1 ? "s" : ""}`,
+    ag_none: "No alert groups yet", ag_add: "New alert group", ag_edit: "Edit alert group",
+    ag_add_channel: "+ Add channel", ag_remove_channel: "Remove channel", ag_fmt: "Format",
+    ag_url_ph: "https://hooks.slack.com/… or mailto:oncall@example.com",
+    ag_max: (n) => `up to ${n} channels`,
+    ag_err_channels: "An alert group needs 1-16 channels",
+    ag_err_url: "Channel URL must start with http://, https:// or mailto:",
+    ag_mailto_hint: "mailto: channels are sent through the server's SMTP relay — configure the smtp: section of the config file first",
+    ag_del_title: (n) => `Delete alert group “${n}”?`,
+    ag_del_body: "Workflows referencing it fall back to their own notify URL or the instance default — no alert is lost.",
     v_key: "Key", v_value: "Value", v_add: "Add variable", v_none: "No variables yet", v_save: "Save",
     c_id: "Connection ID", c_type: "Type", c_host: "Host", c_port: "Port", c_login: "Login", c_password: "Password", c_extra: "Extra (JSON)",
     c_add: "New connection", c_edit: "Edit connection", c_none: "No connections yet", c_pw_set: "set", c_pw_none: "not set", c_pw_keep: "leave blank to keep",
@@ -353,6 +438,10 @@ const DICT = {
     err_code_run_not_active: "This run has already finished — nothing to cancel",
     err_code_nothing_to_retry: "This run has no failed steps to retry",
     err_code_run_still_active: "This run is still active — retry it after it finishes",
+    err_code_bad_group_name: "Invalid alert group name (letters, digits, _ . - only; max 128 chars)",
+    err_code_group_channels: "An alert group needs 1-16 channels",
+    err_code_group_channel_url: "Channel URL must start with http://, https:// or mailto:",
+    err_code_group_channel_format: "Invalid channel format (raw / slack / feishu / dingtalk / email)",
     dt_hint: "Duration trend: taller = slower, color = outcome; click a bar to open that run",
     runs_more: "Load more ↓", audit_more: "Load more ↓", log_all: "All tasks",
     bulk_all: "Select all (current filter)", bulk_pick: (id) => `Select ${id}`,
@@ -396,10 +485,25 @@ const DICT = {
     var_pill_aria: (n) => `variable ${n}`, var_pill_remove: (n) => `remove variable ${n}`,
     var_empty: "none", var_add_key: "custom…", var_conn_field: "field", var_goto_settings: "set up",
     vd_logical_date: "this run's logical date (day)", vd_logical_datetime: "logical date-time (RFC3339)",
+    vd_date_expr: "date expression: ±N d/h/w/mo offsets, .month_start/.month_end/.week_start/.week_end anchors, | %Y%m%d custom format; composable",
     vd_run_id: "this run's unique id", vd_dag_id: "the DAG id", vd_task_id: "this task's id", vd_try_number: "attempt number (increments on retry)",
     vd_var: "shared variable", vd_conn: "connection field", vd_params: "manual-trigger param",
     vg_builtin: "built-in", vg_var: "variables", vg_conn: "connections", vg_params: "params",
-    graph_connect_hint: "Tip: click an upstream task then a downstream task to add/remove a dependency",
+    graph_connect_hint: "Drag the dot on a node's right edge onto another task to connect; click a node to edit the task; Shift+click two nodes (or toggle connect mode and click them in turn) also connects/disconnects; click an edge to remove the dependency",
+    ge_addtask: "+ Add task", ge_connect: "Connect mode",
+    ge_connect_tip: "When on: click the upstream task, then the downstream task to connect/disconnect (keyboard friendly)",
+    ge_new_id_title: "New task ID", ge_edge_remove: "Remove dependency", ge_dup_dep: "Dependency already exists",
+    ge_edge_aria: (a, b) => `Dependency ${a} → ${b}, press Enter to remove`,
+    ge_node_aria: (id) => `Task ${id}`,
+    diff_unsaved: (n) => `${n} unsaved change${n > 1 ? "s" : ""}`, diff_save: "Save", diff_discard: "Discard",
+    diff_show: "View diff", diff_hide: "Hide diff", diff_loading: "Building diff preview…",
+    diff_invalid: "Pending changes fail validation", diff_same: "Identical to the saved version", diff_discarded: "Unsaved changes discarded",
+    t_subdag: "Target workflow", subdag_hint: "Runs another workflow as a child run: this task mirrors the child run's terminal state, and cancel cascades into it", subdag_none: "Pick a workflow…", err_subdag: "A sub-workflow task needs a target workflow",
+    dod_title: "Cross-workflow dependency", dod_hint: "The task becomes ready only after the target workflow's matching period run succeeds",
+    dod_dag: "Depends on workflow", dod_offset: "Period offset", dod_offset_hint: "- 1d / .month_start / blank = same period",
+    dod_timeout: "Wait timeout (sec)", dod_timeout_hint: "0 = wait until the run times out", dod_on_timeout: "On timeout",
+    dod_fail: "fail", dod_skip: "skip",
+    parent_run: "Parent run", child_run: "Child run",
     nav_graph: "Graph", graph_title: "Workflow Graph", graph_sub: "Trigger dependencies between workflows via trigger_after",
     graph_none: "No cross-workflow dependencies yet (none declares trigger_after)", graph_view_hint: "Tip: arrows point in the trigger-after direction; click a node to open that workflow; dashed nodes are unknown workflows",
     ss_saved: "Saved", ss_saving: "Saving…", ss_invalid: "Fix errors to save", ss_error: "Save failed",
@@ -419,6 +523,44 @@ const DICT = {
     gs_title: "Getting started", gs_create: "Create your first workflow", gs_trigger: "Trigger a run", gs_green: "Get a green run",
     adv_options: "Advanced options", log_find_ph: "Find in log…", log_download: "Download full log", log_matches: (n) => `${n} matching lines`, log_capped: (n) => `showing last ${n} lines`,
     back_dag: (d) => `← Back to ${d}`, confirm_del_task_title: (id) => `Delete task “${id}”?`,
+    // ---- workers fleet ----
+    nav_workers: "Workers",
+    wk_sub: "Remote workers dialed into this scheduler: live state, load, and drain/remove operations. Tasks route to a group via worker_group.",
+    wk_name: "Name", wk_group: "Group", wk_state: "State", wk_active: "Active tasks", wk_version: "Version", wk_heartbeat: "Last heartbeat", wk_created: "Joined",
+    wk_online: "online", wk_offline: "offline", wk_lost: "lost", wk_draining: "draining", wk_unnamed: "(unnamed)",
+    wk_drain: "Drain", wk_undrain: "Undrain",
+    wk_drain_title: (n) => `Drain worker “${n}”?`,
+    wk_drain_body: "A draining worker gets no new assignments; its running tasks finish normally. You can undrain it any time.",
+    wk_undrain_title: (n) => `Undrain worker “${n}”?`,
+    wk_undrain_body: "The worker resumes receiving task assignments.",
+    wk_drained_toast: "Draining started", wk_undrained_toast: "Assignments resumed",
+    wk_remove: "Remove",
+    wk_remove_title: (n) => `Remove worker “${n}”?`,
+    wk_remove_body: "Removal is immediate and cannot be undone: the worker's certificate stops being accepted, so it cannot reconnect — rejoining requires a fresh join token.",
+    wk_removed_toast: "Worker removed",
+    wk_none_title: "No workers have joined yet", wk_none_sub: "Attach a remote worker in two steps:",
+    wk_join_step1: "Mint a one-time join token on this page", wk_join_step2: "Run on the worker host:",
+    wk_token_btn: "New join token", wk_token_title: "Mint a one-time join token",
+    wk_token_ttl: "Expires in", wk_ttl_1h: "1 hour", wk_ttl_24h: "24 hours", wk_ttl_7d: "7 days",
+    wk_token_create: "Mint token",
+    wk_token_reveal_h: "Your join token",
+    wk_token_warn: "This token is shown only once and can be used only once — you won't see it again after closing.",
+    wk_join_cmd_h: "Run on the worker host:",
+    wk_expires: "Expires",
+    err_code_workers_disabled: "Worker hub is not enabled — set worker_listen in the server config",
+    wk_disabled_hint: "The server has no worker hub enabled. Configure worker_listen in cronova.yaml (or set CRONOVA_WORKER_LISTEN), restart, and try again.",
+    rel_now: "just now", rel_ago: (s) => `${s} ago`,
+    // ---- execution policy + trigger priority ----
+    set_policy: "Execution policy",
+    set_policy_hint: "How runs of this workflow are admitted when several are ready at once. Serial policies force at most one active run, whatever Max active runs says.",
+    po_parallel: "Parallel", po_serial_wait: "Serial (wait)", po_serial_discard: "Serial (discard)", po_serial_priority: "Serial (priority)",
+    pod_parallel: "Parallel: up to Max active runs execute concurrently (default)",
+    pod_serial_wait: "Serial wait: one at a time; later runs queue and execute in logical-date order",
+    pod_serial_discard: "Serial discard: one at a time; runs arriving while busy are cancelled (visibly, never silently)",
+    pod_serial_priority: "Serial priority: one at a time; the queue drains highest run priority first",
+    p_priority: "Priority",
+    p_priority_hint: "-100 to 100, default 0; higher wins the competition for dispatch slots (and drains first from a serial_priority queue)",
+    run_priority_tip: "Run priority: higher wins dispatch-slot competition",
     // ---- novice mode ----
     mode_novice: "Simple", mode_expert: "Expert",
     mode_toggle_title: "Interface mode: Simple keeps only the essentials; Expert shows every metric and action",
@@ -499,8 +641,8 @@ const STATE = {
   en: { success: "success", failed: "failed", running: "running", queued: "queued", scheduled: "scheduled", up_for_retry: "retrying", upstream_failed: "upstream failed", skipped: "skipped", cancelled: "cancelled", timed_out: "timed out", "": "no runs", none: "no runs" },
 };
 const TYPEL = {
-  zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件", backfill: "回填" },
-  en: { schedule: "scheduled", manual: "manual", dependency: "dependency", event: "event", backfill: "backfill" },
+  zh: { schedule: "定时", manual: "手动", dependency: "依赖", event: "事件", backfill: "回填", subdag: "子流程" },
+  en: { schedule: "scheduled", manual: "manual", dependency: "dependency", event: "event", backfill: "backfill", subdag: "sub-workflow" },
 };
 function t(k, ...a) { const v = (DICT[lang][k] ?? DICT.zh[k] ?? k); return typeof v === "function" ? v(...a) : v; }
 const stateLabel = (s) => STATE[lang][s] ?? STATE.zh[s] ?? s;
@@ -578,6 +720,19 @@ function fmtDay(x) {
   if (key(d) === key(yd)) return `${t("day_yesterday")} ${hm}`;
   const md = lang === "zh" ? `${d.getMonth() + 1}月${d.getDate()}日` : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   return `${md} ${hm}`;
+}
+// compact "how long ago" label (e.g. worker heartbeats): 刚刚 / 5s前 / 3m前 / 2h前;
+// anything older than a day falls back to the friendly day format above.
+function relTime(x) {
+  if (!x) return "—";
+  const d = new Date(x);
+  if (isNaN(d)) return "—";
+  const s = Math.max(0, Math.round((Date.now() - d) / 1000));
+  if (s < 5) return t("rel_now");
+  if (s < 60) return t("rel_ago", s + "s");
+  if (s < 3600) return t("rel_ago", Math.floor(s / 60) + "m");
+  if (s < 86400) return t("rel_ago", Math.floor(s / 3600) + "h");
+  return fmtDay(x);
 }
 
 // ---- toast + in-app confirm (themed + bilingual; replaces native alert/confirm) ----
@@ -695,29 +850,70 @@ function colorForState(s) {
 function renderGraph(tasks, stateByTask, opts) {
   opts = opts || {};
   if (!tasks || !tasks.length) return `<div class="empty">—</div>`;
-  const byId = {}; tasks.forEach((t2) => byId[t2.id] = t2);
+  // Decorations for cross-DAG waits: a task carrying depends_on_dag gets a small
+  // dashed "external DAG" stub node feeding it (read-only, layout-only — the
+  // stub id never leaks into the real model). Stubs are shared per target dag.
+  const EXT = "__ext__";
+  const list = tasks.map((t2) => ({ ...t2, deps: (t2.deps || []).slice() }));
+  const stubs = {};
+  const extEdges = new Set(); // "from|to" pairs drawn dashed (external waits)
+  list.forEach((t2) => {
+    const ext = t2.dod || (t2.depends_on_dag && t2.depends_on_dag.dag) || "";
+    if (!ext) return;
+    const sid = EXT + ext;
+    stubs[sid] ||= { id: sid, deps: [], extDag: ext };
+    t2.deps.push(sid);
+    extEdges.add(sid + "|" + t2.id);
+  });
+  const all = [...Object.values(stubs), ...list];
+  const byId = {}; all.forEach((t2) => byId[t2.id] = t2);
   const level = {};
   const lvl = (id, seen) => { if (level[id] != null) return level[id]; if (seen.has(id)) return 0; seen.add(id); const deps = (byId[id]?.deps || []).filter((d) => byId[d]); return level[id] = deps.length ? 1 + Math.max(...deps.map((d) => lvl(d, seen))) : 0; };
-  tasks.forEach((t2) => lvl(t2.id, new Set()));
-  const cols = {}; tasks.forEach((t2) => (cols[level[t2.id]] ||= []).push(t2.id));
+  all.forEach((t2) => lvl(t2.id, new Set()));
+  const cols = {}; all.forEach((t2) => (cols[level[t2.id]] ||= []).push(t2.id));
   const NW = 150, NH = 36, CG = 200, RG = 52, PAD = 16, pos = {};
   Object.keys(cols).forEach((L) => cols[L].forEach((id, i) => pos[id] = { x: PAD + L * CG, y: PAD + i * RG }));
   const maxL = Math.max(...Object.keys(cols).map(Number)), maxR = Math.max(...Object.values(cols).map((c) => c.length));
   const W = PAD * 2 + maxL * CG + NW, H = PAD * 2 + (maxR - 1) * RG + NH;
   let edges = "", nodes = "";
-  tasks.forEach((t2) => (t2.deps || []).forEach((d) => { if (!pos[d]) return; const x1 = pos[d].x + NW, y1 = pos[d].y + NH / 2, x2 = pos[t2.id].x, y2 = pos[t2.id].y + NH / 2, mx = (x1 + x2) / 2; edges += `<path class="graph-edge" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`; }));
-  tasks.forEach((t2) => {
+  all.forEach((t2) => (t2.deps || []).forEach((d) => {
+    if (!pos[d]) return;
+    const x1 = pos[d].x + NW, y1 = pos[d].y + NH / 2, x2 = pos[t2.id].x, y2 = pos[t2.id].y + NH / 2, mx = (x1 + x2) / 2;
+    const dPath = `M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+    const isExt = extEdges.has(d + "|" + t2.id);
+    // editable graphs get a per-edge group with a wide invisible hit path so a
+    // dependency can be selected/removed by pointer or keyboard.
+    const hit = opts.editable && !isExt
+      ? `<path class="edge-hit" d="${dPath}" tabindex="0" role="button" aria-label="${esc(t("ge_edge_aria", d, t2.id))}"/>` : "";
+    edges += `<g class="edge-g${isExt ? " ext" : ""}" data-efrom="${esc(d)}" data-eto="${esc(t2.id)}"><path class="graph-edge" d="${dPath}"/>${hit}</g>`;
+  }));
+  all.forEach((t2) => {
+    const p = pos[t2.id];
+    if (t2.extDag) { // external-DAG stub: dashed, decorative, never interactive
+      nodes += `<g class="graph-node ext" aria-hidden="true"><rect x="${p.x}" y="${p.y + 4}" width="${NW}" height="${NH - 8}" rx="8" style="fill:var(--panel-2);stroke:var(--line-2)" stroke-width="1.2" stroke-dasharray="4 4"/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">⌁ ${esc(t2.extDag.length > 16 ? t2.extDag.slice(0, 15) + "…" : t2.extDag)}</text></g>`;
+      return;
+    }
     let [f, st] = colorForState(stateByTask ? stateByTask[t2.id] : null);
     let sw = 1.2;
     if (opts.pending === t2.id) { st = "var(--accent)"; sw = 2.6; }
     const dash = opts.dashed && opts.dashed.has(t2.id) ? ` stroke-dasharray="5 4"` : "";
-    const p = pos[t2.id];
     // tag: expose data-node for live patching without making the node clickable
     const clickable = opts.editable || opts.clickable;
-    const attrs = clickable ? ` data-node="${esc(t2.id)}" style="cursor:pointer"` : (opts.tag ? ` data-node="${esc(t2.id)}"` : "");
-    const cls = opts.tag && stateByTask && stateByTask[t2.id] === "running" ? "graph-node g-running" : "graph-node";
+    const attrs = clickable
+      ? ` data-node="${esc(t2.id)}" style="cursor:pointer"${opts.editable ? ` tabindex="0" role="button" aria-label="${esc(t("ge_node_aria", t2.id))}"` : ""}`
+      : (opts.tag ? ` data-node="${esc(t2.id)}"` : "");
+    const cls = "graph-node" + (opts.tag && stateByTask && stateByTask[t2.id] === "running" ? " g-running" : "") + (t2.subdag ? " subdag" : "");
+    // subdag task: double border + ⧉ marker + the target dag id as a subtitle
+    const inner = t2.subdag ? `<rect class="g-inner" x="${p.x + 3}" y="${p.y + 3}" width="${NW - 6}" height="${NH - 6}" rx="5.5" style="stroke:${st}" stroke-width="1"/>` : "";
+    const label = t2.subdag
+      ? `<text x="${p.x + NW / 2}" y="${p.y + NH / 2 - 1}" text-anchor="middle">⧉ ${esc(t2.id)}</text><text class="g-sub" x="${p.x + NW / 2}" y="${p.y + NH / 2 + 11}" text-anchor="middle">${esc(t2.subdag.length > 20 ? t2.subdag.slice(0, 19) + "…" : t2.subdag)}</text>`
+      : `<text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text>`;
+    // editable nodes carry a connector handle on the right edge: edge-drag starts
+    // ONLY here, so a plain node-body drag still pans (and touch pinch survives)
+    const handle = opts.editable
+      ? `<circle class="gh-hit" cx="${p.x + NW}" cy="${p.y + NH / 2}" r="11" data-ghandle="${esc(t2.id)}"/><circle class="gh" cx="${p.x + NW}" cy="${p.y + NH / 2}" r="5" data-ghandle="${esc(t2.id)}" aria-hidden="true"/>` : "";
     // fill/stroke via inline style (SVG presentation attributes don't resolve color-mix reliably)
-    nodes += `<g class="${cls}"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/><text x="${p.x + NW / 2}" y="${p.y + NH / 2 + 4}" text-anchor="middle">${esc(t2.id)}</text></g>`;
+    nodes += `<g class="${cls}"${attrs}><rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" style="fill:${f};stroke:${st}" stroke-width="${sw}"${dash}/>${inner}${label}${handle}</g>`;
   });
   // compact height for small graphs; capped so a big graph pans/zooms instead of
   // dominating the page. attachPanZoom() wires drag-pan + ctrl/⌘-wheel zoom.
@@ -875,6 +1071,7 @@ function applyRoute() {
   if (seg[0] === "resources") return showResources();
   if (seg[0] === "graph") return showGraph();
   if (seg[0] === "audit") return showAudit();
+  if (seg[0] === "workers") return showWorkers();
   if (seg[0] === "api") return showApi();
   if (seg[0] === "run" && seg[1]) return showRun(seg[1]);
   if (seg[0] === "dag" && seg[1] && seg[2] === "task" && seg[3]) {
@@ -1072,7 +1269,7 @@ function setNav(navKey, crumb) {
   document.body.dataset.screen = view; // lets CSS hide chrome per screen (e.g. mode toggle on the wizard)
   document.querySelectorAll(".nav-item[data-nav]").forEach((n) => n.classList.toggle("active", n.dataset.nav === navKey));
   // novice mode names the same pages in its own words (共享配置 / 我的工作流)
-  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t(nvMode() ? "nv_shared" : "nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "api" ? t("nav_api") : t(nvMode() ? "nv_myflows" : "nav_dags"));
+  const label = crumb != null ? crumb : (navKey === "pools" ? "Pools" : navKey === "graph" ? t("graph_title") : navKey === "resources" ? t(nvMode() ? "nv_shared" : "nav_resources") : navKey === "audit" ? t("nav_audit") : navKey === "workers" ? t("nav_workers") : navKey === "api" ? t("nav_api") : t(nvMode() ? "nv_myflows" : "nav_dags"));
   $("crumb").textContent = label;
   // the topbar search only filters the dashboard list — hide it elsewhere.
   // search stays visible everywhere now (global jump-to-DAG), not just the dashboard
@@ -1106,5 +1303,6 @@ function setLang(l) {
   else if (view === "resources") renderResources(); // from in-memory RES, no refetch
   else if (view === "graph") showGraph();
   else if (view === "audit") renderAudit(); // from in-memory AUD — keeps filters + loaded pages
+  else if (view === "workers") { setNav("workers"); renderWorkers(); } // crumb + table from in-memory WK, no refetch
   else if (view === "api") renderApi(); // from in-memory TOKENS, no refetch
 }

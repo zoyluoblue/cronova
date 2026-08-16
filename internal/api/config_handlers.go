@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/store"
@@ -55,6 +56,76 @@ func (s *Server) deleteVariable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "delete_variable", r.PathValue("key"), "")
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// --- alert groups ---
+
+// validNotifyFormats mirrors the parser's notify.format vocabulary.
+var validNotifyFormats = map[string]bool{"": true, "raw": true, "slack": true, "feishu": true, "dingtalk": true, "email": true}
+
+// validChannelURL enforces the same scheme rules as a DAG's notify.url.
+func validChannelURL(u string) bool {
+	if u == "" || len(u) > 8192 {
+		return false
+	}
+	lu := strings.ToLower(u)
+	return strings.HasPrefix(lu, "http://") || strings.HasPrefix(lu, "https://") || strings.HasPrefix(lu, "mailto:")
+}
+
+func (s *Server) listAlertGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.store.ListAlertGroups(r.Context())
+	if err != nil {
+		mapErr(w, err)
+		return
+	}
+	if groups == nil {
+		groups = []*model.AlertGroup{}
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
+func (s *Server) setAlertGroup(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !cfgKeyRe.MatchString(name) || len(name) > 128 {
+		httpErrCode(w, http.StatusBadRequest, "bad_group_name", "invalid alert group name")
+		return
+	}
+	var req struct {
+		Channels []model.NotifyChannel `json:"channels"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if len(req.Channels) == 0 || len(req.Channels) > 16 {
+		httpErrCode(w, http.StatusBadRequest, "group_channels", "alert group needs 1-16 channels")
+		return
+	}
+	for _, ch := range req.Channels {
+		if !validChannelURL(ch.URL) {
+			httpErrCode(w, http.StatusBadRequest, "group_channel_url", "channel url must be http(s) or mailto:")
+			return
+		}
+		if !validNotifyFormats[ch.Format] {
+			httpErrCode(w, http.StatusBadRequest, "group_channel_format", "invalid channel format")
+			return
+		}
+	}
+	if err := s.store.UpsertAlertGroup(r.Context(), &model.AlertGroup{Name: name, Channels: req.Channels}); err != nil {
+		mapErr(w, err)
+		return
+	}
+	s.audit(r, "set_alert_group", name, "")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) deleteAlertGroup(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteAlertGroup(r.Context(), r.PathValue("name")); err != nil {
+		mapErr(w, err)
+		return
+	}
+	s.audit(r, "delete_alert_group", r.PathValue("name"), "")
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 

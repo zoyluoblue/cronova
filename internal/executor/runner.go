@@ -196,6 +196,20 @@ func (r *Runner) sweepFinishedLocked(now time.Time) {
 	}
 }
 
+// ActiveRefs lists refs whose process is still running — what a dial-in
+// worker reports in its Hello so the hub re-adopts them after a reconnect.
+func (r *Runner) ActiveRefs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for ref, t := range r.tasks {
+		if !t.finished {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
 // Probe reports the task's phase.
 func (r *Runner) Probe(ref string) Status {
 	r.mu.Lock()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"github.com/zoyluo/cronova/internal/datetmpl"
 	"github.com/zoyluo/cronova/internal/model"
 	"gopkg.in/yaml.v3"
 )
@@ -56,6 +57,17 @@ type taskYAML struct {
 	SLA           int      `yaml:"sla"`             // seconds from run start (soft alert)
 	TriggerRule   string   `yaml:"trigger_rule"`
 	When          string   `yaml:"when"` // runtime condition template; falsy render => skipped
+	// WorkerGroup routes the task to a dial-in worker group ("" = the DAG's
+	// worker_group default; both empty = the scheduler's local executor).
+	WorkerGroup string `yaml:"worker_group"`
+	// DependsOnDag holds the task until another DAG's matching period run
+	// succeeds (cross-DAG wait).
+	DependsOnDag *struct {
+		Dag       string `yaml:"dag"`
+		Offset    string `yaml:"offset"`     // datetmpl grammar; "" or "same" = same logical date
+		Timeout   int    `yaml:"timeout"`    // seconds from run start
+		OnTimeout string `yaml:"on_timeout"` // fail (default) | skip
+	} `yaml:"depends_on_dag"`
 	// Foreach fans this task out into one task per item at PARSE time: task id
 	// becomes <id>_<index>, {{ item }} / {{ item_index }} in command/when are
 	// replaced per shard, and downstream deps on <id> depend on every shard.
@@ -63,6 +75,7 @@ type taskYAML struct {
 	Foreach []string `yaml:"foreach"`
 	Conn    string   `yaml:"conn"`    // connection id for type: sql
 	Project string   `yaml:"project"` // uploaded project dir to stage as cwd (shell tasks)
+	Subdag  string   `yaml:"subdag"`  // target dag id for type: subdag (runs it as a child run)
 	HTTP    *struct {
 		Method         string            `yaml:"method"`
 		URL            string            `yaml:"url"`
@@ -81,6 +94,13 @@ type dagYAML struct {
 	StartDate     string `yaml:"start_date"`
 	Catchup       bool   `yaml:"catchup"`
 	MaxActiveRuns int    `yaml:"max_active_runs"`
+	// ExecutionPolicy gates queued-run admission: parallel (default),
+	// serial_wait, serial_discard, or serial_priority. Serial policies admit at
+	// most one active run at a time regardless of max_active_runs.
+	ExecutionPolicy string `yaml:"execution_policy"`
+	// WorkerGroup is the default dial-in worker group for every task that does
+	// not set its own ("" = tasks run on the scheduler's local executor).
+	WorkerGroup string `yaml:"worker_group"`
 	// MaxActiveTasks caps this DAG's concurrently queued/running TASKS across
 	// all of its runs (0 = unlimited). Complements pools: this is a per-DAG
 	// budget, pools are a shared global one.
@@ -99,7 +119,8 @@ type dagYAML struct {
 	Notify         struct {
 		URL    string   `yaml:"url"`
 		On     []string `yaml:"on"`     // "failure", "success"
-		Format string   `yaml:"format"` // ""/raw | slack | feishu | dingtalk
+		Format string   `yaml:"format"` // ""/raw | slack | feishu | dingtalk | email
+		Group  string   `yaml:"group"`  // alert group name; wins over url when set
 	} `yaml:"notify"`
 }
 
@@ -187,6 +208,13 @@ func Parse(raw []byte) (*model.DAG, error) {
 	if y.MaxActiveTasks < 0 || y.MaxActiveTasks > MaxTasks {
 		return nil, fmt.Errorf("dag %q: max_active_tasks must be between 0 and %d", y.DagID, MaxTasks)
 	}
+	policy := strings.TrimSpace(y.ExecutionPolicy)
+	if !model.ValidExecutionPolicy(policy) {
+		return nil, fmt.Errorf("dag %q: invalid execution_policy %q (parallel, serial_wait, serial_discard, or serial_priority)", y.DagID, policy)
+	}
+	if policy == "parallel" {
+		policy = model.PolicyParallel // canonical: empty
+	}
 
 	startDate, err := parseStartDate(y.StartDate, loc)
 	if err != nil {
@@ -209,17 +237,18 @@ func Parse(raw []byte) (*model.DAG, error) {
 		return nil, fmt.Errorf("dag %q: trigger_after count exceeds %d", y.DagID, MaxTasks)
 	}
 	d := &model.DAG{
-		DagID:          y.DagID,
-		Schedule:       y.Schedule,
-		Timezone:       y.Timezone,
-		StartDate:      startDate,
-		Catchup:        y.Catchup,
-		MaxActiveRuns:  maxActive,
-		MaxActiveTasks: y.MaxActiveTasks,
-		DefaultRetries: y.DefaultRetries,
-		SLA:            y.SLA,
-		DagrunTimeout:  y.DagrunTimeout,
-		DefinitionYAML: string(raw),
+		DagID:           y.DagID,
+		Schedule:        y.Schedule,
+		Timezone:        y.Timezone,
+		StartDate:       startDate,
+		Catchup:         y.Catchup,
+		MaxActiveRuns:   maxActive,
+		MaxActiveTasks:  y.MaxActiveTasks,
+		ExecutionPolicy: policy,
+		DefaultRetries:  y.DefaultRetries,
+		SLA:             y.SLA,
+		DagrunTimeout:   y.DagrunTimeout,
+		DefinitionYAML:  string(raw),
 	}
 	seenTriggers := map[string]bool{}
 	for _, ta := range y.TriggerAfter {
@@ -268,15 +297,20 @@ func Parse(raw []byte) (*model.DAG, error) {
 	if d.NotifyURL != "" {
 		// scheme is case-insensitive (RFC 3986) — match the console's client check.
 		lower := strings.ToLower(d.NotifyURL)
-		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			return nil, fmt.Errorf("dag %q: notify.url must be http(s)", y.DagID)
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") &&
+			!strings.HasPrefix(lower, "mailto:") {
+			return nil, fmt.Errorf("dag %q: notify.url must be http(s) or mailto:", y.DagID)
 		}
 	}
 	switch y.Notify.Format {
-	case "", "raw", "slack", "feishu", "dingtalk":
+	case "", "raw", "slack", "feishu", "dingtalk", "email":
 		d.NotifyFormat = y.Notify.Format
 	default:
-		return nil, fmt.Errorf("dag %q: invalid notify.format %q (raw, slack, feishu, or dingtalk)", y.DagID, y.Notify.Format)
+		return nil, fmt.Errorf("dag %q: invalid notify.format %q (raw, slack, feishu, dingtalk, or email)", y.DagID, y.Notify.Format)
+	}
+	d.NotifyGroup = strings.TrimSpace(y.Notify.Group)
+	if len(d.NotifyGroup) > 128 {
+		return nil, fmt.Errorf("dag %q: notify.group exceeds 128 bytes", y.DagID)
 	}
 
 	// foreach fan-out expands at PARSE time, so the scheduler's state machine
@@ -306,9 +340,20 @@ func Parse(raw []byte) (*model.DAG, error) {
 
 		taskType := orDefault(strings.TrimSpace(t.Type), "shell")
 		switch taskType {
-		case "shell", "python", "sql", "jar", "http":
+		case "shell", "python", "sql", "jar", "http", "subdag":
 		default:
 			return nil, fmt.Errorf("dag %q: task %q has unsupported type %q", y.DagID, t.ID, taskType)
+		}
+		if taskType == "subdag" {
+			target := strings.TrimSpace(t.Subdag)
+			if target == "" || len(target) > maxIdentifierBytes || !idPattern.MatchString(target) {
+				return nil, fmt.Errorf("dag %q: task %q needs subdag: <target dag id>", y.DagID, t.ID)
+			}
+			if target == y.DagID {
+				return nil, fmt.Errorf("dag %q: task %q cannot run its own dag as a subdag", y.DagID, t.ID)
+			}
+		} else if strings.TrimSpace(t.Subdag) != "" {
+			return nil, fmt.Errorf("dag %q: task %q sets subdag but type is %q (want type: subdag)", y.DagID, t.ID, taskType)
 		}
 		if len(t.Deps) > maxDepsPerTask {
 			return nil, fmt.Errorf("dag %q: task %q has more than %d dependencies", y.DagID, t.ID, maxDepsPerTask)
@@ -324,6 +369,15 @@ func Parse(raw []byte) (*model.DAG, error) {
 		if len(pool) > maxIdentifierBytes || !idPattern.MatchString(pool) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid pool %q", y.DagID, t.ID, pool)
 		}
+		group := orDefault(strings.TrimSpace(t.WorkerGroup), strings.TrimSpace(y.WorkerGroup))
+		if group != "" && (len(group) > maxIdentifierBytes || !idPattern.MatchString(group)) {
+			return nil, fmt.Errorf("dag %q: task %q has invalid worker_group %q", y.DagID, t.ID, group)
+		}
+		if group != "" && strings.TrimSpace(t.Project) != "" {
+			// Project staging happens on the scheduler's filesystem; a dial-in
+			// worker cannot see it. Refuse at save time, not at 2am dispatch.
+			return nil, fmt.Errorf("dag %q: task %q combines project: with worker_group: — uploaded projects require the local executor", y.DagID, t.ID)
+		}
 		task := model.Task{
 			ID:          t.ID,
 			Type:        taskType,
@@ -336,12 +390,38 @@ func Parse(raw []byte) (*model.DAG, error) {
 			Timeout:     t.Timeout,
 			SLA:         t.SLA,
 			Conn:        strings.TrimSpace(t.Conn),
+			Subdag:      strings.TrimSpace(t.Subdag),
 			Project:     strings.TrimSpace(t.Project),
 			TriggerRule: orDefault(t.TriggerRule, model.RuleAllSuccess),
 			When:        strings.TrimSpace(t.When),
+			WorkerGroup: group,
 		}
 		if !model.ValidTriggerRule(task.TriggerRule) {
 			return nil, fmt.Errorf("dag %q: task %q has invalid trigger_rule %q", y.DagID, t.ID, t.TriggerRule)
+		}
+		if dep := t.DependsOnDag; dep != nil {
+			target := strings.TrimSpace(dep.Dag)
+			if target == "" || len(target) > maxIdentifierBytes || !idPattern.MatchString(target) {
+				return nil, fmt.Errorf("dag %q: task %q depends_on_dag.dag %q is not a valid dag id", y.DagID, t.ID, dep.Dag)
+			}
+			if target == y.DagID {
+				return nil, fmt.Errorf("dag %q: task %q cannot depend on its own dag", y.DagID, t.ID)
+			}
+			offset := strings.TrimSpace(dep.Offset)
+			if offset == "same" {
+				offset = ""
+			}
+			if !datetmpl.ValidOffset(offset) {
+				return nil, fmt.Errorf("dag %q: task %q depends_on_dag.offset %q does not parse (examples: \"- 1d\", \".month_start\")", y.DagID, t.ID, dep.Offset)
+			}
+			if dep.Timeout < 0 || dep.Timeout > maxDurationSeconds {
+				return nil, fmt.Errorf("dag %q: task %q depends_on_dag.timeout must be between 0 and %d seconds", y.DagID, t.ID, maxDurationSeconds)
+			}
+			onTimeout := orDefault(strings.TrimSpace(dep.OnTimeout), "fail")
+			if onTimeout != "fail" && onTimeout != "skip" {
+				return nil, fmt.Errorf("dag %q: task %q depends_on_dag.on_timeout must be fail or skip", y.DagID, t.ID)
+			}
+			task.DependsOnDag = &model.DependsOnDag{Dag: target, Offset: offset, Timeout: dep.Timeout, OnTimeout: onTimeout}
 		}
 		if t.Timeout < 0 || t.Timeout > maxDurationSeconds || t.SLA < 0 || t.SLA > maxDurationSeconds {
 			return nil, fmt.Errorf("dag %q: task %q timeout/sla must be between 0 and %d seconds", y.DagID, t.ID, maxDurationSeconds)

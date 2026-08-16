@@ -97,6 +97,10 @@ func main() {
 		err = cmdOverview(args)
 	case "tokens":
 		err = cmdTokens(args)
+	case "worker":
+		err = cmdWorker(args)
+	case "workers":
+		err = cmdWorkers(args)
 	case "mcp":
 		err = cmdMCP(args)
 	case "users":
@@ -388,8 +392,15 @@ func cmdServe(args []string) error {
 	if cfg.MaxQueuedRunsGlobal <= 0 || cfg.MaxActiveRunsGlobal <= 0 || cfg.MaxConcurrentTasks <= 0 {
 		return fmt.Errorf("global run/task limits must be positive")
 	}
-	if cfg.Notify.URL != "" && !strings.HasPrefix(cfg.Notify.URL, "http://") && !strings.HasPrefix(cfg.Notify.URL, "https://") {
-		return fmt.Errorf("notify.url must start with http:// or https://")
+	if cfg.Notify.URL != "" && !strings.HasPrefix(cfg.Notify.URL, "http://") && !strings.HasPrefix(cfg.Notify.URL, "https://") &&
+		!strings.HasPrefix(strings.ToLower(cfg.Notify.URL), "mailto:") {
+		return fmt.Errorf("notify.url must start with http://, https://, or mailto:")
+	}
+	if strings.HasPrefix(strings.ToLower(cfg.Notify.URL), "mailto:") && cfg.SMTP.Host == "" {
+		return fmt.Errorf("notify.url uses mailto: but smtp.host is not configured")
+	}
+	if cfg.WorkerListen != "" && cfg.HTTP == "" {
+		return fmt.Errorf("worker_listen requires the HTTP API (workers join via POST /api/workers/join)")
 	}
 	logger, err := buildLogger(cfg.Log.Level, cfg.Log.Format)
 	if err != nil {
@@ -444,12 +455,13 @@ func cmdServe(args []string) error {
 
 	// At-rest encryption for connection passwords: load (or mint) the key file
 	// and seal any legacy plaintext rows. "none" opts out explicitly.
+	var cip *secrets.Cipher
 	if cfg.KeyFile != "" && cfg.KeyFile != "none" {
 		key, created, err := secrets.LoadOrCreateKeyFile(cfg.KeyFile)
 		if err != nil {
 			return fmt.Errorf("encryption key: %w", err)
 		}
-		cip, err := secrets.NewCipher(key)
+		cip, err = secrets.NewCipher(key)
 		if err != nil {
 			return err
 		}
@@ -464,6 +476,17 @@ func cmdServe(args []string) error {
 		}
 	} else {
 		log.Print("cronova: WARNING connection-password encryption disabled (key_file: none) — passwords are stored in plaintext")
+	}
+	// The SMTP password may be stored encrypted with the same key file.
+	if secrets.IsEncrypted(cfg.SMTP.Password) {
+		if cip == nil {
+			return fmt.Errorf("smtp.password is encrypted but key_file is disabled")
+		}
+		pw, err := cip.Decrypt(cfg.SMTP.Password)
+		if err != nil {
+			return fmt.Errorf("decrypt smtp.password: %w", err)
+		}
+		cfg.SMTP.Password = pw
 	}
 
 	// seed the initial admin (idempotent) before enabling auth, so a fresh
@@ -532,8 +555,14 @@ func cmdServe(args []string) error {
 		MaxConcurrentTasks:   cfg.MaxConcurrentTasks,
 		DefaultNotifyURL:     cfg.Notify.URL,
 		DefaultNotifyFormat:  cfg.Notify.Format,
-		ReloadInterval:       reloadDur,
-		Logger:               logger,
+		DefaultNotifyGroup:   cfg.Notify.Group,
+		SMTP: scheduler.SMTPConfig{
+			Host: cfg.SMTP.Host, Port: cfg.SMTP.Port,
+			Username: cfg.SMTP.Username, Password: cfg.SMTP.Password,
+			From: cfg.SMTP.From, AllowPlaintext: cfg.SMTP.AllowPlaintext,
+		},
+		ReloadInterval: reloadDur,
+		Logger:         logger,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -579,6 +608,14 @@ func cmdServe(args []string) error {
 		apiSrv.SetSchedulerTick(tickDur)
 		apiSrv.SetLimits(cfg.MaxQueuedRunsGlobal, cfg.MaxActiveRunsGlobal, cfg.MaxConcurrentTasks)
 		apiSrv.SetAccessLogger(logger)
+		// Dial-in worker hub: only when worker_listen is configured.
+		if cfg.WorkerListen != "" {
+			stopHub, herr := startWorkerHub(ctx, cfg, st, sch, apiSrv, logger)
+			if herr != nil {
+				return herr
+			}
+			defer stopHub()
+		}
 		httpSrv = newConsoleHTTPServer(cfg.HTTP, apiSrv.Handler())
 		go func() {
 			log.Printf("cronova: console on http://%s (auth=%v)", cfg.HTTP, cfg.Auth.Enabled)
@@ -628,11 +665,12 @@ func cmdTrigger(args []string) error {
 	dbPath := fs.String("db", "data/cronova.db", "SQLite metadata database path")
 	dagDir := fs.String("dags", "dags", "directory of DAG YAML definitions")
 	paramsJSON := fs.String("params", "", `trigger params as a JSON object, e.g. '{"day":"2026-01-01"}'`)
+	priority := fs.Int("priority", 0, "run priority ±100 (higher wins dispatch competition; 0 = default)")
 	resolve := addGlobalFlags(fs)
 	pos := parsePositionals(fs, args)
 	g := resolve()
 	if len(pos) == 0 {
-		return fmt.Errorf("usage: cronova trigger <dag_id> [-params '{...}']")
+		return fmt.Errorf("usage: cronova trigger <dag_id> [-params '{...}'] [-priority N]")
 	}
 	dagID := pos[0]
 	ctx := context.Background()
@@ -649,7 +687,7 @@ func cmdTrigger(args []string) error {
 		if err != nil {
 			return err
 		}
-		runID, err := c.TriggerDAG(ctx, dagID, params)
+		runID, err := c.TriggerDAGPriority(ctx, dagID, params, *priority)
 		if err != nil {
 			return err
 		}
@@ -670,7 +708,7 @@ func cmdTrigger(args []string) error {
 	if err := sch.LoadDAGs(ctx); err != nil {
 		return err
 	}
-	runID, err := sch.TriggerManual(ctx, dagID, params)
+	runID, err := sch.TriggerManualPriority(ctx, dagID, params, *priority)
 	if err != nil {
 		return err
 	}

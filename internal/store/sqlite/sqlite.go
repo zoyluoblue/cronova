@@ -103,6 +103,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE task_instances ADD COLUMN definition_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE api_tokens ADD COLUMN expires_at DATETIME`,
 		`ALTER TABLE api_tokens ADD COLUMN dag_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dag_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE dag_runs ADD COLUMN parent_run_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
@@ -289,7 +291,7 @@ func (s *Store) SetDAGPaused(ctx context.Context, dagID string, paused bool) err
 
 // --- DAG runs ---
 
-const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params, definition_yaml, definition_hash`
+const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params, definition_yaml, definition_hash, priority, parent_run_id`
 
 func marshalParams(p map[string]string) string {
 	if len(p) == 0 {
@@ -316,7 +318,7 @@ func scanRun(sc scanner) (*model.DagRun, error) {
 	var startNS, finNS sql.NullString
 	var params string
 	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS, &params,
-		&r.DefinitionYAML, &r.DefinitionHash)
+		&r.DefinitionYAML, &r.DefinitionHash, &r.Priority, &r.ParentRunID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -340,10 +342,10 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	// SELECT inserts zero rows when deleted_at IS NOT NULL.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
+		 SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash, r.DagID)
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, r.DagID)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -359,12 +361,12 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global int) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,?,?,?,?
+		 SELECT ?,?,?,?,?,?,?,?,?,?,?,?
 		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)
 		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < ?`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash, r.DagID, global)
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, r.DagID, global)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -384,13 +386,13 @@ func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global
 func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT ?,?,?,?,?,?,?,?,?,?
+		 SELECT ?,?,?,?,?,?,?,?,?,?,?,?
 		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=? AND deleted_at IS NULL)
 		   AND (SELECT COUNT(*) FROM dag_runs WHERE dag_id=? AND state IN ('queued','running')) < ?
 		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < ?`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash,
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID,
 		r.DagID, r.DagID, perDAG, global)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -509,7 +511,7 @@ func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, err
 	// normalizes both to a numeric instant so same-second runs sort correctly.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at, r.params,
-		        r.definition_yaml, r.definition_hash
+		        r.definition_yaml, r.definition_hash, r.priority, r.parent_run_id
 		 FROM dag_runs r JOIN dags d ON r.dag_id=d.dag_id
 		 WHERE d.deleted_at IS NULL
 		 ORDER BY COALESCE(CAST(strftime('%s', r.started_at) AS INTEGER), CAST(strftime('%s', r.logical_date) AS INTEGER)) DESC,
@@ -1115,6 +1117,70 @@ func (s *Store) UpsertVariable(ctx context.Context, v *model.Variable) error {
 
 func (s *Store) DeleteVariable(ctx context.Context, key string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM variables WHERE key=?`, key)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// --- alert groups ---
+
+func scanAlertGroup(sc scanner) (*model.AlertGroup, error) {
+	var g model.AlertGroup
+	var channels, upd string
+	if err := sc.Scan(&g.Name, &channels, &upd); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(channels), &g.Channels); err != nil {
+		return nil, fmt.Errorf("alert group %q: corrupt channels: %w", g.Name, err)
+	}
+	g.UpdatedAt = parseLoose(upd)
+	return &g, nil
+}
+
+func (s *Store) ListAlertGroups(ctx context.Context) ([]*model.AlertGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, channels, updated_at FROM alert_groups ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.AlertGroup
+	for rows.Next() {
+		g, err := scanAlertGroup(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetAlertGroup(ctx context.Context, name string) (*model.AlertGroup, error) {
+	g, err := scanAlertGroup(s.db.QueryRowContext(ctx,
+		`SELECT name, channels, updated_at FROM alert_groups WHERE name=?`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	return g, err
+}
+
+func (s *Store) UpsertAlertGroup(ctx context.Context, g *model.AlertGroup) error {
+	channels, err := json.Marshal(g.Channels)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO alert_groups (name, channels, updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+		 ON CONFLICT(name) DO UPDATE SET channels=excluded.channels, updated_at=CURRENT_TIMESTAMP`,
+		g.Name, string(channels))
+	return err
+}
+
+func (s *Store) DeleteAlertGroup(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM alert_groups WHERE name=?`, name)
 	if err != nil {
 		return err
 	}

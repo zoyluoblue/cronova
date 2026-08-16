@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zoyluo/cronova/internal/certs"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/scheduler/parser"
 	"github.com/zoyluo/cronova/internal/store"
@@ -69,6 +70,10 @@ type Server struct {
 	limitQueued, limitActive, limitTasks int
 	accessLog                            *slog.Logger // nil = no API access logging
 	trustedProxies                       []*net.IPNet
+	// Worker hub wiring (nil/"" when worker_listen is not configured).
+	workerCA      *certs.CA
+	workerHubAddr string
+	hub           WorkerHubControl
 }
 
 const (
@@ -141,6 +146,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dags/{id}/hook", s.getDagHook)
 	mux.HandleFunc("DELETE /api/dags/{id}/hook", s.deleteDagHook)
 	mux.HandleFunc("POST /api/hooks/{id}/{secret}", s.hookTrigger) // public: the secret IS the credential
+	// Workers: join is public (the one-time token is the credential); the rest
+	// follow standard authz (GET any authed user, writes admin).
+	mux.HandleFunc("POST /api/workers/join", s.joinWorker)
+	mux.HandleFunc("GET /api/workers", s.listWorkers)
+	mux.HandleFunc("POST /api/workers/{id}/drain", s.drainWorker)
+	mux.HandleFunc("DELETE /api/workers/{id}", s.removeWorker)
+	mux.HandleFunc("POST /api/worker-tokens", s.createWorkerToken)
 	mux.HandleFunc("POST /api/dags/{id}/pause", s.pauseDAG)
 	mux.HandleFunc("GET /api/dags/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/dags/{id}/task-durations", s.taskDurations)
@@ -160,6 +172,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/variables", s.listVariables)
 	mux.HandleFunc("POST /api/variables/{key}", s.setVariable)
 	mux.HandleFunc("DELETE /api/variables/{key}", s.deleteVariable)
+	// Alert groups: named notify-channel fan-outs referenced by notify.group
+	mux.HandleFunc("GET /api/alert-groups", s.listAlertGroups)
+	mux.HandleFunc("POST /api/alert-groups/{name}", s.setAlertGroup)
+	mux.HandleFunc("DELETE /api/alert-groups/{name}", s.deleteAlertGroup)
 	mux.HandleFunc("GET /api/connections", s.listConnections)
 	mux.HandleFunc("POST /api/connections/{id}", s.setConnection)
 	mux.HandleFunc("DELETE /api/connections/{id}", s.deleteConnection)
@@ -435,6 +451,11 @@ type editTask struct {
 	HTTP          *model.HTTPSpec `json:"http,omitempty"`
 	Conn          string          `json:"conn,omitempty"`
 	Project       string          `json:"project,omitempty"`
+	WorkerGroup   string          `json:"worker_group,omitempty"`
+	// Subdag (type: subdag) + DependsOnDag round-trip through the editor so the
+	// console can show and preserve sub-workflow / cross-DAG-wait wiring.
+	Subdag       string              `json:"subdag,omitempty"`
+	DependsOnDag *model.DependsOnDag `json:"depends_on_dag,omitempty"`
 }
 
 // dagDetail is the editor-facing DAG. The outer Tasks shadows model.DAG.Tasks in
@@ -459,6 +480,8 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 		d.NotifyURL = parsed.NotifyURL
 		d.NotifyOn = parsed.NotifyOn
 		d.NotifyFormat = parsed.NotifyFormat
+		d.NotifyGroup = parsed.NotifyGroup
+		d.ExecutionPolicy = parsed.ExecutionPolicy
 		d.SLA = parsed.SLA
 		d.DagrunTimeout = parsed.DagrunTimeout
 		// Pull the RAW per-task retry pointers so "unset" stays null for the editor.
@@ -476,7 +499,7 @@ func (s *Server) getDAG(w http.ResponseWriter, r *http.Request) {
 			rawByID[rt.ID] = rp{rt.Retries, rt.RetryDelay}
 		}
 		for _, tk := range parsed.Tasks {
-			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, RetryBackoff: tk.RetryBackoff, RetryDelayMax: tk.RetryDelayMax, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn, Project: tk.Project}
+			et := editTask{ID: tk.ID, Type: tk.Type, Command: tk.Command, Deps: tk.Deps, Pool: tk.Pool, Priority: tk.Priority, RetryBackoff: tk.RetryBackoff, RetryDelayMax: tk.RetryDelayMax, Timeout: tk.Timeout, SLA: tk.SLA, TriggerRule: tk.TriggerRule, HTTP: tk.HTTP, Conn: tk.Conn, Project: tk.Project, WorkerGroup: tk.WorkerGroup, Subdag: tk.Subdag, DependsOnDag: tk.DependsOnDag}
 			if p, ok := rawByID[tk.ID]; ok {
 				et.Retries, et.RetryDelay = p.retries, p.retryDelay
 			}
@@ -497,14 +520,24 @@ func (s *Server) deleteDAG(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) triggerDAG(w http.ResponseWriter, r *http.Request) {
-	// optional trigger-time params (JSON {"params":{...}}); empty body = no params
+	// optional trigger-time params (JSON {"params":{...}}) and run priority
+	// (higher wins dispatch competition; clamped to ±100); empty body = defaults
 	var req struct {
-		Params map[string]string `json:"params"`
+		Params   map[string]string `json:"params"`
+		Priority int               `json:"priority"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		_ = decodeJSON(r, &req) // tolerate an absent/blank body — params are optional
 	}
-	runID, err := s.eng.TriggerManual(r.Context(), r.PathValue("id"), req.Params)
+	var runID string
+	var err error
+	if pe, ok := s.eng.(interface {
+		TriggerManualPriority(ctx context.Context, dagID string, params map[string]string, priority int) (string, error)
+	}); ok && req.Priority != 0 {
+		runID, err = pe.TriggerManualPriority(r.Context(), r.PathValue("id"), req.Params, req.Priority)
+	} else {
+		runID, err = s.eng.TriggerManual(r.Context(), r.PathValue("id"), req.Params)
+	}
 	if err != nil {
 		// queue-full gets the current watermark so the caller sees how far over
 		// capacity the instance is, not just a bare refusal.
@@ -680,22 +713,33 @@ type taskSpec struct {
 	HTTP          *model.HTTPSpec `json:"http,omitempty"`
 	Conn          string          `json:"conn,omitempty"`
 	Project       string          `json:"project,omitempty"`
+	// WorkerGroup routes the task to a dial-in worker group (round-trips even
+	// though the console has no dedicated field yet — never dropped on save).
+	WorkerGroup string `json:"worker_group,omitempty"`
+	// Subdag is the target dag id for type: subdag (runs it as a child run).
+	Subdag string `json:"subdag,omitempty"`
+	// DependsOnDag holds the task until another DAG's matching period run succeeds.
+	DependsOnDag *model.DependsOnDag `json:"depends_on_dag,omitempty"`
 }
 
 type dagSpec struct {
-	DagID          string     `json:"dag_id"`
-	Schedule       string     `json:"schedule"`
-	StartDate      string     `json:"start_date"`
-	Catchup        bool       `json:"catchup"`
-	MaxActiveRuns  int        `json:"max_active_runs"`
-	DefaultRetries int        `json:"default_retries"`
-	Tasks          []taskSpec `json:"tasks"`
-	TriggerAfter   []string   `json:"trigger_after"`
-	NotifyURL      string     `json:"notify_url"`
-	NotifyOn       []string   `json:"notify_on"`     // "failure", "success"
-	NotifyFormat   string     `json:"notify_format"` // ""/raw | slack | feishu | dingtalk
-	SLA            int        `json:"sla"`
-	DagrunTimeout  int        `json:"dagrun_timeout"`
+	DagID         string `json:"dag_id"`
+	Schedule      string `json:"schedule"`
+	StartDate     string `json:"start_date"`
+	Catchup       bool   `json:"catchup"`
+	MaxActiveRuns int    `json:"max_active_runs"`
+	// ExecutionPolicy gates queued-run admission ("", parallel, serial_wait,
+	// serial_discard, serial_priority); validated by the parser like every field.
+	ExecutionPolicy string     `json:"execution_policy"`
+	DefaultRetries  int        `json:"default_retries"`
+	Tasks           []taskSpec `json:"tasks"`
+	TriggerAfter    []string   `json:"trigger_after"`
+	NotifyURL       string     `json:"notify_url"`
+	NotifyOn        []string   `json:"notify_on"`     // "failure", "success"
+	NotifyFormat    string     `json:"notify_format"` // ""/raw | slack | feishu | dingtalk | email
+	NotifyGroup     string     `json:"notify_group"`  // alert group name; wins over notify_url
+	SLA             int        `json:"sla"`
+	DagrunTimeout   int        `json:"dagrun_timeout"`
 }
 
 // buildDAG accepts a structured DAG spec from the UI form, renders it to the
@@ -769,6 +813,12 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		Body           string            `yaml:"body,omitempty"`
 		ExpectedStatus []int             `yaml:"expected_status,omitempty"`
 	}
+	type depOut struct {
+		Dag       string `yaml:"dag"`
+		Offset    string `yaml:"offset,omitempty"`
+		Timeout   int    `yaml:"timeout,omitempty"`
+		OnTimeout string `yaml:"on_timeout,omitempty"`
+	}
 	type taskOut struct {
 		ID            string   `yaml:"id"`
 		Type          string   `yaml:"type,omitempty"`
@@ -785,44 +835,52 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 		TriggerRule   string   `yaml:"trigger_rule,omitempty"`
 		Conn          string   `yaml:"conn,omitempty"`
 		Project       string   `yaml:"project,omitempty"`
+		WorkerGroup   string   `yaml:"worker_group,omitempty"`
+		Subdag        string   `yaml:"subdag,omitempty"`
+		DependsOnDag  *depOut  `yaml:"depends_on_dag,omitempty"`
 		HTTP          *httpOut `yaml:"http,omitempty"`
 	}
 	type triggerOut struct {
 		DagID string `yaml:"dag_id"`
 	}
 	type notifyOut struct {
-		URL    string   `yaml:"url"`
+		URL    string   `yaml:"url,omitempty"`
 		On     []string `yaml:"on"`
 		Format string   `yaml:"format,omitempty"`
+		Group  string   `yaml:"group,omitempty"`
 	}
 	type dagOut struct {
-		DagID          string       `yaml:"dag_id"`
-		Schedule       string       `yaml:"schedule,omitempty"`
-		StartDate      string       `yaml:"start_date,omitempty"`
-		Catchup        bool         `yaml:"catchup"`
-		MaxActiveRuns  int          `yaml:"max_active_runs,omitempty"`
-		DefaultRetries int          `yaml:"default_retries,omitempty"`
-		SLA            int          `yaml:"sla,omitempty"`
-		DagrunTimeout  int          `yaml:"dagrun_timeout,omitempty"`
-		Tasks          []taskOut    `yaml:"tasks"`
-		TriggerAfter   []triggerOut `yaml:"trigger_after,omitempty"`
-		Notify         *notifyOut   `yaml:"notify,omitempty"`
+		DagID           string       `yaml:"dag_id"`
+		Schedule        string       `yaml:"schedule,omitempty"`
+		StartDate       string       `yaml:"start_date,omitempty"`
+		Catchup         bool         `yaml:"catchup"`
+		MaxActiveRuns   int          `yaml:"max_active_runs,omitempty"`
+		ExecutionPolicy string       `yaml:"execution_policy,omitempty"`
+		DefaultRetries  int          `yaml:"default_retries,omitempty"`
+		SLA             int          `yaml:"sla,omitempty"`
+		DagrunTimeout   int          `yaml:"dagrun_timeout,omitempty"`
+		Tasks           []taskOut    `yaml:"tasks"`
+		TriggerAfter    []triggerOut `yaml:"trigger_after,omitempty"`
+		Notify          *notifyOut   `yaml:"notify,omitempty"`
 	}
 	out := dagOut{
 		DagID: spec.DagID, Schedule: spec.Schedule, StartDate: spec.StartDate,
-		Catchup: spec.Catchup, MaxActiveRuns: spec.MaxActiveRuns, DefaultRetries: spec.DefaultRetries,
+		Catchup: spec.Catchup, MaxActiveRuns: spec.MaxActiveRuns,
+		ExecutionPolicy: spec.ExecutionPolicy, DefaultRetries: spec.DefaultRetries,
 		SLA: spec.SLA, DagrunTimeout: spec.DagrunTimeout,
 	}
-	if url := strings.TrimSpace(spec.NotifyURL); url != "" {
+	url, group := strings.TrimSpace(spec.NotifyURL), strings.TrimSpace(spec.NotifyGroup)
+	if url != "" || group != "" {
 		on := []string{}
 		for _, ev := range spec.NotifyOn {
 			if ev == "failure" || ev == "success" {
 				on = append(on, ev)
 			}
 		}
-		// Persist the URL even with no events yet (a "configured but idle" state
-		// that round-trips), rather than silently dropping what the user typed.
-		out.Notify = &notifyOut{URL: url, On: on, Format: spec.NotifyFormat}
+		// Persist the URL/group even with no events yet (a "configured but idle"
+		// state that round-trips), rather than silently dropping what the user
+		// typed — and never wipe a group the spec still carries.
+		out.Notify = &notifyOut{URL: url, On: on, Format: spec.NotifyFormat, Group: group}
 	}
 	for _, t := range spec.Tasks {
 		to := taskOut{
@@ -830,6 +888,14 @@ func specToYAML(spec dagSpec) ([]byte, error) {
 			Priority: t.Priority, Retries: t.Retries, RetryDelay: t.RetryDelay,
 			RetryBackoff: t.RetryBackoff, RetryDelayMax: t.RetryDelayMax, Timeout: t.Timeout,
 			SLA: t.SLA, TriggerRule: t.TriggerRule, Conn: t.Conn, Project: t.Project,
+			WorkerGroup: t.WorkerGroup,
+		}
+		if t.Type == "subdag" {
+			to.Subdag = strings.TrimSpace(t.Subdag)
+			to.Command = "" // a subdag task runs a child DAG, never a command
+		}
+		if d := t.DependsOnDag; d != nil && strings.TrimSpace(d.Dag) != "" {
+			to.DependsOnDag = &depOut{Dag: strings.TrimSpace(d.Dag), Offset: strings.TrimSpace(d.Offset), Timeout: d.Timeout, OnTimeout: d.OnTimeout}
 		}
 		if t.Type == "http" && t.HTTP != nil {
 			to.HTTP = &httpOut{

@@ -163,6 +163,26 @@ type Store interface {
 	GetVariable(ctx context.Context, key string) (*model.Variable, error)
 	UpsertVariable(ctx context.Context, v *model.Variable) error
 	DeleteVariable(ctx context.Context, key string) error
+
+	// Alert groups: named notify-channel fan-outs referenced by a DAG's
+	// notify.group.
+	ListAlertGroups(ctx context.Context) ([]*model.AlertGroup, error)
+	GetAlertGroup(ctx context.Context, name string) (*model.AlertGroup, error)
+	UpsertAlertGroup(ctx context.Context, g *model.AlertGroup) error
+	DeleteAlertGroup(ctx context.Context, name string) error
+
+	// Workers: remote task runners joined via join tokens. Heartbeat updates
+	// go through UpdateWorkerStatus (cheap column update, not a full upsert).
+	UpsertWorker(ctx context.Context, w *model.Worker) error
+	GetWorker(ctx context.Context, id string) (*model.Worker, error)
+	ListWorkers(ctx context.Context) ([]*model.Worker, error)
+	UpdateWorkerStatus(ctx context.Context, id, state string, activeTasks int, heartbeat *time.Time) error
+	SetWorkerDraining(ctx context.Context, id string, draining bool) error
+	DeleteWorker(ctx context.Context, id string) error
+	// Join tokens are one-time, hashed at rest. ConsumeJoinToken atomically
+	// burns an unexpired, unused token; ErrNotFound means invalid/spent.
+	CreateJoinToken(ctx context.Context, tokenHash, createdBy string, expiresAt time.Time) error
+	ConsumeJoinToken(ctx context.Context, tokenHash string) error
 	ListConnections(ctx context.Context) ([]*model.Connection, error)
 	GetConnection(ctx context.Context, id string) (*model.Connection, error)
 	UpsertConnection(ctx context.Context, c *model.Connection) error

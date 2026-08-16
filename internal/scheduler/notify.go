@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"strings"
 	"syscall"
 	"time"
 
@@ -105,29 +106,63 @@ func newNotifyClient(allowPrivate bool) *http.Client {
 	}
 }
 
-// notifyTarget resolves where a DAG's alerts go: the DAG's own webhook wins;
-// otherwise the instance-wide default (whose event filter, absent an explicit
-// per-DAG notify_on, is failure-only — a global webhook should alert, not spam).
-func (s *Scheduler) notifyTarget(d *model.DAG) (url, format string, on []string) {
-	if d.NotifyURL != "" {
-		return d.NotifyURL, d.NotifyFormat, d.NotifyOn
+// notifyChannels resolves where a DAG's alerts go, most specific first: the
+// DAG's alert group, then its own webhook/mailto URL, then the instance-wide
+// default (group before URL; its event filter, absent an explicit per-DAG
+// notify_on, is failure-only — a global fallback should alert, not spam).
+// A dangling group reference falls through to the next tier — losing the
+// pointer must not lose the alert — and is logged loudly.
+func (s *Scheduler) notifyChannels(ctx context.Context, d *model.DAG) (chs []model.NotifyChannel, on []string) {
+	if d.NotifyGroup != "" {
+		if g, err := s.store.GetAlertGroup(ctx, d.NotifyGroup); err == nil && len(g.Channels) > 0 {
+			return g.Channels, d.NotifyOn
+		} else if err != nil {
+			s.log.Error("alert group unresolved, falling back", "dag", d.DagID, "group", d.NotifyGroup, "err", err)
+		}
 	}
-	if s.opts.DefaultNotifyURL == "" {
-		return "", "", nil
+	if d.NotifyURL != "" {
+		return []model.NotifyChannel{{URL: d.NotifyURL, Format: d.NotifyFormat}}, d.NotifyOn
+	}
+	chs = s.systemChannels(ctx)
+	if len(chs) == 0 {
+		return nil, nil
 	}
 	on = d.NotifyOn
 	if len(on) == 0 {
 		on = []string{"failure"}
 	}
-	return s.opts.DefaultNotifyURL, s.opts.DefaultNotifyFormat, on
+	return chs, on
+}
+
+// systemChannels resolves the instance-wide alert destinations used for
+// scheduler-level events and as the per-DAG fallback tier.
+func (s *Scheduler) systemChannels(ctx context.Context) []model.NotifyChannel {
+	if s.opts.DefaultNotifyGroup != "" {
+		if g, err := s.store.GetAlertGroup(ctx, s.opts.DefaultNotifyGroup); err == nil && len(g.Channels) > 0 {
+			return g.Channels
+		} else if err != nil {
+			s.log.Error("default alert group unresolved, falling back", "group", s.opts.DefaultNotifyGroup, "err", err)
+		}
+	}
+	if s.opts.DefaultNotifyURL != "" {
+		return []model.NotifyChannel{{URL: s.opts.DefaultNotifyURL, Format: s.opts.DefaultNotifyFormat}}
+	}
+	return nil
+}
+
+// postChannels fans a payload out to every resolved channel.
+func (s *Scheduler) postChannels(chs []model.NotifyChannel, p notifyPayload) {
+	for _, ch := range chs {
+		s.postNotify(ch.URL, ch.Format, p)
+	}
 }
 
 // notifyRun fires the DAG's webhook (async, best-effort) when a finished run's
 // state matches the DAG's notify_on list. It never blocks the scheduler tick;
 // delivery is tracked by s.inflight so a graceful shutdown waits for it.
 func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunState, finishedAt time.Time, tis []*model.TaskInstance) {
-	url, format, notifyOn := s.notifyTarget(d)
-	if url == "" {
+	chs, notifyOn := s.notifyChannels(context.Background(), d)
+	if len(chs) == 0 {
 		return
 	}
 	ev := ""
@@ -183,7 +218,7 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(url, format, p)
+	s.postChannels(chs, p)
 }
 
 // notifyDeadline fires a soft SLA-miss alert mid-run (the run keeps going). kind
@@ -191,8 +226,8 @@ func (s *Scheduler) notifyRun(d *model.DAG, run *model.DagRun, final model.RunSt
 // the latter. It fires whenever a webhook is configured — setting the threshold is
 // itself the opt-in — independent of notify_on (which gates finalize alerts).
 func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID string, thresholdSec int, elapsed time.Duration) {
-	url, format, _ := s.notifyTarget(d)
-	if url == "" {
+	chs, _ := s.notifyChannels(context.Background(), d)
+	if len(chs) == 0 {
 		return
 	}
 	summary := fmt.Sprintf("cronova · %s · run %s missed SLA (%ds)", d.DagID, run.RunID, thresholdSec)
@@ -207,17 +242,14 @@ func (s *Scheduler) notifyDeadline(d *model.DAG, run *model.DagRun, kind, taskID
 	if run.StartedAt != nil {
 		p.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
-	s.postNotify(url, format, p)
+	s.postChannels(chs, p)
 }
 
-// notifySystem alerts the instance-wide webhook about a scheduler-level event
+// notifySystem alerts the instance-wide channels about a scheduler-level event
 // (executor unreachable/recovered, retention failure) — things that previously
-// only reached stderr. No-op without a default webhook.
+// only reached stderr. No-op without a default group/webhook.
 func (s *Scheduler) notifySystem(event, text string) {
-	if s.opts.DefaultNotifyURL == "" {
-		return
-	}
-	s.postNotify(s.opts.DefaultNotifyURL, s.opts.DefaultNotifyFormat, notifyPayload{
+	s.postChannels(s.systemChannels(context.Background()), notifyPayload{
 		Text:  "cronova · system · " + text,
 		State: event,
 	})
@@ -253,8 +285,12 @@ var notifyRetryDelays = []time.Duration{2 * time.Second, 6 * time.Second}
 // tracked by s.inflight for graceful shutdown). Transient failures (network,
 // 5xx) are retried with backoff; a 4xx is a configuration error and is not.
 // It snapshots everything the goroutine needs and logs only the host — never
-// the secret-bearing URL.
+// the secret-bearing URL. mailto: targets divert to the SMTP path.
 func (s *Scheduler) postNotify(rawURL, format string, p notifyPayload) {
+	if strings.HasPrefix(strings.ToLower(rawURL), "mailto:") {
+		s.postEmail(rawURL, p)
+		return
+	}
 	url, runID, host, state := rawURL, p.RunID, notifyHost(rawURL), p.State
 	s.inflight.Add(1)
 	go func() {

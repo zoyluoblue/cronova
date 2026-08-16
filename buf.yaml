@@ -6,6 +6,10 @@ lint:
     - STANDARD
   except:
     - SERVICE_SUFFIX
+    # WorkerHub.Session is a bidirectional stream; WorkerMessage/ServerMessage
+    # name the two directions far more honestly than SessionRequest/Response.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
 breaking:
   use:
     - FILE

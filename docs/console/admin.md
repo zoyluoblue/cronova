@@ -1,6 +1,6 @@
-# Graph, pools, variables, audit & API tokens
+# Graph, pools, variables, workers, audit & API tokens
 
-The operations pages of the cronova web console: the cross-DAG dependency graph, global concurrency pools, shared variables and connections, the operator audit trail, and API tokens for machine access. Everything here lives in the sidebar below your DAG list, at `http://localhost:8090`.
+The operations pages of the cronova web console: the cross-DAG dependency graph, global concurrency pools, shared variables and connections, the dial-in worker fleet, the operator audit trail, and API tokens for machine access. Everything here lives in the sidebar below your DAG list, at `http://localhost:8090`.
 
 ## Cross-DAG graph (`#/graph`)
 
@@ -42,7 +42,7 @@ Tasks opt in with the `pool:` field; every task defaults to the `default` pool, 
 
 ## Variables & Connections (`#/resources`)
 
-The **Variables & Connections** page holds configuration shared across tasks, in two tabs. Reference values in task commands as `{{ var.KEY }}` and `{{ conn.ID.field }}`, or pass `{{ params.KEY }}` at trigger time — the [template variables tutorial](../tutorial/variables-connections-params.md) covers all three.
+The **Variables & Connections** page holds configuration shared across tasks, in three tabs: variables, connections, and alert groups. Reference values in task commands as `{{ var.KEY }}` and `{{ conn.ID.field }}`, or pass `{{ params.KEY }}` at trigger time — the [template variables tutorial](../tutorial/variables-connections-params.md) covers the first two.
 
 ![variables and connections](../img/console/resources.png)
 
@@ -77,6 +77,62 @@ Named endpoint credentials — databases, APIs, hosts. The list shows each conne
 
 In templates, read connection fields as `{{ conn.ID.host }}`, `.port`, `.login` (alias `.user`), `.password`, `.type`, or `{{ conn.ID.extra.KEY }}` for Extra-JSON keys. `sql` tasks consume a connection directly via their `conn:` field — see [DAG & Task Reference](../DAG_REFERENCE.md).
 
+### Alert groups
+
+Named fan-outs of notification channels (expert mode). A DAG that sets **Alert group** in its Settings → Notifications row alerts *every* channel of the group instead of its single webhook URL — when the on-call destinations change, edit them here once instead of in every DAG.
+
+The list shows each group's name, channel count with a per-channel destination summary, and last-updated time; **Edit** opens the dialog, **✕** deletes (with confirmation — referencing DAGs fall back to their own notify URL, so no alert is lost).
+
+**New alert group** opens a dialog:
+
+| Field | Notes |
+|---|---|
+| Group name | e.g. `oncall`. Fixed after creation (same charset rule as variable keys, max 128 chars). |
+| Channels | 1–16 rows, each a URL + message format. URLs may be `http(s)://` incoming webhooks or `mailto:addr[,addr]`; formats are `raw`, `slack`, `feishu`, `dingtalk`, or `email`. **+ Add channel** appends a row, **✕** removes one. |
+
+!!! note "mailto: channels need SMTP"
+    Email channels are delivered through the server's SMTP relay — configure the `smtp:` section of the server config first, or mail deliveries fail (logged, never blocking runs).
+
+In DAG YAML the group is referenced as `notify.group` — see [DAG & Task Reference](../DAG_REFERENCE.md#notifications-webhooks-email--alert-groups) for the resolution rules (group wins over `notify.url`; a dangling reference falls back rather than dropping the alert).
+
+## Workers (`#/workers`)
+
+The **Workers** page (expert mode) manages the fleet of remote workers dialed into this scheduler. Tasks opt into remote execution with the `worker_group` field (DAG- or task-level, see [DAG & Task Reference](../DAG_REFERENCE.md)); a task's group is matched against each worker's `group` label (default `default`).
+
+The table lists every registered worker and refreshes itself every ~5 seconds while the page is open:
+
+| Column | Description |
+|---|---|
+| Name | The name the worker joined with (labels beyond `group` show underneath as muted `k=v` text). |
+| worker_id | Server-assigned id (click to copy). |
+| Group | The worker's routing group — the `group` label, `default` when unset. |
+| State | **online** (session up and heartbeating), **offline** (clean disconnect), or **lost** (heartbeats stopped without a goodbye; its running tasks fail over per retry policy). A **draining** tag is appended while draining. |
+| Active tasks | Tasks currently executing on the worker. |
+| Version | The worker binary's version. |
+| Last heartbeat | Relative time of the last heartbeat (hover for the absolute time). |
+| Joined | When the worker first joined. |
+
+**Row actions** (admin only):
+
+- **Drain / Undrain** — a draining worker finishes its running tasks but receives no new assignments; use it before maintenance. Undrain resumes assignments. Both ask for confirmation.
+- **✕ Remove** — deletes the registration and closes any live session, after a confirmation warning. Removal is immediate and permanent: the worker's certificate stops being accepted, so **a removed worker cannot reconnect** — it must re-join with a fresh token.
+
+### Joining a worker
+
+Attaching a worker takes two steps:
+
+1. Click **New join token** (admin), pick an expiry (1 hour / 24 hours / 7 days), and mint. The one-time token is shown **exactly once** — copy it now; only its hash is stored.
+2. On the worker host, run the join command shown next to the token:
+
+```bash
+cronova worker -server <console-url> -join-token <token>
+```
+
+The worker exchanges the token + a CSR for a signed certificate (its private key never leaves the host) and dials the hub; it appears **online** in the table within seconds. Tokens are single-use and expire on their TTL.
+
+!!! note "Requires `worker_listen`"
+    The worker hub is off by default. If minting a token fails with *worker hub is not enabled*, set `worker_listen` in the server config (or the `CRONOVA_WORKER_LISTEN` environment variable) and restart the server.
+
 ## Audit (`#/audit`)
 
 The **Audit** page is the operations log: who did what to which DAG or run, and when. It lists the latest 200 entries.
@@ -90,7 +146,7 @@ The **Audit** page is the operations log: who did what to which DAG or run, and 
 | Action | What was done (see below). |
 | Target | The DAG id, run id, or token affected, plus a detail suffix (e.g. `task=success` for a mark). |
 
-Recorded actions: **trigger**, **cancel**, **retry run**, **retry task**, **mark task**, **mark run**, **create DAG**, **delete DAG**, **pause**, **unpause**, **create token**, **revoke token**, and project uploads/deletes.
+Recorded actions: **trigger**, **cancel**, **retry run**, **retry task**, **mark task**, **mark run**, **create DAG**, **delete DAG**, **pause**, **unpause**, **create token**, **revoke token**, **save alert group**, **delete alert group**, and project uploads/deletes.
 
 !!! note "Auto-saved edits are not logged"
     The [task editor](task-editor.md) auto-saves on every debounced keystroke, so routine edits to an existing DAG are deliberately *not* audited — only the creation of a genuinely new DAG is. The trail stays meaningful instead of drowning in save events.

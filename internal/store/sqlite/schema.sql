@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS dags (
     deleted_at      DATETIME -- NULL = active; non-null = soft-deleted (archived, recoverable)
 );
 
+-- priority: orders competing runs at dispatch (higher first; trigger-time).
 CREATE TABLE IF NOT EXISTS dag_runs (
     run_id        TEXT PRIMARY KEY,
     dag_id        TEXT NOT NULL REFERENCES dags(dag_id),
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     params          TEXT NOT NULL DEFAULT '', -- JSON map of trigger-time params (recorded per run)
     definition_yaml TEXT NOT NULL DEFAULT '', -- immutable DAG definition used by this run
     definition_hash TEXT NOT NULL DEFAULT '', -- SHA-256 of definition_yaml
+    priority        INTEGER NOT NULL DEFAULT 0,
+    parent_run_id   TEXT NOT NULL DEFAULT '', -- sub-workflow parent run ('' = top-level)
     UNIQUE (dag_id, logical_date)
 );
 
@@ -140,6 +143,38 @@ CREATE TABLE IF NOT EXISTS connections (
     password   TEXT NOT NULL DEFAULT '',
     extra      TEXT NOT NULL DEFAULT '', -- JSON map of extra fields ({{ conn.ID.extra.KEY }})
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Named alert fan-out: a DAG's notify.group resolves here to N channels
+-- (webhook or mailto: + format), so channel lists live in one place instead of
+-- one URL pasted into every DAG.
+CREATE TABLE IF NOT EXISTS alert_groups (
+    name       TEXT PRIMARY KEY,
+    channels   TEXT NOT NULL DEFAULT '[]', -- JSON array of {url, format}
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Remote workers joined via one-time join tokens. The "group" key inside
+-- labels is the routing group tasks target with worker_group:.
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id      TEXT PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
+    labels         TEXT NOT NULL DEFAULT '{}', -- JSON string map
+    state          TEXT NOT NULL DEFAULT 'offline', -- online | offline | lost
+    draining       INTEGER NOT NULL DEFAULT 0, -- 1 = no new assignments
+    version        TEXT NOT NULL DEFAULT '',
+    active_tasks   INTEGER NOT NULL DEFAULT 0,
+    last_heartbeat DATETIME,
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- One-time worker join tokens, hashed at rest (sha256 hex).
+CREATE TABLE IF NOT EXISTS worker_join_tokens (
+    token_hash TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    used_at    DATETIME -- non-null = consumed
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

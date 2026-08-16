@@ -212,6 +212,12 @@ th > .hlp:only-child { margin-left: 0; }
 .s-queued, .s-scheduled, .s-up_for_retry { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); } .s-queued .d, .s-scheduled .d, .s-up_for_retry .d { background: var(--warn); }
 .s-upstream_failed { background: color-mix(in srgb, var(--upstream) 13%, transparent); color: var(--upstream); } .s-upstream_failed .d { background: var(--upstream); }
 .s-skipped, .s-paused, .s-none, .s-cancelled { background: color-mix(in srgb, var(--skip) 16%, transparent); color: var(--skip); } .s-skipped .d, .s-paused .d, .s-none .d, .s-cancelled .d { background: var(--skip); }
+/* worker fleet states (Workers page): online=ok, offline=muted, lost=danger */
+.s-wk-online { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); } .s-wk-online .d { background: var(--ok); }
+.s-wk-offline { background: color-mix(in srgb, var(--skip) 16%, transparent); color: var(--skip); } .s-wk-offline .d { background: var(--skip); }
+.s-wk-lost { background: color-mix(in srgb, var(--fail) 14%, transparent); color: var(--fail); } .s-wk-lost .d { background: var(--fail); }
+/* non-zero run priority badge (runs list + run detail) */
+.tag.prio { font-family: var(--mono); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
 /* ---- sparkline ---- */
 .spark { display: flex; align-items: flex-end; gap: 2px; height: 24px; }
@@ -241,6 +247,48 @@ th > .hlp:only-child { margin-left: 0; }
 .graph-wrap:hover .graph-zoom, .graph-zoom:focus-within { opacity: 1; }
 .gz { width: 27px; height: 27px; padding: 0; display: grid; place-items: center; font-size: 15px; line-height: 1; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); border-radius: var(--r-sm); }
 .gz:hover { color: var(--text); border-color: var(--line-2); }
+
+/* ---- graph structural editing (V2-12) ---- */
+.graph-toolbar { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; flex-wrap: wrap; }
+.graph-toolbar button.icon { border: 1px solid var(--line-2); }
+.graph-toolbar button.icon.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+/* subdag node: double border (inner rect) + muted target subtitle */
+.graph-node .g-inner { fill: none; opacity: .55; pointer-events: none; }
+.graph-node .g-sub { font: 9.5px var(--mono); fill: var(--muted); }
+.graph-node.ext text { font-size: 11px; fill: var(--muted); }
+/* connector handle: edge-drag starts ONLY here so node-body drags still pan */
+.gh { fill: var(--panel); stroke: var(--line-2); stroke-width: 1.4; pointer-events: none; transition: stroke var(--dur) var(--ease), fill var(--dur) var(--ease); }
+.gh-hit { fill: transparent; stroke: none; cursor: crosshair; pointer-events: all; }
+.graph-node:hover .gh, .gh-hit:hover + .gh { stroke: var(--accent); fill: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+/* keyboard focus on a node (Enter opens / connects) */
+.graph-node:focus { outline: none; }
+.graph-node:focus-visible rect:first-of-type { stroke: var(--accent) !important; stroke-width: 2.4; }
+/* tentative edge while dragging + drop-target feedback */
+.drag-edge { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; pointer-events: none; }
+.graph-node.drop-target rect:first-of-type { stroke: var(--accent) !important; stroke-width: 2.6; }
+.graph-node.drop-bad rect:first-of-type { stroke: var(--fail) !important; stroke-width: 2; }
+/* per-edge group: wide invisible hit area; hover/selection highlight; dashed ext */
+.edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; pointer-events: stroke; }
+.edge-hit:focus { outline: none; }
+.edge-hit:focus-visible { stroke: color-mix(in srgb, var(--accent) 28%, transparent); }
+.edge-g:hover .graph-edge, .edge-g.sel .graph-edge { stroke: var(--accent); stroke-width: 2.2; }
+.edge-g.ext .graph-edge { stroke-dasharray: 5 4; }
+/* floating "remove dependency" affordance for a selected edge */
+.edge-menu { position: absolute; z-index: 6; }
+.edge-menu button { box-shadow: 0 6px 20px rgba(0, 0, 0, .3); font-size: 12px; }
+/* sticky unsaved-changes bar + collapsible YAML diff preview */
+.diff-bar { position: sticky; top: 0; z-index: 7; display: flex; gap: 10px; align-items: center; padding: 8px 12px; margin: 0 0 10px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line-2)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--warn) 9%, var(--panel)); }
+.diff-bar .diff-n { font-size: 12.5px; font-weight: 600; color: var(--warn); }
+.diff-bar .diff-spacer { flex: 1; }
+.diff-panel { border: 1px solid var(--line); border-radius: var(--r-sm); margin: -4px 0 10px; background: var(--panel); max-height: 320px; overflow: auto; }
+.diff-msg { padding: 10px 12px; font-size: 12.5px; }
+.diff-view { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
+.diff-view .dl { display: block; white-space: pre; }
+.diff-view .dl.add { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.diff-view .dl.del { color: var(--fail); background: color-mix(in srgb, var(--fail) 9%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--fail) 45%, transparent); }
+/* parent/child sub-workflow links (run page) */
+a.run-link { cursor: pointer; }
+a.run-link:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ---- log ---- */
 .logbox { background: var(--log-bg); border: 1px solid var(--log-border); border-radius: var(--r); padding: 13px 15px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 54vh; overflow: auto; color: var(--log-fg); }
@@ -331,6 +379,13 @@ textarea.cmd { width: 100%; min-height: 74px; font-family: var(--mono); font-siz
 .form-page { max-width: 760px; }
 .form-foot { max-width: 760px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; }
 .nd-err { color: var(--fail); font-size: 12px; min-height: 14px; margin-top: 6px; }
+/* alert-group editor: one channel per row (url grows, format + remove stay put) */
+.ag-ch-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ag-ch-row .ag-ch-url { flex: 1; min-width: 0; }
+.ag-ch-row .ag-ch-fmt { width: 120px; flex: none; }
+/* notify URL while an alert group overrides it: visibly secondary, still editable */
+.input-dim { opacity: .55; }
+.input-dim:focus { opacity: 1; }
 
 /* ---- toast + in-app confirm ---- */
 .toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 80; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }

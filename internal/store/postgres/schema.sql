@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     params          TEXT NOT NULL DEFAULT '', -- JSON map of trigger-time params (recorded per run)
     definition_yaml TEXT NOT NULL DEFAULT '', -- immutable DAG definition used by this run
     definition_hash TEXT NOT NULL DEFAULT '', -- SHA-256 of definition_yaml
+    priority        INTEGER NOT NULL DEFAULT 0, -- orders competing runs at dispatch (higher first)
+    parent_run_id   TEXT NOT NULL DEFAULT '',
     UNIQUE (dag_id, logical_date)
 );
 
@@ -132,6 +134,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- ({{ conn.ID.host }} etc.). Passwords are stored as-is and NEVER returned by the
 -- API (write-only, masked in the UI). The store encrypts it with AES-256-GCM
 -- when key_file is configured; key_file: none is the explicit plaintext mode.
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id      TEXT PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
+    labels         TEXT NOT NULL DEFAULT '{}', -- JSON string map; "group" = routing group
+    state          TEXT NOT NULL DEFAULT 'offline', -- online | offline | lost
+    draining       BOOLEAN NOT NULL DEFAULT FALSE,
+    version        TEXT NOT NULL DEFAULT '',
+    active_tasks   INTEGER NOT NULL DEFAULT 0,
+    last_heartbeat TEXT,
+    created_at     TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS worker_join_tokens (
+    token_hash TEXT PRIMARY KEY, -- sha256 hex; one-time
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    used_at    TEXT -- non-null = consumed
+);
+
+CREATE TABLE IF NOT EXISTS alert_groups (
+    name       TEXT PRIMARY KEY,
+    channels   TEXT NOT NULL DEFAULT '[]', -- JSON array of {url, format}
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS variables (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL DEFAULT '',

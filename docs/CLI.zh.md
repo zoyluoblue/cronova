@@ -177,6 +177,7 @@ created run example_etl__manual_1783442227904284000 (a running `cronova serve` w
 | 标志 | 默认值 | 说明 |
 |---|---|---|
 | `-params` | | 以字符串值 JSON 对象形式给出的触发参数，例如 `'{"day":"2026-01-01"}'`。 |
+| `-priority` | `0` | 运行优先级 ±100。数值高者在跨运行争抢派发槽位时优先，并在 `serial_priority` 队列中先出队。 |
 | `-db` / `-dags` | `data/cronova.db` / `dags` | 本地数据库与 DAG 目录。 |
 
 该运行会被排入数据库队列；运行中的 `cronova serve` 会拾取并执行它。
@@ -417,6 +418,35 @@ ID  NAME        ROLE    PREFIX           LAST_USED
 | `create <name>` | `-role admin\|viewer`（默认 `admin`）、`-db` | 签发令牌。明文只显示一次；数据库中只存哈希。 |
 | `list` | `-db` | 列出令牌及其角色、前缀与最近使用时间。 |
 | `delete <id>` | `-db` | 按 ID 吊销令牌。 |
+
+### `cronova worker`
+
+把当前主机作为**拨入式远程 worker** 运行：凭一次性 token 加入调度器（本地生成密钥对，仅 CSR 上送），随后维持一条出站 mTLS 长连接承载任务分派、取消、心跳与日志回传。无需入站端口、无需共享文件系统。worker 重启会**重新认领**运行中的任务而不是杀掉它们。
+
+```console
+$ cronova worker -server http://sched.example:8090 -join-token cwj_9a1f… -name gpu-1 -labels group=gpu
+joined as wk_76417dbc51 (state in /home/etl/.cronova/worker)
+```
+
+| 标志 | 默认值 | 说明 |
+|---|---|---|
+| `-server` | `$CRONOVA_SERVER` | 调度器控制台 URL（仅加入时需要）。 |
+| `-join-token` | `$CRONOVA_JOIN_TOKEN` | 一次性接入 token（用 `cronova workers token` 签发）。已有身份时忽略——容器重启幂等。 |
+| `-name` | 主机名 | 显示名称。 |
+| `-labels` | `group=default` | 逗号分隔的 `key=value` 路由标签；`group` 即任务 `worker_group:` 指向的组。 |
+| `-hub` | 服务端通告值 | 覆盖 hub 的 `host:port`（NAT/端口转发场景）。 |
+| `-state-dir` | `~/.cronova/worker` | 身份、任务状态与日志暂存目录。 |
+
+### `cronova workers`
+
+通过 REST API 管理 worker 舰队（`-server`/`-token` 或环境变量）。
+
+| 子命令 | 标志 | 说明 |
+|---|---|---|
+| `token` | `-ttl`（默认 `24h`） | 签发一次性接入 token（admin）。明文只显示一次。 |
+| `list` | | 列出 worker：组、状态（`online`/`offline`/`lost`，`+drain`）、负载、最近心跳。 |
+| `drain <worker_id>` | `-off` 恢复 | 排空：不再分派新任务；在途任务跑完。 |
+| `remove <worker_id>` | | 删除注册并断开会话。被移除的 worker 无法重连。 |
 
 ### `cronova mcp`
 

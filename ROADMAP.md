@@ -169,6 +169,56 @@ PostgreSQL store ──→ 调度器 HA（租约选主）──→ 多机 execut
 
 ---
 
+# ROADMAP v2（2026-08-08）：分布式与平台化
+
+> 基于与 DolphinScheduler 3.4.x 的差距分析立项。定位升级：从"单机调度器"到"轻量分布式编排平台"。
+> 铁律：**所有分布式能力都是可选增量**——不配 worker 时行为与今天完全一致，单二进制 DNA 不动摇。
+> 已拍板的设计决策：worker 用 **join token 自注册**（自动签发 mTLS 证书）；任务日志**流式回传中心**落盘；
+> 拖拽编排走**自动布局 + 结构编辑**（YAML 为唯一事实源）；dependent 与 sub-workflow **都做**。
+
+## V2 总览
+
+| 阶段 | 主题 | 项数 |
+|---|---|---|
+| V2-P1 | 地基与快赢 | 4 |
+| V2-P2 | 分布式核心 | 5 |
+| V2-P3 | 工作流组合与图编辑 | 3 |
+| V2-P4 | 收口与验证 | 4 |
+
+**依赖链**：V2-5（注册）→ V2-6（路由）→ V2-7（日志回传）→ V2-8（failover）→ V2-9（控制台）；V2-13/15 依赖 V2-P2 全部；V2-11 依赖 V2-10 的跨 DAG 状态查询。
+
+## V2-P1 · 地基与快赢
+
+- [ ] **V2-1 Docker 镜像 + compose minimal**　多阶段 Dockerfile（静态二进制 → distroless，目标 ≤40MB）、`docker-compose.yml` minimal profile（单容器 + SQLite 卷）、healthcheck 接 `/healthz`、`.dockerignore`、文档。
+- [x] **V2-2 日期偏移模板函数**　模板层新增偏移与锚点运算：`logical_date` 加减天/小时、月初/月末/周初/周末、自定义格式化。对齐 DS 的 `$[yyyyMMdd+N]` 能力面，语法融入现有 `{{ }}` 模板。DAG 带 `timezone:` 时按该时区渲染。
+- [x] **V2-3 Email 告警 + 告警组**　SMTP 配置（实例级）+ notify 格式新增 `email`（`mailto:` 目标）；告警组：命名组聚合多个通道，DAG `notify.group` 引用（悬空回退不丢告警）；系统级事件同样可路由到组；export/import 纳入；控制台管理卡 + DAG 组下拉。
+- [x] **V2-4 跨 run 全局优先级 + 串行策略**　admitReady 每 tick 跨全部 active run 收集 ready 任务全局排序（run priority > task priority > logical_date）；run 级 priority（触发 API/CLI ±100）；DAG 级 `execution_policy`（serial_wait/serial_discard/serial_priority 三态测试覆盖）。
+
+## V2-P2 · 分布式核心
+
+- [x] **V2-5 worker 注册与 join token**　`workers`/`worker_join_tokens` 表；`cronova workers token` 生成一次性 token（哈希落库、限流）；worker 凭 token + CSR 注册（私钥不出 worker）获内置 CA 签发的 mTLS 证书；**拨入式**长连接（worker 无需可达端口）；`cronova worker` / `cronova workers list/token/drain/remove`。
+- [x] **V2-6 worker 分组与路由**　DAG/task 级 `worker_group:`（默认走本地 executor，完全向后兼容）；组内最少活跃任务数路由；组内无在线 worker 时任务保持 queued 等待并告警日志（真机验证），DAG 保存不受影响。
+- [x] **V2-7 任务日志流式回传**　gRPC 双向流回传 scheduler 按原目录落盘（SSE/retention 零改动）；字节偏移去重 + ack + 断线续传；远程 `$CRONOVA_OUTPUT` 随 TaskEvent 回传（远程 XCom，真机验证 `{{ ti.x.y }}`）。
+- [x] **V2-8 worker failover**　心跳静默 3×interval → worker 标 lost、在途 ref 释放 → PhaseUnknown → 按 retry 策略重派；worker 重启重认领不重跑（sidecar 退出文件跨死亡窗口恢复退出码，真机验证 try 1 完成）；调度器重启经 Hello active_refs 收养孤儿 ref（含日志高水位续传）。
+- [x] **V2-9 workers 控制台页面**　专家模式 Workers 页（列表/心跳/负载/标签、drain/摘除、一次性 join token 弹窗含 TTL 与接入命令、5s 轮询防泄漏、双语、浏览器实测）；`/metrics` 加 `cronova_workers{state}` 与 `cronova_worker_active_tasks{worker,group}`；execution_policy 与触发优先级控制台接线由同批完成。
+
+## V2-P3 · 工作流组合与图编辑
+
+- [x] **V2-10 dependent 等待语义**　task 级 `depends_on_dag: {dag, offset, timeout, on_timeout}`；offset 复用日期表达式文法（`- 1d`、`.month_start`）；目标周期 run 成功放行、失败继续等（可能被重试）、超时按 fail/skip 处置；5 项测试覆盖。
+- [x] **V2-11 sub-workflow**　任务类型 `subdag:`；子 run 带 `parent_run_id` 关联（新列+迁移）；父 cancel 级联取消子 run（含嵌套递归，锁安全）；重试启动新子 run 保留历史；运行时嵌套深度上限（≤5）兜底循环引用；5 项测试覆盖（含互递归防护）。
+- [ ] **V2-12 graph 结构编辑**　现有 graph 视图升级：加任务节点、拖线连接/断开依赖、点节点侧栏编辑参数；每个操作实时生成 YAML diff 预览，保存走现有校验与版本历史；novice 模式不暴露。
+
+## V2-P4 · 收口与验证
+
+- [ ] **V2-13 compose full profile**　PG + scheduler + N×worker 的完整拓扑，作为分布式集成测试床与演示环境。
+  - 进展：full profile 已写入 docker-compose.yml（postgres:16 + cronova-full(worker hub) + 2×worker；join token 经 `CRONOVA_WORKER_JOIN_TOKENS` 预置、worker 容器重启幂等复用身份）；双 profile `compose config` 均通过；待镜像构建完成后 up 冒烟。
+- [ ] **V2-14 PG 生产验证**　compose 环境跑全量 postgres_test 套件 + 分布式场景冒烟。（进展：PG16 测试容器拉取中，端口 55433，DSN `postgres://postgres:test@127.0.0.1:55433/cronova_test?sslmode=disable`）
+- [ ] **V2-15 规模基准测试报告**　单机 SQLite vs PG 的吞吐/延迟基准，产出 `docs/BENCHMARKS.md`。
+  - 进展：可复现基准已入库（`internal/scheduler/bench_test.go`，`CRONOVA_BENCH=1` 门控）；SQLite 首组数据：20 DAG×25 run×3 任务链 = 500 runs/1500 tasks，wall 4.83s，**103.5 runs/s / 310.6 tasks/s**，run p50 1.72s p99 2.32s（M 系列 Mac，含排队时间）。
+- [ ] **V2-16 文档收口**　DEPLOY.md 已加"Distributed workers (dial-in)"与"Email alerts (SMTP)"章节；剩余：CLI.md(+zh) 补 worker/workers/trigger -priority、README 定位更新、BENCHMARKS.md。
+
+---
+
 ## 实施状态（2026-08-07 全量落地）
 
 全部 34 项已实施并通过测试（14/14 Go 包 + 前端语法/浏览器验证）。范围界定如实说明：

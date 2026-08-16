@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package cronova.worker.v1;
+
+option go_package = "github.com/zoyluo/cronova/proto/cronova/worker/v1;workerv1";
+
+// WorkerHub is the scheduler-side service a remote worker DIALS INTO. The
+// direction is deliberately inverted from the legacy Executor service: the
+// worker needs no reachable address, no open inbound port, and traverses NAT —
+// it joins with a one-time token (HTTP, see /api/workers/join), receives an
+// mTLS client certificate, and then holds one long-lived bidirectional Session
+// stream over which everything flows: assignments, cancels, task events,
+// heartbeats, and task log bytes.
+//
+// Tasks themselves are executed by the same Runner the standalone executor
+// uses (attempt state on disk, process-group re-adoption on worker restart),
+// so a worker process restart does NOT kill or re-run its tasks.
+service WorkerHub {
+  // Session is the worker's single connection. First message MUST be Hello;
+  // the server answers HelloAck (or terminates the stream with an error).
+  // Either side closing the stream ends the session; the worker reconnects
+  // with backoff and resumes log streaming from the last acknowledged offset.
+  rpc Session(stream WorkerMessage) returns (stream ServerMessage);
+}
+
+message WorkerMessage {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    TaskEvent task_event = 3;
+    LogChunk log_chunk = 4;
+  }
+}
+
+message ServerMessage {
+  oneof msg {
+    HelloAck hello_ack = 1;
+    Assign assign = 2;
+    Cancel cancel = 3;
+    Probe probe = 4;
+    LogAck log_ack = 5;
+  }
+}
+
+// Hello identifies the (already certificate-authenticated) worker and declares
+// what it is still running, so the scheduler can re-adopt in-flight attempts
+// after either side restarted instead of double-launching them.
+message Hello {
+  string worker_id = 1; // issued at join; must match the client certificate CN
+  string name = 2;
+  map<string, string> labels = 3; // includes "group" (worker group), default "default"
+  string version = 4;             // worker binary version
+  repeated string active_refs = 5; // attempt refs still running locally
+}
+
+message HelloAck {
+  int64 heartbeat_seconds = 1;    // interval the server expects
+  int64 server_unix_ms = 2;       // rough clock cross-check for log timestamps
+}
+
+// Heartbeat doubles as the load report used by least-active-tasks routing.
+message Heartbeat {
+  int32 active_tasks = 1;
+}
+
+// Assign launches a task on the worker (idempotent on ref, same contract as
+// the legacy Launch). Logs are NOT written to a shared path — the worker
+// spools locally and streams LogChunks back.
+message Assign {
+  string ref = 1;  // run_id/task_id/try — idempotency key
+  string type = 2; // shell/python/sql/jar/http (informational)
+  string command = 3;
+  map<string, string> env = 4;
+  int64 timeout_seconds = 5;
+  repeated string redact = 6; // secret values to mask from everything logged
+}
+
+message Cancel {
+  string ref = 1;
+}
+
+// Probe asks the worker to re-report a ref's state via a TaskEvent — used by
+// scheduler recovery when an awaited task's terminal event may have been lost
+// in a disconnect.
+message Probe {
+  string ref = 1;
+}
+
+// TaskEvent reports an attempt's lifecycle transition (or Probe answer).
+message TaskEvent {
+  string ref = 1;
+  Phase phase = 2;
+  int32 exit_code = 3;    // valid when phase = PHASE_EXITED; 124 = timeout kill
+  string launch_error = 4; // set when the process could not be started at all
+  // output carries the task's $CRONOVA_OUTPUT file (small JSON string map,
+  // <= 64 KiB) on exit, so {{ ti.<task>.<key> }} works for remote tasks whose
+  // filesystem the scheduler cannot read.
+  bytes output = 5;
+}
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_RUNNING = 1;
+  PHASE_EXITED = 2;
+  PHASE_UNKNOWN = 3; // worker has no record of the ref
+}
+
+// LogChunk streams task output. offset is the byte position of data[0] in the
+// task's combined stdout+stderr stream; the server appends in order, ignores
+// chunks at or below its high-water mark (resend-safe), and periodically
+// answers with LogAck so the worker can trim its local spool.
+message LogChunk {
+  string ref = 1;
+  int64 offset = 2;
+  bytes data = 3;
+  bool eof = 4; // no more bytes will follow for this ref
+}
+
+message LogAck {
+  string ref = 1;
+  int64 offset = 2; // durable through this byte count
+  // rewind demands the worker restart streaming from offset (the hub found a
+  // gap — e.g. its log file was pruned while the worker kept spooling). A
+  // plain ack never moves the worker's cursor backward; only rewind does.
+  bool rewind = 3;
+}

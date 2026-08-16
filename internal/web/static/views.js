@@ -293,13 +293,20 @@ async function showDag(id, tab) {
       start_date: dag.start_date ? String(dag.start_date).slice(0, 10) : "",
       catchup: !!dag.catchup, paused: !!dag.paused,
       max_active_runs: dag.max_active_runs || 1, default_retries: dag.default_retries || 0,
+      execution_policy: dag.execution_policy || "",
       trigger_after: (dag.trigger_after || []).slice(),
       notify_url: dag.notify_url || "", notify_on: (dag.notify_on || []).slice(), notify_format: dag.notify_format || "",
+      notify_group: dag.notify_group || "",
       sla: dag.sla || 0, dagrun_timeout: dag.dagrun_timeout || 0,
     }),
-    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", retry_backoff: tk.retry_backoff || "", retry_delay_max: tk.retry_delay_max || "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+    tasks: (dag.tasks || []).map((tk) => { const h = tk.http || {}, dd = tk.depends_on_dag || {}; return { id: tk.id, type: tk.type || "shell", command: tk.command || "", conn: tk.conn || "", project: tk.project || "", pool: tk.pool || "default", priority: tk.priority || 0, retries: tk.retries ?? "", retry_delay: tk.retry_delay ?? "", retry_backoff: tk.retry_backoff || "", retry_delay_max: tk.retry_delay_max || "", timeout: tk.timeout || "", sla: tk.sla || "", deps: (tk.deps || []).slice(), trigger_rule: tk.trigger_rule || "all_success",
+      subdag: tk.subdag || "", worker_group: tk.worker_group || "",
+      dodDag: dd.dag || "", dodOffset: dd.offset || "", dodTimeout: dd.timeout || "", dodOnTimeout: dd.on_timeout || "",
       httpMethod: h.method || "GET", httpUrl: h.url || "", httpHeaders: h.headers ? Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "", httpBody: h.body || "", httpStatus: (h.expected_status || []).join(", ") }; }),
     runs: runs || [], allDags, graphPending: null, activeTaskId: null,
+    // graph structural-editing session: pending (unsaved) changes accumulate in
+    // D.tasks; graphBase snapshots the last-saved model for 放弃/diff.
+    graphBase: null, graphDirty: 0, diffOpen: false, diffCache: null, connectMode: false,
     // default tab: a 0-task shell opens on Structure (its obvious next step is
     // adding tasks); anything else opens on Runs (the monitoring intent).
     tab: tab === "structure" || tab === "settings" ? tab : (tab === "runs" || (dag.tasks || []).length ? "runs" : "structure"),
@@ -463,7 +470,7 @@ function renderDagPageNovice() {
     <div class="section-h">${esc(t("nv_notify_h"))}</div>
     <div class="nv-panel" style="padding:14px 17px">
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-        <input type="checkbox" id="nv-notify-on" ${d.notify_url && (d.notify_on || []).includes("failure") ? "checked" : ""}>
+        <input type="checkbox" id="nv-notify-on" ${(d.notify_url || d.notify_group) && (d.notify_on || []).includes("failure") ? "checked" : ""}>
         <span style="font-size:13.5px;font-weight:600">${esc(t("nv_notify_toggle"))}</span>
       </label>
       <div id="nv-notify-body" style="margin-top:10px" ${d.notify_url ? "" : "hidden"}>
@@ -482,11 +489,14 @@ function renderDagPageNovice() {
   $("back").onclick = loadDags;
   // "notify me on failure": one switch + one URL, mapped onto the full
   // notify_url/notify_on model (format auto-detected from the URL's host).
+  // Novice mode stays URL-only, but an alert group set elsewhere (expert mode /
+  // YAML) is preserved untouched: the toggle only drives notify_on, and a
+  // group counts as a valid target for it.
   const nvNotifySync = () => {
     const on = $("nv-notify-on").checked, url = $("nv-notify-url").value.trim();
     $("nv-notify-body").hidden = !on && !url;
     d.notify_url = on || url ? url : "";
-    d.notify_on = on && url ? ["failure"] : [];
+    d.notify_on = on && (url || (d.notify_group || "").trim()) ? ["failure"] : [];
     if (url) d.notify_format = url.includes("hooks.slack.com") ? "slack" : url.includes("open.feishu.cn") ? "feishu" : url.includes("oapi.dingtalk.com") ? "dingtalk" : (d.notify_format || "");
     if (!on && !url) d.notify_url = "";
     saveDag();
@@ -638,24 +648,50 @@ function settingsTabHtml() {
   const depsEditor = others.length
     ? `<div class="b-deps">${others.map((x) => `<span class="chip ta ${d.trigger_after.includes(x) ? "on" : ""}" role="checkbox" tabindex="0" aria-checked="${d.trigger_after.includes(x)}" data-ta="${esc(x)}">${esc(x)}</span>`).join("")}</div>`
     : `<div class="muted">${t("set_no_deps_avail")}</div>`;
-  // notify: outbound webhook fired when a run finishes in a selected state.
+  // notify: outbound webhook / mailto / alert-group fan-out fired when a run
+  // finishes in a selected state. A selected group WINS over the standalone URL
+  // (server precedence), so the URL is dimmed — but stays editable — while set.
   const nOn = d.notify_on || [];
   const nEvents = ["failure", "success"];
-  const notifText = d.notify_url ? `${d.notify_url} · ${nOn.length ? nOn.join(", ") : t("notify_off")}` : t("set_none");
-  const notifSummary = d.notify_url
-    ? `${nEvents.filter((e) => nOn.includes(e)).map((e) => `<span class="tag ${e === "failure" ? "bad" : "ok"}">${t("notify_" + e)}</span>`).join(" ") || `<span class="muted">${t("notify_off")}</span>`} <span class="mono set-url" title="${esc(d.notify_url)}">${esc(d.notify_url)}</span>`
-    : `<span class="muted">${t("set_none")}</span>`;
+  const nGroup = (d.notify_group || "").trim();
   const hasUrl = !!(d.notify_url || "").trim();
-  // events require a URL; without one the chips are disabled (and never selectable),
-  // so the editor, the collapsed summary, and the persisted state can't diverge.
-  const nFormats = [["", "raw"], ["slack", "Slack"], ["feishu", t("nf_feishu")], ["dingtalk", t("nf_dingtalk")]];
-  const notifEditor = `<input id="d-nurl" type="url" placeholder="https://hooks.slack.com/services/…" value="${esc(d.notify_url)}" style="width:100%;margin-bottom:8px" aria-label="${esc(t("set_notify"))} URL">
-    <div class="b-deps">${nEvents.map((e) => `<span class="chip non ${hasUrl && nOn.includes(e) ? "on" : ""} ${hasUrl ? "" : "dis"}" role="checkbox" tabindex="${hasUrl ? "0" : "-1"}" aria-checked="${hasUrl && nOn.includes(e)}" aria-disabled="${!hasUrl}" data-non="${e}">${t("notify_" + e)}</span>`).join("")}</div>
+  const hasTarget = hasUrl || !!nGroup; // events need SOME destination
+  const notifText = hasTarget
+    ? `${nGroup ? `${t("set_group")}: ${nGroup}` : d.notify_url} · ${nOn.length ? nOn.join(", ") : t("notify_off")}`
+    : t("set_none");
+  const notifSummary = hasTarget
+    ? `${nEvents.filter((e) => nOn.includes(e)).map((e) => `<span class="tag ${e === "failure" ? "bad" : "ok"}">${t("notify_" + e)}</span>`).join(" ") || `<span class="muted">${t("notify_off")}</span>`} ${nGroup ? `<span class="tag">${esc(t("set_group"))} · ${esc(nGroup)}</span>` : `<span class="mono set-url" title="${esc(d.notify_url)}">${esc(d.notify_url)}</span>`}`
+    : `<span class="muted">${t("set_none")}</span>`;
+  // events require a target; without one the chips are disabled (and never
+  // selectable), so editor, collapsed summary, and persisted state can't diverge.
+  const nFormats = [["", "raw"], ["slack", "Slack"], ["feishu", t("nf_feishu")], ["dingtalk", t("nf_dingtalk")], ["email", t("nf_email")]];
+  // group options render from the lazily fetched name list (wireSettingsTab
+  // refreshes it on open); a dangling reference stays visible — never dropped.
+  const agNames = (D.alertGroupNames || []).slice();
+  if (nGroup && !agNames.includes(nGroup)) agNames.push(nGroup);
+  const groupOpts = `<option value="">${esc(t("ag_group_none"))}</option>` +
+    agNames.map((n) => `<option value="${esc(n)}" ${n === nGroup ? "selected" : ""}>${esc(D.alertGroupNames && !D.alertGroupNames.includes(n) ? t("ag_opt_missing", n) : n)}</option>`).join("");
+  const notifEditor = `<div class="b-field" style="margin-bottom:8px"><label>${t("set_group")}</label><select id="d-ngroup" style="width:260px">${groupOpts}</select></div>
+    <input id="d-nurl" type="url" class="${nGroup ? "input-dim" : ""}" placeholder="https://hooks.slack.com/services/…" value="${esc(d.notify_url)}" style="width:100%;margin-bottom:4px" aria-label="${esc(t("set_notify"))} URL">
+    <div class="field-hint" id="d-ngrouphint" style="margin-bottom:4px"${nGroup ? "" : " hidden"}>${esc(t("ag_url_overridden"))}</div>
+    <div class="field-hint" style="margin-bottom:8px">${esc(t("notify_mailto_hint"))}</div>
+    <div class="b-deps">${nEvents.map((e) => `<span class="chip non ${hasTarget && nOn.includes(e) ? "on" : ""} ${hasTarget ? "" : "dis"}" role="checkbox" tabindex="${hasTarget ? "0" : "-1"}" aria-checked="${hasTarget && nOn.includes(e)}" aria-disabled="${!hasTarget}" data-non="${e}">${t("notify_" + e)}</span>`).join("")}</div>
     <div class="b-field" style="margin-top:8px"><label>${t("nf_label")}</label><select id="d-nfmt" style="width:220px">${nFormats.map(([v, l]) => `<option value="${v}" ${(d.notify_format || "") === v ? "selected" : ""}>${l}</option>`).join("")}</select><div class="field-hint">${t("nf_hint")}</div></div>
-    <div class="field-hint" id="d-nhint" style="margin-top:6px"${hasUrl ? " hidden" : ""}>${esc(t("notify_need_url"))}</div>`;
+    <div class="field-hint" id="d-nhint" style="margin-top:6px"${hasTarget ? " hidden" : ""}>${esc(t("notify_need_url"))}</div>`;
+  // execution policy: "" is the parallel default; each choice carries a one-line
+  // gloss (updated live on change) so serial semantics are never a guess.
+  const POLICIES = ["", "serial_wait", "serial_discard", "serial_priority"];
+  const polKey = (v) => "po_" + (v || "parallel");
+  const pol = POLICIES.includes(d.execution_policy || "") ? (d.execution_policy || "") : "";
+  const polSummary = pol
+    ? `<span class="mono">${esc(t(polKey(pol)))}</span>`
+    : `<span class="muted">${esc(t("po_parallel"))}</span>`;
+  const polEditor = `<select id="d-policy" style="width:220px" aria-label="${esc(t("set_policy"))}">${POLICIES.map((v) => `<option value="${v}" ${pol === v ? "selected" : ""}>${esc(t(polKey(v)))}</option>`).join("")}</select>
+    <div class="field-hint" id="d-policyhint" style="margin-top:6px">${esc(t("pod_" + (pol || "parallel")))}</div>`;
   return `<div class="set-list">
     ${row("sched", t("set_sched"), esc(schedSummary(d)), schedSummary(d), `<div id="d-sched"></div>`)}
     ${row("max", t("set_max"), `<span class="mono">${d.max_active_runs}</span>`, String(d.max_active_runs), `<input id="d-max" type="number" min="1" value="${d.max_active_runs}" style="width:110px">`)}
+    ${row("policy", t("set_policy"), polSummary, t(polKey(pol)), polEditor, t("set_policy_hint"))}
     ${row("retries", t("set_retries"), `<span class="mono">${d.default_retries}</span>`, String(d.default_retries), `<input id="d-defr" type="number" min="0" value="${d.default_retries}" style="width:110px">`)}
     ${row("sla", t("set_sla"), secsSummary(d.sla), String(d.sla || 0), `<input id="d-sla" type="number" min="0" value="${d.sla || 0}" style="width:110px"> <span class="muted">${t("secs")}</span>`, t("set_sla_hint"))}
     ${row("timeout", t("set_timeout"), secsSummary(d.dagrun_timeout), String(d.dagrun_timeout || 0), `<input id="d-timeout" type="number" min="0" value="${d.dagrun_timeout || 0}" style="width:110px"> <span class="muted">${t("secs")}</span>`, t("set_timeout_hint"))}
@@ -689,23 +725,53 @@ function wireSettingsTab() {
   // unsaved mutation that a button-click close could strand while the pill reads
   // "saved" (blur doesn't fire when a <button> is clicked in some browsers).
   const max = $("d-max"); if (max) max.oninput = () => { d.max_active_runs = +max.value || 1; saveDag(); };
+  const pol = $("d-policy"); if (pol) pol.onchange = () => {
+    d.execution_policy = pol.value;
+    const h = $("d-policyhint"); if (h) h.textContent = t("pod_" + (pol.value || "parallel"));
+    saveDag();
+  };
   const defr = $("d-defr"); if (defr) defr.oninput = () => { d.default_retries = +defr.value || 0; saveDag(); };
   const sla = $("d-sla"); if (sla) sla.oninput = () => { d.sla = Math.max(0, +sla.value || 0); saveDag(); };
   const tmo = $("d-timeout"); if (tmo) tmo.oninput = () => { d.dagrun_timeout = Math.max(0, +tmo.value || 0); saveDag(); };
   body.querySelectorAll(".chip.ta").forEach((c) => c.onclick = () => { const x = c.dataset.ta, i = d.trigger_after.indexOf(x); i < 0 ? d.trigger_after.push(x) : d.trigger_after.splice(i, 1); c.classList.toggle("on"); c.setAttribute("aria-checked", c.classList.contains("on")); saveDag(); });
-  const nurl = $("d-nurl"); if (nurl) nurl.oninput = () => {
-    d.notify_url = nurl.value.trim();
-    const has = !!d.notify_url;
-    if (!has) d.notify_on = []; // events are meaningless without a URL
+  // shared target check (URL or alert group) + in-place sync of everything
+  // that depends on it: event-chip enablement, the "need a target" hint, and
+  // the URL's overridden state while a group is selected.
+  const notifyTarget = () => !!((d.notify_url || "").trim() || (d.notify_group || "").trim());
+  const syncNotifyTargets = () => {
+    const has = notifyTarget(), grp = !!(d.notify_group || "").trim();
+    if (!has) d.notify_on = []; // events are meaningless without a target
     body.querySelectorAll(".chip.non").forEach((c) => {
       c.classList.toggle("dis", !has); c.setAttribute("aria-disabled", String(!has)); c.setAttribute("tabindex", has ? "0" : "-1");
       if (!has) { c.classList.remove("on"); c.setAttribute("aria-checked", "false"); }
     });
     const hint = $("d-nhint"); if (hint) hint.hidden = has;
+    const urlInp = $("d-nurl"); if (urlInp) urlInp.classList.toggle("input-dim", grp);
+    const ghint = $("d-ngrouphint"); if (ghint) ghint.hidden = !grp;
+  };
+  const nurl = $("d-nurl"); if (nurl) nurl.oninput = () => {
+    d.notify_url = nurl.value.trim();
+    syncNotifyTargets();
     saveDag();
   };
+  const ngroup = $("d-ngroup");
+  if (ngroup) {
+    ngroup.onchange = () => { d.notify_group = ngroup.value; syncNotifyTargets(); saveDag(); };
+    // refresh the group list from the API each time the editor opens (tiny
+    // payload, always-current choices); patch the options in place, keeping the
+    // current selection — and keeping a dangling reference visible, not dropped.
+    api("/api/alert-groups").then((gs) => {
+      D.alertGroupNames = (gs || []).map((g) => g.name);
+      const sel = $("d-ngroup"); if (!sel) return; // editor closed meanwhile
+      const cur = (d.notify_group || "").trim();
+      const names = D.alertGroupNames.slice();
+      if (cur && !names.includes(cur)) names.push(cur);
+      sel.innerHTML = `<option value="">${esc(t("ag_group_none"))}</option>` +
+        names.map((n) => `<option value="${esc(n)}" ${n === cur ? "selected" : ""}>${esc(D.alertGroupNames.includes(n) ? n : t("ag_opt_missing", n))}</option>`).join("");
+    }).catch(() => {});
+  }
   body.querySelectorAll(".chip.non").forEach((c) => c.onclick = () => {
-    if (!(d.notify_url || "").trim()) return; // events require a URL (chip is disabled)
+    if (!notifyTarget()) return; // events require a target (chip is disabled)
     d.notify_on = d.notify_on || [];
     const x = c.dataset.non, i = d.notify_on.indexOf(x);
     i < 0 ? d.notify_on.push(x) : d.notify_on.splice(i, 1);
@@ -787,18 +853,27 @@ async function openYamlDrawer() {
   $("y-dl").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([yml], { type: "text/yaml" })); a.download = D.dag.dag_id + ".yaml"; a.click(); URL.revokeObjectURL(a.href); };
 }
 
-async function triggerActiveDag(params) {
+async function triggerActiveDag(params, priority) {
   const b = $("trig"); if (b) b.disabled = true;
   await flushPendingSaves(); // run the latest saved definition, not a stale one
-  const opts = params ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params }) } : { method: "POST" };
+  // priority rides along only when non-zero (clamped ±100) — a default trigger
+  // keeps the empty-body fast path.
+  const body = {};
+  if (params && Object.keys(params).length) body.params = params;
+  const prio = Math.max(-100, Math.min(100, +priority || 0));
+  if (prio) body.priority = prio;
+  const opts = Object.keys(body).length
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : { method: "POST" };
   try { await api(`/api/dags/${D.dag.dag_id}/trigger`, opts); toast(t("toast_run_queued"), "ok"); setTimeout(refreshDagRuns, 500); }
   catch (e) { toast(e.message, "fail"); }
   finally { if ($("trig")) $("trig").disabled = D.tasks.length === 0; }
 }
-// key-value form → trigger with params (empty rows ignored)
+// key-value form → trigger with params (empty rows ignored) + optional run priority
 function triggerParamsDialog() {
   const root = $("modal-root");
   let rows = [{ k: "", v: "" }];
+  let prio = 0; // survives row add/remove re-renders
   const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
   const onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
@@ -809,16 +884,21 @@ function triggerParamsDialog() {
         <div class="field-hint" style="margin-bottom:12px">${esc(t("p_hint"))}</div>
         <div id="tp-rows">${rows.map((r, i) => `<div class="tp-row"><input class="tp-k mono" data-i="${i}" placeholder="${t("p_key")}" value="${esc(r.k)}"><input class="tp-v mono" data-i="${i}" placeholder="${t("p_val")}" value="${esc(r.v)}"><button class="icon tp-rm" data-i="${i}" aria-label="${t("btn_delete")}">✕</button></div>`).join("")}</div>
         <button class="icon" id="tp-add" style="margin-top:8px">+ ${t("p_add")}</button>
+        <div class="b-field" style="margin-top:14px;max-width:220px"><label>${t("p_priority")}</label>
+          <input id="tp-prio" type="number" min="-100" max="100" step="1" value="${prio}" style="width:110px">
+          <div class="field-hint">${esc(t("p_priority_hint"))}</div>
+        </div>
       </div>
       <div class="foot"><button id="tp-cancel">${t("nd_cancel")}</button><button class="primary" id="tp-go">${t("p_trigger")}</button></div>
     </div></div>`;
     root.querySelectorAll(".tp-k").forEach((el) => el.oninput = () => rows[+el.dataset.i].k = el.value);
     root.querySelectorAll(".tp-v").forEach((el) => el.oninput = () => rows[+el.dataset.i].v = el.value);
+    $("tp-prio").oninput = () => { prio = +$("tp-prio").value || 0; };
     root.querySelectorAll(".tp-rm").forEach((el) => el.onclick = () => { rows.splice(+el.dataset.i, 1); if (!rows.length) rows = [{ k: "", v: "" }]; render(); });
     $("tp-add").onclick = () => { rows.push({ k: "", v: "" }); render(); const ks = root.querySelectorAll(".tp-k"); if (ks.length) ks[ks.length - 1].focus(); };
     $("tp-cancel").onclick = close;
     $("tpovl").onclick = (e) => { if (e.target.id === "tpovl") close(); };
-    $("tp-go").onclick = () => { const params = {}; rows.forEach((r) => { const k = r.k.trim(); if (k) params[k] = r.v; }); close(); triggerActiveDag(params); };
+    $("tp-go").onclick = () => { const params = {}; rows.forEach((r) => { const k = r.k.trim(); if (k) params[k] = r.v; }); close(); triggerActiveDag(params, prio); };
     const f = root.querySelector(".tp-k"); if (f) f.focus();
   };
   render();
@@ -893,6 +973,9 @@ function durationTrendHtml(runs) {
   return `<div class="dur-trend" title="${esc(t("dt_hint"))}"><div class="dt-bars">${bars}</div><span class="dt-max mono">${fmtMs(max)}</span></div>`;
 }
 
+// small P<N> badge for a run with non-zero priority (higher wins dispatch slots)
+const prioBadge = (p) => +p ? ` <span class="tag prio" title="${esc(t("run_priority_tip"))}">P${+p}</span>` : "";
+
 function renderDagRuns() {
   const el = $("d-runs"); if (!el) return;
   const chips = `<div class="varchips" style="margin-bottom:8px">${RUN_FILTERS.map(([k, v]) =>
@@ -917,7 +1000,7 @@ function renderDagRuns() {
       ? `<button class="icon rr-act no-nav" data-rr-cancel="${esc(r.run_id)}" title="${t("run_cancel")}" aria-label="${t("run_cancel")}">✕</button>`
       : (r.state === "failed" || r.state === "cancelled" || r.state === "timed_out")
         ? `<button class="icon rr-act no-nav" data-rr-retry="${esc(r.run_id)}" title="${t("run_retry")}" aria-label="${t("run_retry")}">↻</button>` : "";
-    return `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td class="run-row-act">${act}</td></tr>`;
+    return `<tr class="row" data-run="${esc(r.run_id)}"><td class="mono">${esc(r.logical_date)}</td><td>${badge(r.state)}${prioBadge(r.priority)}</td><td>${typeLabel(r.trigger_type)}</td><td>${fmt(r.started_at)}</td><td>${dur(r.started_at, r.finished_at)}</td><td class="run-row-act">${act}</td></tr>`;
   }).join("")}</tbody></table>${D.runs.length >= runsLimit() && runsLimit() < 200 ? `<div style="text-align:center;margin-top:10px"><button class="icon" id="runs-more">${t("runs_more")}</button></div>` : ""}`;
   const more = $("runs-more");
   if (more) more.onclick = async () => {
@@ -948,16 +1031,34 @@ async function inlineRetryRun(runID) {
 // --- structure section (editable graph + task list) ---
 function renderDagStructure() {
   const el = $("d-structure"); if (!el) return; // structure tab not active
+  closeEdgeMenu(); // the graph DOM is about to be rebuilt — drop any edge popover
   el.innerHTML = dagStructureHtml();
   wireDagStructure();
 }
 function dagStructureHtml() {
   const empty = D.tasks.length === 0;
-  const tasks = D.tasks.filter((tk) => tk.id).map((tk) => ({ id: tk.id, deps: (tk.deps || []).filter((dep) => D.tasks.some((x) => x.id === dep)) }));
+  const tasks = D.tasks.filter((tk) => tk.id).map((tk) => ({
+    id: tk.id, deps: (tk.deps || []).filter((dep) => D.tasks.some((x) => x.id === dep)),
+    subdag: tk.type === "subdag" ? (tk.subdag || "") : "", dod: (tk.dodDag || "").trim(),
+  }));
+  const dirty = D.graphDirty || 0;
+  // sticky unsaved-changes bar: graph structural edits are a SESSION — nothing
+  // is persisted until 保存 (which runs the exact same saveDag pipeline).
+  const bar = dirty ? `<div class="diff-bar" id="gd-bar" role="status">
+      <span class="diff-n">${t("diff_unsaved", dirty)}</span>
+      <button class="icon" id="gd-toggle" aria-expanded="${!!D.diffOpen}">${t(D.diffOpen ? "diff_hide" : "diff_show")}</button>
+      <div class="diff-spacer"></div>
+      <button id="gd-discard">${t("diff_discard")}</button>
+      <button class="primary" id="gd-save">${t("diff_save")}</button>
+    </div>${D.diffOpen ? `<div class="diff-panel" id="gd-panel"><div class="muted diff-msg">${t("diff_loading")}</div></div>` : ""}` : "";
+  const toolbar = `<div class="graph-toolbar">
+      <button class="icon" id="g-addtask">${t("ge_addtask")}</button>
+      <button class="icon${D.connectMode ? " on" : ""}" id="g-connect" aria-pressed="${!!D.connectMode}" title="${esc(t("ge_connect_tip"))}">${t("ge_connect")}</button>
+    </div>`;
   const graph = tasks.length
-    ? `<div class="page-sub" style="margin:-2px 0 8px">${t("graph_connect_hint")}</div><div class="b-graph" id="d-graph">${renderGraph(tasks, null, { editable: true, pending: D.graphPending })}</div>`
+    ? `${toolbar}<div class="page-sub" style="margin:-2px 0 8px">${t("graph_connect_hint")}</div><div class="b-graph" id="d-graph">${renderGraph(tasks, null, { editable: true, pending: D.graphPending })}</div>`
     : "";
-  return `${graph}
+  return `${bar}${graph}
     <div class="toolbar" style="margin:10px 0 6px"><button class="primary" id="d-addtask">${t("b_addtask")}</button></div>
     ${empty
       ? `<div class="empty-state"><div class="es-ic">▦</div><div class="es-t">${t("dag_no_tasks_title")}</div><div class="es-s">${t("dag_no_tasks_sub")}</div></div>`
@@ -978,26 +1079,232 @@ function dagTaskTableHtml() {
 const graphViews = {};
 function wireDagStructure() {
   const add = $("d-addtask"); if (add) add.onclick = addTask;
-  document.querySelectorAll("#d-graph [data-node]").forEach((n) => n.onclick = () => onDagGraphNodeClick(n.dataset.node));
+  const gadd = $("g-addtask"); if (gadd) gadd.onclick = addTaskFromGraph;
+  const cm = $("g-connect"); if (cm) cm.onclick = () => { D.connectMode = !D.connectMode; D.graphPending = null; renderDagStructure(); const b = $("g-connect"); if (b) b.focus(); };
+  wireGraphEditor();
   const dgid = D.dag.dag_id;
   attachPanZoom(document.querySelector("#d-graph .graph-wrap"), graphViews[dgid] || (graphViews[dgid] = {}));
   const sct = $("d-structure");
   sct.querySelectorAll("tr.row").forEach((tr) => tr.onclick = (e) => { if (!e.target.closest(".no-nav")) showTask(D.dag.dag_id, tr.dataset.task); });
   sct.querySelectorAll("[data-del]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); deleteTask(b.dataset.del); });
   sct.querySelectorAll("[data-dup]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); duplicateTask(b.dataset.dup); });
+  const gs = $("gd-save"); if (gs) gs.onclick = graphSaveSession;
+  const gd = $("gd-discard"); if (gd) gd.onclick = graphDiscardSession;
+  const gt = $("gd-toggle"); if (gt) gt.onclick = () => { D.diffOpen = !D.diffOpen; renderDagStructure(); const b = $("gd-toggle"); if (b) b.focus(); };
+  if (D.diffOpen && D.graphDirty) loadGraphDiff();
 }
-// click upstream then downstream to add/remove the downstream's dependency
-function onDagGraphNodeClick(id) {
-  if (D.graphPending === null) { D.graphPending = id; renderDagStructure(); return; }
+
+// ============================================================================
+// Graph structural editing (expert Structure tab). All mutations go through
+// graphMutate(), which snapshots the last-saved model once and accumulates a
+// pending session; 保存 replays the exact saveDag pipeline, 放弃 restores.
+// ============================================================================
+function graphMutate(fn) {
+  if (!D.graphBase) D.graphBase = JSON.parse(JSON.stringify(D.tasks));
+  fn();
+  D.graphDirty = (D.graphDirty || 0) + 1;
+  D.diffCache = null;
+  renderDagPage(); // full page: keeps the Structure tab count + errors honest
+}
+function graphSaveSession() {
+  const errs = validateDag();
+  if (errs.length) { reflectSaveState(); toast(errs[0], "warn"); return; }
+  D.graphBase = null; D.graphDirty = 0; D.diffCache = null; D.diffOpen = false; D.graphPending = null;
+  saveDag(); // the same validated, debounced, versioned pipeline as the form editor
+  renderDagStructure();
+}
+function graphDiscardSession() {
+  if (D.graphBase) D.tasks = D.graphBase;
+  D.graphBase = null; D.graphDirty = 0; D.diffCache = null; D.diffOpen = false; D.graphPending = null;
+  toast(t("diff_discarded"), "info");
+  renderDagPage();
+}
+// add a node straight from the graph toolbar: inline id prompt, shell + echo TODO
+async function addTaskFromGraph() {
+  let n = D.tasks.length + 1, def;
+  do { def = "task_" + n; n++; } while (D.tasks.some((x) => x.id === def));
+  const id = await promptDialog(t("ge_new_id_title"), def);
+  if (!id) return;
+  if (!ID_RE.test(id)) { toast(t("err_taskid"), "warn"); return; }
+  if (D.tasks.some((x) => x.id === id)) { toast(t("err_dup"), "warn"); return; }
+  const tk = blankTask(); tk.id = id; tk.command = "echo TODO";
+  graphMutate(() => D.tasks.push(tk));
+}
+function wireGraphEditor() {
+  const box = $("d-graph"); if (!box) return;
+  const wrap = box.querySelector(".graph-wrap"), svg = box.querySelector("svg");
+  box.querySelectorAll("[data-node]").forEach((g) => {
+    const id = g.dataset.node;
+    g.addEventListener("click", (e) => { e.stopPropagation(); onGraphNodeActivate(id, e.shiftKey); });
+    // SVG <g> has no reliable .click(); wire Enter/Space directly for keyboard use
+    g.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault(); e.stopPropagation();
+      onGraphNodeActivate(id, e.shiftKey);
+    });
+  });
+  box.querySelectorAll(".edge-hit").forEach((p) => {
+    const eg = p.closest(".edge-g"), from = eg.dataset.efrom, to = eg.dataset.eto;
+    p.addEventListener("click", (e) => { e.stopPropagation(); showEdgeMenu(eg, from, to); });
+    p.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); showEdgeMenu(eg, from, to); } });
+  });
+  box.querySelectorAll("[data-ghandle]").forEach((h) => {
+    h.addEventListener("pointerdown", (e) => startEdgeDrag(e, h.dataset.ghandle, svg));
+    h.addEventListener("click", (e) => e.stopPropagation()); // a released drag must not open the editor
+  });
+}
+// plain click = open the task editor; shift-click / connect mode = two-click connect
+function onGraphNodeActivate(id, shift) {
+  if (id.startsWith("__ext__")) return; // decorative external-DAG stub
+  closeEdgeMenu();
+  const connecting = D.connectMode || shift || D.graphPending != null;
+  if (!connecting) { showTask(D.dag.dag_id, id); return; }
+  if (D.graphPending == null) { D.graphPending = id; renderDagStructure(); return; }
   if (D.graphPending === id) { D.graphPending = null; renderDagStructure(); return; }
-  const up = D.graphPending, down = id, dt = D.tasks.find((x) => x.id === down);
-  D.graphPending = null;
-  if (!dt) { renderDagStructure(); return; }
-  const j = dt.deps.indexOf(up);
-  if (j >= 0) { dt.deps.splice(j, 1); renderDagStructure(); saveDag(); return; }
+  const up = D.graphPending; D.graphPending = null;
+  graphToggleDep(up, id, true);
+}
+// add (or, when allowRemove, toggle off) `down`'s dependency on `up` as a
+// PENDING graph change — client-side cycle check first, reject with a toast.
+function graphToggleDep(up, down, allowRemove) {
+  const dt = D.tasks.find((x) => x.id === down);
+  if (!dt || up === down) { renderDagStructure(); return; }
+  dt.deps = dt.deps || [];
+  if (dt.deps.includes(up)) {
+    if (allowRemove) graphMutate(() => dt.deps.splice(dt.deps.indexOf(up), 1));
+    else { toast(t("ge_dup_dep"), "info"); renderDagStructure(); }
+    return;
+  }
   dt.deps.push(up);
-  if (hasCycle(D.tasks.filter((x) => x.id))) { dt.deps.pop(); toast(t("err_cycle"), "warn"); renderDagStructure(); return; }
-  renderDagStructure(); saveDag();
+  const cyc = hasCycle(D.tasks.filter((x) => x.id));
+  dt.deps.pop();
+  if (cyc) { toast(t("err_cycle"), "warn"); renderDagStructure(); return; }
+  graphMutate(() => dt.deps.push(up));
+}
+// would adding up→down be a legal new dependency? (drag-hover feedback)
+function graphDropAllowed(up, down) {
+  const dt = D.tasks.find((x) => x.id === down);
+  if (!dt || up === down) return false;
+  if ((dt.deps || []).includes(up)) return false;
+  dt.deps = dt.deps || []; dt.deps.push(up);
+  const cyc = hasCycle(D.tasks.filter((x) => x.id));
+  dt.deps.pop();
+  return !cyc;
+}
+// drag from a node's connector handle to another node draws a tentative edge;
+// drop adds the dependency. elementFromPoint tracking works under pointer
+// capture (touch) and without it (mouse) alike.
+function startEdgeDrag(e, fromId, svg) {
+  if (e.pointerType !== "touch" && e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation(); // never start a pan from the handle
+  closeEdgeMenu();
+  const vb = svg.viewBox.baseVal;
+  const toSvg = (ev) => { const r = svg.getBoundingClientRect(); return { x: (ev.clientX - r.left) * vb.width / (r.width || 1), y: (ev.clientY - r.top) * vb.height / (r.height || 1) }; };
+  const start = toSvg(e);
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  line.setAttribute("class", "drag-edge");
+  svg.appendChild(line);
+  let target = null;
+  const setTarget = (g) => {
+    if (target === g) return;
+    if (target) target.classList.remove("drop-target", "drop-bad");
+    target = g;
+    if (target) target.classList.add(graphDropAllowed(fromId, target.dataset.node) ? "drop-target" : "drop-bad");
+  };
+  const move = (ev) => {
+    const p = toSvg(ev), mx = (start.x + p.x) / 2;
+    line.setAttribute("d", `M${start.x} ${start.y} C ${mx} ${start.y}, ${mx} ${p.y}, ${p.x} ${p.y}`);
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const g = el && el.closest ? el.closest("#d-graph [data-node]") : null;
+    setTarget(g && g.dataset.node !== fromId && !g.dataset.node.startsWith("__ext__") ? g : null);
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    line.remove();
+    const tid = target && target.dataset.node;
+    if (target) target.classList.remove("drop-target", "drop-bad");
+    target = null;
+    if (tid) graphToggleDep(fromId, tid, false); // drop never silently removes
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+}
+// edge selection: a small floating "remove dependency" affordance beside the edge
+let edgeMenuEl = null;
+function closeEdgeMenu() {
+  if (!edgeMenuEl) return;
+  edgeMenuEl.remove(); edgeMenuEl = null;
+  document.removeEventListener("pointerdown", onDocEdgeMenu, true);
+  document.querySelectorAll("#d-graph .edge-g.sel").forEach((g) => g.classList.remove("sel"));
+}
+function onDocEdgeMenu(e) { if (edgeMenuEl && !edgeMenuEl.contains(e.target)) closeEdgeMenu(); }
+function showEdgeMenu(eg, from, to) {
+  closeEdgeMenu();
+  eg.classList.add("sel");
+  const wrap = eg.closest(".graph-wrap"); if (!wrap) return;
+  const er = eg.querySelector(".graph-edge").getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  edgeMenuEl = document.createElement("div");
+  edgeMenuEl.className = "edge-menu";
+  const btn = document.createElement("button");
+  btn.className = "danger";
+  btn.textContent = `✕ ${t("ge_edge_remove")}`;
+  btn.setAttribute("aria-label", `${t("ge_edge_remove")}: ${from} → ${to}`);
+  btn.onclick = () => { closeEdgeMenu(); graphToggleDep(from, to, true); };
+  edgeMenuEl.appendChild(btn);
+  edgeMenuEl.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeEdgeMenu(); } });
+  wrap.appendChild(edgeMenuEl);
+  const x = Math.min(Math.max(er.left + er.width / 2 - wr.left - 60, 6), Math.max(6, wr.width - 150));
+  const y = Math.min(Math.max(er.top + er.height / 2 - wr.top - 38, 6), Math.max(6, wr.height - 44));
+  edgeMenuEl.style.left = x + "px"; edgeMenuEl.style.top = y + "px";
+  btn.focus();
+  document.addEventListener("pointerdown", onDocEdgeMenu, true);
+}
+// simple dependency-free line diff (LCS) for the pending-YAML preview
+function diffLines(a, b) {
+  const A = String(a || "").split("\n"), B = String(b || "").split("\n");
+  const n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push({ k: " ", s: A[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) out.push({ k: "-", s: A[i++] });
+    else out.push({ k: "+", s: B[j++] });
+  }
+  while (i < n) out.push({ k: "-", s: A[i++] });
+  while (j < m) out.push({ k: "+", s: B[j++] });
+  return out;
+}
+// diff panel: render the PENDING canonical YAML (server-normalized via the
+// validate endpoint — same renderer as save) against the saved definition.
+async function loadGraphDiff() {
+  const panel = $("gd-panel"); if (!panel) return;
+  if (D.diffCache) { panel.innerHTML = D.diffCache; return; }
+  computeSchedule(D);
+  const dagID = D.dag.dag_id;
+  const spec = dagSpecFrom(D);
+  let html = "";
+  try {
+    const [v, cur] = await Promise.all([
+      api("/api/dags/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) }),
+      api(`/api/dags/${encodeURIComponent(dagID)}`),
+    ]);
+    if (!v.valid) html += `<div class="e fatal diff-msg">${t("diff_invalid")}: ${esc(v.error || "")}</div>`;
+    if (v.canonical_yaml != null) {
+      const rows = diffLines(cur.definition_yaml || "", v.canonical_yaml || "");
+      html += rows.some((r) => r.k !== " ")
+        ? `<pre class="diff-view">${rows.map((r) => `<span class="dl${r.k === "+" ? " add" : r.k === "-" ? " del" : ""}">${esc((r.k === " " ? "  " : r.k + " ") + r.s)}</span>`).join("")}</pre>`
+        : `<div class="muted diff-msg">${t("diff_same")}</div>`;
+    }
+  } catch (e) { html = `<div class="e fatal diff-msg">${esc(e.message)}</div>`; }
+  if (!D || D.dag.dag_id !== dagID) return; // navigated away mid-fetch
+  D.diffCache = html;
+  const p2 = $("gd-panel"); if (p2) p2.innerHTML = html;
 }
 function addTask() {
   let n = D.tasks.length + 1, id;
@@ -1056,7 +1363,7 @@ function insertAtCaret(el, text) {
   const p = s + text.length; if (el.setSelectionRange) el.setSelectionRange(p, p);
 }
 // escape, then tint {{ template }} tokens so substitution is visible in previews
-function hlVars(cmd) { return esc(cmd).replace(/\{\{\s*\w+\s*\}\}/g, (m) => `<span class="varhl">${m}</span>`); }
+function hlVars(cmd) { return esc(cmd).replace(/\{\{\s*(?:logical_date[^{}\n]*?|[\w.]+)\s*\}\}/g, (m) => `<span class="varhl">${m}</span>`); }
 
 // ---- variable pill editor -------------------------------------------------
 // A contenteditable VIEW over a template string. Literal text stays editable;
@@ -1072,6 +1379,7 @@ let activePillEditor = null; // palette clicks target the last-focused pill edit
 function tplMeta(name) {
   const B = { logical_date: "vd_logical_date", logical_datetime: "vd_logical_datetime", run_id: "vd_run_id", dag_id: "vd_dag_id", task_id: "vd_task_id", try_number: "vd_try_number" };
   if (B[name]) return { kind: "builtin", desc: t(B[name]) };
+  if (name.startsWith("logical_date")) return { kind: "builtin", desc: t("vd_date_expr") };
   if (name.startsWith("var.")) return { kind: "var", desc: t("vd_var") };
   if (name.startsWith("conn.")) return { kind: "conn", desc: t("vd_conn") };
   if (name.startsWith("params.")) return { kind: "params", desc: t("vd_params") };
@@ -1321,8 +1629,13 @@ function varChip(name, kind, label) {
 // [tabindex="0"][role] elements — without it a chip carrying both would
 // activate TWICE per keypress (double insert, double fetch).
 function chipKeyActivate(el, fn) { el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); fn(); } }); }
+// Date-expression starter chips: insert a concrete, editable example (the
+// backend grammar: ±N d/h/w/mo offsets, .month_* anchors, | strftime formats).
+const DATE_EXPR_CHIPS = ["logical_date - 1d", "logical_date.month_start", "logical_date | %Y%m%d"];
 function varPaletteHtml() {
-  const builtins = TEMPLATE_VARS.map((v) => varChip(v, "builtin", "{{ " + v + " }}")).join("");
+  const builtins = TEMPLATE_VARS.map((v) => varChip(v, "builtin", "{{ " + v + " }}"))
+    .concat(DATE_EXPR_CHIPS.map((v) => varChip(v, "builtin", "{{ " + v + " }}")))
+    .join("");
   const group = (vg, label, inner) => `<div class="vp-group" data-vg="${vg}"><span class="vp-label">${label}</span>${inner}</div>`;
   return `<div class="var-palette" title="${t("var_insert")}">
     ${group("builtin", t("vg_builtin"), builtins)}
@@ -1333,6 +1646,18 @@ function varPaletteHtml() {
 }
 function commandFieldHtml(tk) {
   const chips = varPaletteHtml();
+  if (tk.type === "subdag") {
+    // a subdag task runs another workflow — no command; pick the target DAG
+    const others = (D.allDags || []).filter((x) => x !== D.dag.dag_id);
+    const cur = (tk.subdag || "").trim();
+    const dangling = cur && !others.includes(cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : "";
+    return `<div class="b-field full"><label>${t("t_subdag")}</label>
+      <select class="tf" data-k="subdag" style="max-width:340px">
+        <option value="">${t("subdag_none")}</option>
+        ${others.map((x) => `<option value="${esc(x)}" ${cur === x ? "selected" : ""}>${esc(x)}</option>`).join("")}${dangling}
+      </select>
+      <div class="field-hint">${t("subdag_hint")}</div></div>`;
+  }
   if (tk.type === "http") {
     const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
     const m = tk.httpMethod || "GET";
@@ -1483,6 +1808,30 @@ function openConnMenu(chip, id, insertVar) {
   // navigation and leak.
   document.addEventListener("mousedown", onDocConnMenu, true);
 }
+// compact optional depends_on_dag editor: wait for another DAG's matching
+// period run to succeed before this task becomes ready. Flat dod* task fields
+// here; dagSpecFrom composes the nested depends_on_dag object on save.
+function dodSectionHtml(tk) {
+  const others = (D.allDags || []).filter((x) => x !== D.dag.dag_id);
+  const cur = (tk.dodDag || "").trim();
+  const dangling = cur && !others.includes(cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : "";
+  return `<details class="adv-box" style="margin-top:14px"${cur ? " open" : ""}>
+    <summary>${t("dod_title")} <span class="opt">${t("t_optional")}</span>${cur ? ` <span class="tag">${esc(cur)}</span>` : ""}</summary>
+    <div class="field-hint" style="margin-top:8px">${t("dod_hint")}</div>
+    <div class="tc-grid" style="margin-top:10px">
+      <div class="b-field"><label>${t("dod_dag")}</label><select class="tf" data-k="dodDag">
+        <option value="">${t("set_none")}</option>
+        ${others.map((x) => `<option value="${esc(x)}" ${cur === x ? "selected" : ""}>${esc(x)}</option>`).join("")}${dangling}
+      </select></div>
+      <div class="b-field"><label>${t("dod_offset")}</label><input class="tf mono" data-k="dodOffset" value="${esc(tk.dodOffset || "")}" placeholder="- 1d"><div class="field-hint">${t("dod_offset_hint")}</div></div>
+      <div class="b-field"><label>${t("dod_timeout")}</label><input class="tf" data-k="dodTimeout" type="number" min="0" value="${esc(tk.dodTimeout ?? "")}"><div class="field-hint">${t("dod_timeout_hint")}</div></div>
+      <div class="b-field"><label>${t("dod_on_timeout")}</label><select class="tf" data-k="dodOnTimeout">
+        <option value="" ${!tk.dodOnTimeout ? "selected" : ""}>${t("dod_fail")}</option>
+        <option value="skip" ${tk.dodOnTimeout === "skip" ? "selected" : ""}>${t("dod_skip")}</option>
+      </select></div>
+    </div>
+  </details>`;
+}
 function renderTaskPage() {
   closeConnMenu(); // tear down any open conn menu before the page re-renders
   if (!D) { loadDags(); return; }
@@ -1495,7 +1844,7 @@ function renderTaskPage() {
     <div class="form-page">
       <div class="tc-grid">
         <div class="b-field"><label>${t("t_id")}</label><input class="tf" data-k="id" value="${esc(tk.id)}" placeholder="step_a"></div>
-        <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar", "http"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+        <div class="b-field"><label>${t("t_type")}</label><select class="tf" data-k="type">${["shell", "python", "sql", "jar", "http", "subdag"].map((o) => `<option ${tk.type === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>
       </div>
       ${commandFieldHtml(tk)}
       ${tk.type === "shell" ? projectSectionHtml(tk) : ""}
@@ -1504,6 +1853,7 @@ function renderTaskPage() {
       <div class="tc-grid" style="margin-top:14px">
         <div class="b-field"><label>${t("t_rule")}</label><select class="tf" data-k="trigger_rule">${TRIGGER_RULES.map((r) => `<option value="${r}" ${tk.trigger_rule === r ? "selected" : ""}>${t("tr_" + r)}</option>`).join("")}</select><div class="field-hint" id="rule-desc">${t("trd_" + (tk.trigger_rule || "all_success"))}</div></div>
       </div>
+      ${dodSectionHtml(tk)}
       <details class="adv-box"${(tk.pool !== "default" || +tk.priority || tk.retries !== "" || tk.retry_delay !== "" || tk.timeout || tk.sla) ? " open" : ""}>
         <summary>${t("adv_options")}</summary>
         <div class="tc-grid" style="margin-top:10px">
@@ -1735,12 +2085,15 @@ function validateDag() {
   if (ids.some((id) => !id)) e.push(t("err_emptyid"));
   if (nonEmpty.some((id) => !ID_RE.test(id))) e.push(t("err_taskid"));
   if (new Set(nonEmpty).size !== nonEmpty.length) e.push(t("err_dup"));
-  if (D.tasks.some((x) => x.id && x.type !== "http" && !String(x.command).trim())) e.push(t("err_emptycmd"));
+  if (D.tasks.some((x) => x.id && x.type !== "http" && x.type !== "subdag" && !String(x.command).trim())) e.push(t("err_emptycmd"));
   if (D.tasks.some((x) => x.id && x.type === "http" && !String(x.httpUrl || "").trim())) e.push(t("err_httpurl"));
   if (D.tasks.some((x) => x.id && x.type === "sql" && !String(x.conn || "").trim())) e.push(t("err_sqlconn"));
+  if (D.tasks.some((x) => x.id && x.type === "subdag" && !String(x.subdag || "").trim())) e.push(t("err_subdag"));
   if (hasCycle(D.tasks.filter((x) => x.id))) e.push(t("err_cycle"));
   const nurl = (D.dag && D.dag.notify_url || "").trim();
-  if (nurl && !/^https?:\/\//i.test(nurl)) e.push(t("err_notify_url"));
+  // mailto:addr[,addr] is a valid notify target too (server-side SMTP relay) —
+  // mirrors the parser's scheme check exactly.
+  if (nurl && !/^(https?:\/\/|mailto:)/i.test(nurl)) e.push(t("err_notify_url"));
   return e;
 }
 function dagSpecFrom(st) {
@@ -1749,9 +2102,14 @@ function dagSpecFrom(st) {
     dag_id: d.dag_id, schedule: d.schedule, start_date: d.start_date,
     catchup: !!d.catchup, max_active_runs: +d.max_active_runs || 1, default_retries: +d.default_retries || 0,
     trigger_after: (d.trigger_after || []).slice(),
-    // events are meaningless without a URL — keep the persisted state consistent
-    notify_url: (d.notify_url || "").trim(), notify_on: (d.notify_url || "").trim() ? (d.notify_on || []).slice() : [],
+    // events are meaningless without a target (URL or alert group) — keep the
+    // persisted state consistent. notify_group always rides along so a novice-
+    // mode or unrelated save never clobbers a group set elsewhere.
+    notify_url: (d.notify_url || "").trim(),
+    notify_group: (d.notify_group || "").trim(),
+    notify_on: ((d.notify_url || "").trim() || (d.notify_group || "").trim()) ? (d.notify_on || []).slice() : [],
     notify_format: d.notify_format || "",
+    execution_policy: d.execution_policy || "",
     sla: Math.max(0, +d.sla || 0), dagrun_timeout: Math.max(0, +d.dagrun_timeout || 0),
     tasks: st.tasks.filter((tk) => tk.id).map((tk) => {
       const o = {
@@ -1765,11 +2123,17 @@ function dagSpecFrom(st) {
       };
       if (tk.type === "http") {
         o.http = { method: tk.httpMethod || "GET", url: (tk.httpUrl || "").trim(), headers: parseHeaderLines(tk.httpHeaders), body: tk.httpBody || "", expected_status: parseStatusList(tk.httpStatus) };
+      } else if (tk.type === "subdag") {
+        o.subdag = (tk.subdag || "").trim(); // child DAG, no command
       } else {
         o.command = tk.command;
         if (tk.type === "sql") o.conn = (tk.conn || "").trim();
         if (tk.type === "shell" && tk.project) o.project = tk.project; // attached project dir
       }
+      // worker_group has no console field yet but must round-trip, not vanish
+      if ((tk.worker_group || "").trim()) o.worker_group = tk.worker_group.trim();
+      const dd = (tk.dodDag || "").trim();
+      if (dd) o.depends_on_dag = { dag: dd, offset: (tk.dodOffset || "").trim(), timeout: Math.max(0, +tk.dodTimeout || 0), on_timeout: tk.dodOnTimeout || "" };
       return o;
     }),
   };
@@ -1810,6 +2174,9 @@ function saveDag() {
   const errs = validateDag();
   showErrors(errs, view === "task" ? "task-errors" : "dag-errors");
   if (errs.length) { setSaveState("invalid"); return; }
+  // Any dispatched save persists the WHOLE in-memory model — including pending
+  // graph-session changes — so the unsaved-changes bar no longer applies.
+  if (D) { D.graphBase = null; D.graphDirty = 0; D.diffCache = null; }
   setSaveState("saving");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 400);
@@ -2034,7 +2401,8 @@ async function showRun(runID) {
       <div class="run-title-row">
         <div class="run-title-main">
           <h1 class="mono">${copySpan(r.run_id)}</h1>
-          <span id="run-badge">${badge(r.state)}</span>
+          <span id="run-badge">${badge(r.state)}</span>${prioBadge(r.priority)}
+          ${r.parent_run_id ? `<a class="tag run-link" id="parent-run-link" role="button" tabindex="0" title="${esc(r.parent_run_id)}">⧉ ${t("parent_run")} ↗</a>` : ""}
         </div>
         <div class="run-progress-wrap">
           <span class="run-progress-label">${t("run_progress")}</span>
@@ -2060,6 +2428,7 @@ async function showRun(runID) {
     <div id="logwrap"></div>`;
   attachPanZoom(main.querySelector("#run-graph .graph-wrap"));
   $("back").onclick = () => showDag(r.dag_id);
+  const pl = $("parent-run-link"); if (pl) pl.onclick = () => showRun(r.parent_run_id);
   $("run-tabs").querySelectorAll("[data-rt]").forEach((b) => b.onclick = () => {
     runTab = b.dataset.rt;
     $("run-tabs").querySelectorAll(".pill").forEach((x) => x.classList.toggle("active", x === b));
@@ -2175,6 +2544,7 @@ function renderRunBody(data) {
   const el = $("run-body"); if (!el) return;
   el.innerHTML = runTab === "timeline" ? ganttHtml(data) : instancesTableHtml(data);
   el.querySelectorAll(".logbtn").forEach((b) => b.onclick = () => showLog(b.dataset.ti, b.dataset.task));
+  el.querySelectorAll("[data-child-run]").forEach((a) => a.onclick = (e) => { e.stopPropagation(); showRun(a.dataset.childRun); });
   el.querySelectorAll(".retrybtn").forEach((b) => b.onclick = () => retryTaskUI(data.run.run_id, b.dataset.rtask));
   el.querySelectorAll(".markbtn").forEach((b) => b.onclick = () => markTaskUI(data.run.run_id, b.dataset.mtask));
   el.querySelectorAll(".gantt-row[data-ti]").forEach((row) => row.onclick = () => showLog(row.dataset.ti, row.dataset.task));
@@ -2195,8 +2565,8 @@ function instancesTableHtml(data) {
   const isAdmin = document.body.dataset.role !== "viewer";
   const canRetry = !runLive(data.run.state) && isAdmin;
   return `<table class="tbl"><thead><tr><th>${t("th_task")}</th><th>${t("th_state")}</th><th>${t("th_try")}</th><th>${t("h_pool")}</th><th class="num-col">${t("th_dur")}</th><th style="width:140px">${t("th_act")}</th></tr></thead>
-    <tbody>${tasks.map((tk) => `<tr><td class="mono">${esc(tk.task_id)}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td>
-      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] && canRetry ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}${isAdmin ? ` <button class="icon markbtn" data-mtask="${esc(tk.task_id)}" title="${t("task_mark")}" aria-label="${t("task_mark")}">⚑</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    <tbody>${tasks.map((tk) => { const child = tk.executor_ref && tk.executor_ref.startsWith("subdag:") ? tk.executor_ref.slice(7) : ""; return `<tr><td class="mono">${esc(tk.task_id)}${child ? ` <a class="run-link no-nav" role="button" tabindex="0" data-child-run="${esc(child)}" title="${esc(child)}">⧉ ${t("child_run")} ↗</a>` : ""}</td><td>${badge(tk.state)}</td><td>${tk.try_number}/${tk.max_retries + 1}</td><td class="mono">${esc(tk.pool)}</td><td class="num-col">${dur(tk.started_at, tk.finished_at)}</td>
+      <td><button class="icon logbtn" data-ti="${tk.id}" data-task="${esc(tk.task_id)}">${t("th_logs")}</button>${TASK_RETRYABLE[tk.state] && canRetry ? ` <button class="icon retrybtn" data-rtask="${esc(tk.task_id)}" title="${t("task_retry")}" aria-label="${t("task_retry")}">↻</button>` : ""}${isAdmin ? ` <button class="icon markbtn" data-mtask="${esc(tk.task_id)}" title="${t("task_mark")}" aria-label="${t("task_mark")}">⚑</button>` : ""}</td></tr>`; }).join("")}</tbody></table>`;
 }
 // honest Gantt: bars positioned by real started_at/finished_at; tasks that never
 // ran show a muted marker (no fabricated "queued" segment); one bar per task
@@ -2458,7 +2828,7 @@ const CFG_KEY_RE = /^[A-Za-z0-9_.-]+$/; // mirrors the backend cfgKeyRe
 let RES = null, resTab = "vars";
 async function showResources() {
   view = "resources"; activeDag = null; closeLog(); setNav("resources"); setHash("#/resources");
-  try { const [vars, conns] = await Promise.all([api("/api/variables"), api("/api/connections")]); RES = { vars, conns }; }
+  try { const [vars, conns, groups] = await Promise.all([api("/api/variables"), api("/api/connections"), api("/api/alert-groups")]); RES = { vars, conns, groups }; }
   catch (e) { main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
   renderResources();
   finishRouteRender();
@@ -2466,17 +2836,23 @@ async function showResources() {
 function renderResources() {
   if (view !== "resources" || !RES) return;
   const { vars, conns } = RES;
+  const groups = RES.groups || [];
+  // alert groups are an expert-mode concern (notify.group in the DAG editor);
+  // the novice "shared config" page keeps just variables + connections.
+  const showGroups = !nvMode();
+  if (!showGroups && resTab === "groups") resTab = "vars";
   main.innerHTML = `
     <div class="page-h"><h1>${t("nav_resources")}</h1></div>
     <div class="page-sub">${esc(t("res_sub"))}</div>
     <div class="run-tabs" id="res-tabs">
       <button class="pill ${resTab === "vars" ? "active" : ""}"${resTab === "vars" ? ' aria-current="true"' : ""} data-rt="vars">${t("res_vars")} <span class="tab-n">${vars.length}</span></button>
       <button class="pill ${resTab === "conns" ? "active" : ""}"${resTab === "conns" ? ' aria-current="true"' : ""} data-rt="conns">${t("res_conns")} <span class="tab-n">${conns.length}</span></button>
+      ${showGroups ? `<button class="pill ${resTab === "groups" ? "active" : ""}"${resTab === "groups" ? ' aria-current="true"' : ""} data-rt="groups">${t("res_groups")} <span class="tab-n">${groups.length}</span></button>` : ""}
     </div>
     <div id="res-body"></div>`;
   $("res-tabs").querySelectorAll("[data-rt]").forEach((b) => b.onclick = () => { if (resTab === b.dataset.rt) return; resTab = b.dataset.rt; renderResources(); const a = $("res-tabs").querySelector(".pill.active"); if (a) a.focus(); });
-  $("res-body").innerHTML = resTab === "vars" ? varsTabHtml() : connsTabHtml();
-  resTab === "vars" ? wireVarsTab() : wireConnsTab();
+  $("res-body").innerHTML = resTab === "vars" ? varsTabHtml() : resTab === "conns" ? connsTabHtml() : groupsTabHtml();
+  resTab === "vars" ? wireVarsTab() : resTab === "conns" ? wireConnsTab() : wireGroupsTab();
 }
 function varsTabHtml() {
   const vars = RES.vars;
@@ -2569,6 +2945,107 @@ function connDialog(conn) {
   $(isEdit ? "c-type" : "c-id").focus();
 }
 
+// ---- alert groups (named notify-channel fan-outs, referenced by notify.group) ----
+const AG_MAX_CHANNELS = 16; // mirrors the server's 1-16 channel bound
+const AG_URL_RE = /^(https?:\/\/|mailto:)/i; // mirrors validChannelURL
+const agFormats = () => [["", "raw"], ["slack", "Slack"], ["feishu", t("nf_feishu")], ["dingtalk", t("nf_dingtalk")], ["email", t("nf_email")]];
+// one-line destination summary: the host for http(s) channels, the address
+// list for mailto — enough to tell groups apart without opening the editor.
+function agChannelSummary(chs) {
+  return (chs || []).map((ch) => {
+    const u = String(ch.url || "");
+    if (/^mailto:/i.test(u)) return u.slice(7).split("?")[0];
+    try { return new URL(u).host || u.slice(0, 40); } catch (_) { return u.slice(0, 40); }
+  }).join(" · ");
+}
+function groupsTabHtml() {
+  const groups = RES.groups || [];
+  return `<div class="page-sub" style="margin:2px 0 12px">${esc(t("ag_hint"))}</div>
+    <table class="tbl"><thead><tr><th style="width:220px">${t("ag_name")}</th><th>${t("ag_channels")}</th><th style="width:170px">${t("ag_updated")}</th><th style="width:130px"></th></tr></thead>
+    <tbody>${groups.length ? groups.map((g) => `<tr><td class="mono">${esc(g.name)}</td>
+      <td><span class="tag">${esc(t("ag_channel_n", (g.channels || []).length))}</span> <span class="mono muted" style="font-size:12px" title="${esc((g.channels || []).map((c) => c.url).join("\n"))}">${esc(agChannelSummary(g.channels))}</span></td>
+      <td style="font-size:12.5px" class="muted">${fmt(g.updated_at)}</td>
+      <td><button data-agedit="${esc(g.name)}">${t("set_edit")}</button> <button class="icon danger" data-agdel="${esc(g.name)}" aria-label="${t("btn_delete")}">✕</button></td></tr>`).join("") : `<tr><td colspan="4"><div class="empty">${t("ag_none")}</div></td></tr>`}</tbody></table>
+    <div class="toolbar" style="margin-top:16px"><button class="primary" id="ag-add">${t("ag_add")}</button></div>`;
+}
+function wireGroupsTab() {
+  main.querySelectorAll("[data-agedit]").forEach((b) => b.onclick = () => groupDialog((RES.groups || []).find((g) => g.name === b.dataset.agedit)));
+  main.querySelectorAll("[data-agdel]").forEach((b) => b.onclick = () => delGroup(b.dataset.agdel));
+  $("ag-add").onclick = () => groupDialog(null);
+}
+async function delGroup(name) {
+  if (!(await confirmDialog(t("ag_del_title", name), t("ag_del_body"), { danger: true, okLabel: t("btn_delete") }))) return;
+  try { await api(`/api/alert-groups/${encodeURIComponent(name)}`, { method: "DELETE" }); RES.groups = (RES.groups || []).filter((g) => g.name !== name); renderResources(); toast(t("res_deleted"), "ok"); }
+  catch (e) { toast(e.message, "fail"); }
+}
+// alert-group editor modal: name + dynamic channel rows (url, format, remove),
+// re-rendered on add/remove with all edits kept in the working copy first.
+function groupDialog(group) {
+  const isEdit = !!group;
+  let nameVal = isEdit ? group.name : "";
+  const chans = isEdit && (group.channels || []).length
+    ? group.channels.map((c) => ({ url: c.url || "", format: c.format || "" }))
+    : [{ url: "", format: "" }];
+  const root = $("modal-root");
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const save = async () => {
+    const nm = isEdit ? group.name : nameVal.trim();
+    const err = $("ag-err");
+    if (!nm) { err.textContent = t("ag_name"); return; }
+    if (!CFG_KEY_RE.test(nm) || nm.length > 128) { err.textContent = t("err_key"); return; }
+    // blank rows are scratch space, not channels — drop them before validating
+    const list = chans.map((c) => ({ url: c.url.trim(), format: c.format || "" })).filter((c) => c.url);
+    if (!list.length || list.length > AG_MAX_CHANNELS) { err.textContent = t("ag_err_channels"); return; }
+    if (list.some((c) => !AG_URL_RE.test(c.url))) { err.textContent = t("ag_err_url"); return; }
+    try {
+      await api(`/api/alert-groups/${encodeURIComponent(nm)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channels: list }) });
+      // server replies {ok} — synthesize the row (matches what a refetch would show)
+      const g = { name: nm, channels: list, updated_at: new Date().toISOString() };
+      const i = (RES.groups || []).findIndex((x) => x.name === nm);
+      if (i >= 0) RES.groups[i] = g; else { (RES.groups ||= []).push(g); RES.groups.sort((a, b) => (a.name < b.name ? -1 : 1)); }
+      close(); renderResources(); toast(t("res_saved"), "ok");
+    } catch (e) { err.textContent = e.message; }
+  };
+  const render = () => {
+    root.innerHTML = `<div class="overlay" id="agovl"><div class="modal" role="dialog" aria-modal="true" aria-label="${isEdit ? t("ag_edit") : t("ag_add")}">
+      <h2>${isEdit ? t("ag_edit") : t("ag_add")}</h2>
+      <div class="body">
+        <div class="b-field"><label>${t("ag_name")}</label><input id="ag-name" class="mono" value="${esc(nameVal)}" ${isEdit ? "disabled" : ""} placeholder="oncall"></div>
+        <div class="b-field"><label>${t("ag_channels")} <span class="muted" style="text-transform:none;letter-spacing:0">· ${esc(t("ag_max", AG_MAX_CHANNELS))}</span></label>
+          ${chans.map((c, i) => `<div class="ag-ch-row">
+            <input class="mono ag-ch-url" data-agi="${i}" value="${esc(c.url)}" placeholder="${esc(t("ag_url_ph"))}" aria-label="URL ${i + 1}">
+            <select class="ag-ch-fmt" data-agi="${i}" aria-label="${esc(t("ag_fmt"))} ${i + 1}">${agFormats().map(([v, l]) => `<option value="${v}" ${(c.format || "") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+            <button class="icon danger" data-agrm="${i}" ${chans.length <= 1 ? "disabled" : ""} aria-label="${esc(t("ag_remove_channel"))} ${i + 1}">✕</button>
+          </div>`).join("")}
+          ${chans.length < AG_MAX_CHANNELS ? `<a role="button" tabindex="0" id="ag-addch" style="font-size:12.5px">${esc(t("ag_add_channel"))}</a>` : ""}
+          <div class="field-hint">${esc(t("ag_mailto_hint"))}</div>
+        </div>
+        <div class="nd-err" id="ag-err"></div>
+      </div>
+      <div class="foot"><button id="ag-cancel">${t("nd_cancel")}</button><button class="primary" id="ag-save">${t("v_save")}</button></div>
+    </div></div>`;
+    $("agovl").onclick = (e) => { if (e.target.id === "agovl") close(); };
+    $("ag-cancel").onclick = close;
+    $("ag-save").onclick = save;
+    const nameInp = $("ag-name"); nameInp.oninput = () => { nameVal = nameInp.value; };
+    // keep the working copy current on every keystroke so add/remove re-renders
+    // never lose sibling edits (same idiom as the variables tab)
+    root.querySelectorAll(".ag-ch-url").forEach((el) => el.oninput = () => { chans[+el.dataset.agi].url = el.value; });
+    root.querySelectorAll(".ag-ch-fmt").forEach((el) => el.onchange = () => { chans[+el.dataset.agi].format = el.value; });
+    root.querySelectorAll("[data-agrm]").forEach((b) => b.onclick = () => { chans.splice(+b.dataset.agrm, 1); render(); });
+    const addch = $("ag-addch");
+    if (addch) addch.onclick = () => {
+      chans.push({ url: "", format: "" }); render();
+      const rows = root.querySelectorAll(".ag-ch-url"); rows[rows.length - 1].focus();
+    };
+  };
+  document.addEventListener("keydown", onKey);
+  render();
+  const first = isEdit ? root.querySelector(".ag-ch-url") : $("ag-name");
+  if (first) first.focus();
+}
+
 // ---- global DAG relationship graph (cross-DAG trigger_after) ----
 async function showGraph() {
   view = "graph"; activeDag = null; closeLog(); setNav("graph"); setHash("#/graph");
@@ -2593,4 +3070,178 @@ async function showGraph() {
   });
   attachPanZoom(main.querySelector("#dag-graph .graph-wrap"));
   finishRouteRender();
+}
+
+// ---- workers fleet (dial-in remote workers; expert mode, #/workers) ----
+let WK = null, wkPoll = null, wkPollGen = 0;
+function stopWorkersPoll() { clearInterval(wkPoll); wkPoll = null; }
+async function showWorkers() {
+  if (nvMode()) { loadDags(); return; } // expert-mode page (novice nav never links here)
+  view = "workers"; activeDag = null; closeLog(); stopDagRunsPoll(); stopWorkersPoll();
+  setNav("workers"); setHash("#/workers");
+  let workers;
+  try { workers = await api("/api/workers"); }
+  catch (e) { WK = null; main.innerHTML = `<div class="empty err">${t("api_err")}: ${esc(e.message)}</div>`; finishRouteRender(); return; }
+  WK = { workers: workers || [] };
+  $("nav-workers").textContent = WK.workers.length;
+  renderWorkers();
+  startWorkersPoll();
+  finishRouteRender();
+}
+// Modest live poll (~5s) while the page is showing. Same generation guard as the
+// run poll (runPollGen): navigating away — or a later showWorkers — invalidates
+// this interval on its next tick, so it can never leak across views.
+function startWorkersPoll() {
+  const gen = ++wkPollGen;
+  const p = setInterval(async () => {
+    if (gen !== wkPollGen || view !== "workers") { clearInterval(p); return; }
+    if (document.hidden) return; // paused while the tab is hidden
+    let ws; try { ws = await api("/api/workers"); } catch (_) { return; }
+    if (gen !== wkPollGen || view !== "workers" || !WK) { clearInterval(p); return; }
+    if (JSON.stringify(ws) === JSON.stringify(WK.workers)) return; // unchanged → no rebuild/flash
+    WK.workers = ws || [];
+    $("nav-workers").textContent = WK.workers.length;
+    // skip the rebuild while a modal is open or the user is focused inside the
+    // page (don't yank a pressed action button); the poll catches up next tick.
+    if ($("modal-root").innerHTML) return;
+    if (main.contains(document.activeElement) && document.activeElement !== main) return;
+    renderWorkers();
+  }, 5000);
+  wkPoll = p;
+}
+async function refreshWorkers() {
+  if (view !== "workers" || !WK) return;
+  try { WK.workers = (await api("/api/workers")) || []; } catch (_) { return; }
+  $("nav-workers").textContent = WK.workers.length;
+  renderWorkers();
+}
+function renderWorkers() {
+  if (view !== "workers" || !WK) return;
+  const admin = !authUser || authUser.role === "admin";
+  const ws = WK.workers;
+  // state badge (online=ok / offline=muted / lost=danger) + draining tag
+  const stateBadge = (w) => {
+    const k = w.state === "online" || w.state === "lost" ? w.state : "offline";
+    return `<span class="badge s-wk-${k}"><span class="d"></span>${t("wk_" + k)}</span>${w.draining ? ` <span class="tag warn">${t("wk_draining")}</span>` : ""}`;
+  };
+  // labels beyond "group" render as inline muted k=v text under the name
+  const labelsInline = (w) => {
+    const extra = Object.entries(w.labels || {}).filter(([k]) => k !== "group");
+    if (!extra.length) return "";
+    return `<div class="muted mono" style="font-size:11px;margin-top:2px">${extra.map(([k, v]) => `${esc(k)}=${esc(v)}`).join(" · ")}</div>`;
+  };
+  const rows = ws.map((w) => {
+    const name = w.name || t("wk_unnamed");
+    const group = (w.labels && w.labels.group) || "default";
+    const act = !admin ? "" : `<button class="icon" data-wk-drain="${esc(w.worker_id)}" data-wk-name="${esc(name)}" data-draining="${w.draining ? 1 : 0}">${w.draining ? t("wk_undrain") : t("wk_drain")}</button>
+      <button class="icon danger" data-wk-rm="${esc(w.worker_id)}" data-wk-name="${esc(name)}" title="${t("wk_remove")}" aria-label="${t("wk_remove")}">✕</button>`;
+    return `<tr>
+      <td>${esc(name)}${labelsInline(w)}</td>
+      <td>${copySpan(w.worker_id, "mono")}</td>
+      <td><span class="tag">${esc(group)}</span></td>
+      <td>${stateBadge(w)}</td>
+      <td class="num-col">${+w.active_tasks || 0}</td>
+      <td class="mono muted">${esc(w.version || "—")}</td>
+      <td title="${esc(fmt(w.last_heartbeat))}">${esc(relTime(w.last_heartbeat))}</td>
+      <td style="font-size:12.5px">${fmt(w.created_at)}</td>
+      <td style="white-space:nowrap">${act}</td>
+    </tr>`;
+  }).join("");
+  // empty state: the two-step join instructions with the exact command
+  const joinCmd = `cronova worker -server ${location.origin} -join-token <token>`;
+  const emptyState = `<div class="empty-state">
+      <div class="es-ic">⇄</div>
+      <div class="es-t">${t("wk_none_title")}</div>
+      <div class="es-s">${t("wk_none_sub")}</div>
+      <div class="es-s" style="margin-top:10px">1. ${t("wk_join_step1")}</div>
+      <div class="es-s">2. ${t("wk_join_step2")}</div>
+      <div style="margin-top:8px">${copySpan(joinCmd, "mono")}</div>
+    </div>`;
+  main.innerHTML = `
+    <div class="page-h"><h1>${t("nav_workers")}</h1><span class="num">${ws.length}</span>
+      ${admin ? `<div style="margin-left:auto"><button class="primary" id="wk-token">${t("wk_token_btn")}</button></div>` : ""}
+    </div>
+    <div class="page-sub">${esc(t("wk_sub"))}</div>
+    ${ws.length ? `<table class="tbl">
+      <thead><tr><th>${t("wk_name")}</th><th>worker_id</th><th>${t("wk_group")}</th><th>${t("wk_state")}</th><th class="num-col">${t("wk_active")}</th><th>${t("wk_version")}</th><th>${t("wk_heartbeat")}</th><th>${t("wk_created")}</th><th style="width:170px"></th></tr></thead>
+      <tbody>${rows}</tbody></table>` : emptyState}`;
+  const tb = $("wk-token"); if (tb) tb.onclick = workerTokenDialog;
+  main.querySelectorAll("[data-wk-drain]").forEach((b) => b.onclick = () => toggleDrainWorker(b.dataset.wkDrain, b.dataset.wkName, b.dataset.draining === "1"));
+  main.querySelectorAll("[data-wk-rm]").forEach((b) => b.onclick = () => removeWorkerUI(b.dataset.wkRm, b.dataset.wkName));
+}
+async function toggleDrainWorker(id, name, draining) {
+  const target = !draining;
+  const ok = await confirmDialog(
+    t(target ? "wk_drain_title" : "wk_undrain_title", name),
+    t(target ? "wk_drain_body" : "wk_undrain_body"),
+    { okLabel: t(target ? "wk_drain" : "wk_undrain") });
+  if (!ok) return;
+  try {
+    await api(`/api/workers/${encodeURIComponent(id)}/drain`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draining: target }) });
+    toast(t(target ? "wk_drained_toast" : "wk_undrained_toast"), "ok");
+    refreshWorkers();
+  } catch (e) { toast(e.message, "fail"); }
+}
+async function removeWorkerUI(id, name) {
+  if (!(await confirmDialog(t("wk_remove_title", name), t("wk_remove_body"), { danger: true, okLabel: t("wk_remove") }))) return;
+  try { await api(`/api/workers/${encodeURIComponent(id)}`, { method: "DELETE" }); toast(t("wk_removed_toast"), "ok"); refreshWorkers(); }
+  catch (e) { toast(e.message, "fail"); }
+}
+// One-time join-token mint: TTL select → POST /api/worker-tokens → reveal the
+// plaintext ONCE (copyable) with the exact join command for the worker host.
+// A 409 workers_disabled shows the worker_listen hint inline instead of a toast.
+function workerTokenDialog() {
+  const root = $("modal-root");
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  const TTLS = [["1h", "wk_ttl_1h"], ["24h", "wk_ttl_24h"], ["168h", "wk_ttl_7d"]];
+  root.innerHTML = `<div class="overlay" id="wkovl"><div class="modal confirm" role="dialog" aria-modal="true" aria-label="${t("wk_token_title")}">
+    <h2>${t("wk_token_title")}</h2>
+    <div class="body">
+      <div class="b-field" style="max-width:220px"><label>${t("wk_token_ttl")}</label>
+        <select id="wk-ttl">${TTLS.map(([v, k], i) => `<option value="${v}" ${i === 1 ? "selected" : ""}>${t(k)}</option>`).join("")}</select></div>
+      <div class="field-hint" style="margin-top:8px">${esc(t("wk_token_warn"))}</div>
+      <div class="login-err" id="wk-err" hidden></div>
+    </div>
+    <div class="foot"><button id="wk-cancel">${t("cancel_word")}</button><button class="primary" id="wk-mint">${t("wk_token_create")}</button></div>
+  </div></div>`;
+  $("wk-cancel").onclick = close;
+  $("wkovl").onclick = (e) => { if (e.target.id === "wkovl") close(); };
+  $("wk-mint").onclick = async () => {
+    const btn = $("wk-mint"); btn.disabled = true;
+    let r;
+    try { r = await api("/api/worker-tokens", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ttl: $("wk-ttl").value }) }); }
+    catch (e) {
+      const el = $("wk-err");
+      el.textContent = e.code === "workers_disabled" ? `${e.message} — ${t("wk_disabled_hint")}` : e.message;
+      el.hidden = false; btn.disabled = false;
+      return;
+    }
+    document.removeEventListener("keydown", onKey); // hand over to the reveal modal
+    revealWorkerToken(r);
+  };
+  $("wk-mint").focus();
+}
+function revealWorkerToken(r) {
+  const root = $("modal-root");
+  const cmd = `cronova worker -server ${location.origin} -join-token ${r.token}`;
+  root.innerHTML = `<div class="overlay" id="wkrovl"><div class="modal" role="dialog" aria-modal="true" aria-label="${t("wk_token_reveal_h")}">
+    <h2>${t("wk_token_reveal_h")}</h2>
+    <div class="body">
+      <div class="tok-reveal-row"><code class="tok-plain mono">${esc(r.token)}</code><button class="primary" id="wkr-copy">${t("tok_copy")}</button></div>
+      <div class="tok-warn">⚠ ${esc(t("wk_token_warn"))}${r.expires_at ? ` · ${esc(t("wk_expires"))}: ${esc(fmt(r.expires_at))}` : ""}</div>
+      <div class="b-sec" style="margin-top:14px">${t("wk_join_cmd_h")}</div>
+      <div class="tok-reveal-row" style="margin-top:6px"><code class="tok-plain mono">${esc(cmd)}</code><button id="wkr-copycmd">${t("tok_copy")}</button></div>
+    </div>
+    <div class="foot"><button class="primary" id="wkr-done">${t("tok_done")}</button></div>
+  </div></div>`;
+  const close = () => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  $("wkrovl").onclick = (e) => { if (e.target.id === "wkrovl") close(); };
+  $("wkr-copy").onclick = () => copyText(r.token).then((ok) => toast(ok ? t("copied") : t("copy_fail"), ok ? "ok" : "warn"));
+  $("wkr-copycmd").onclick = () => copyText(cmd).then((ok) => toast(ok ? t("copied") : t("copy_fail"), ok ? "ok" : "warn"));
+  $("wkr-done").onclick = close;
+  $("wkr-copy").focus();
 }

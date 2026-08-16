@@ -1,0 +1,42 @@
+# VCS / CI / editor
+.git
+.github
+.claude
+.DS_Store
+
+# local state & secrets — never ship in a build context
+data/
+logs/
+tmp/
+publish/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+cronova.key
+.env
+cronova.env
+
+# built artifacts
+/cronova
+/cronova-executor
+dist/
+site/
+.venv-docs/
+node_modules/
+
+# docs site + screenshots (not needed to build the binary)
+docs/
+mkdocs.yml
+requirements-docs.txt
+
+# packaging / deploy files (not part of the image contents)
+deploy/
+scripts/
+docker-compose.yml
+Dockerfile
+.dockerignore
+README.md
+README.zh-CN.md
+ROADMAP.md
+LICENSE

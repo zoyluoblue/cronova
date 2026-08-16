@@ -27,12 +27,14 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"github.com/zoyluo/cronova/internal/datetmpl"
 	"github.com/zoyluo/cronova/internal/executor"
 	"github.com/zoyluo/cronova/internal/metrics"
 	"github.com/zoyluo/cronova/internal/model"
 	"github.com/zoyluo/cronova/internal/operator"
 	"github.com/zoyluo/cronova/internal/scheduler/parser"
 	"github.com/zoyluo/cronova/internal/store"
+	"github.com/zoyluo/cronova/internal/workerhub"
 )
 
 // Options configures a Scheduler.
@@ -68,10 +70,32 @@ type Options struct {
 	// Empty disables the fallback — per-DAG webhooks still work.
 	DefaultNotifyURL    string
 	DefaultNotifyFormat string
+	// DefaultNotifyGroup names an alert group used as the instance-wide
+	// fallback instead of DefaultNotifyURL (the group wins when both are set).
+	DefaultNotifyGroup string
+	// SMTP configures the mail relay behind mailto: notify targets and the
+	// "email" format. Zero value disables email delivery (mailto: channels
+	// log an error).
+	SMTP SMTPConfig
 	// ReloadInterval re-scans DagDir for changed YAML files this often (GitOps:
 	// git-pull the directory and edits go live without a restart). 0 = off.
 	ReloadInterval time.Duration
 }
+
+// SMTPConfig is the instance-level mail relay used for email alerting.
+// Port 465 uses implicit TLS; any other port dials plain and upgrades via
+// STARTTLS when the server offers it (required unless AllowPlaintext).
+type SMTPConfig struct {
+	Host           string
+	Port           int // default 587
+	Username       string
+	Password       string
+	From           string // sender address; defaults to Username
+	AllowPlaintext bool   // permit delivery without TLS (lab/relay setups only)
+}
+
+// Enabled reports whether email delivery is configured.
+func (c SMTPConfig) Enabled() bool { return c.Host != "" }
 
 // Scheduler is the cronova scheduling engine.
 type Scheduler struct {
@@ -84,8 +108,9 @@ type Scheduler struct {
 	dags      map[string]*model.DAG
 	schedules map[string]cron.Schedule
 
-	notifyClient *http.Client // hardened outbound client for notify webhooks
-	opBinary     string       // path to this binary, used to run typed operators (`<opBinary> run-op ...`)
+	notifyClient *http.Client   // hardened outbound client for notify webhooks
+	opBinary     string         // path to this binary, used to run typed operators (`<opBinary> run-op ...`)
+	hub          *workerhub.Hub // dial-in worker hub (nil = no remote workers configured)
 
 	// finalizeMu serializes a tick's processRun against the manual mark ops
 	// (MarkTask/MarkRun), which run on API goroutines. Without it the tick can
@@ -424,6 +449,13 @@ func (s *Scheduler) allDAGs() []*model.DAG {
 // TriggerManual creates a manual run for dagID; the running loop picks it up on
 // the next tick. Returns the new run id.
 func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[string]string) (string, error) {
+	return s.TriggerManualPriority(ctx, dagID, params, 0)
+}
+
+// TriggerManualPriority is TriggerManual with an explicit run priority: higher
+// runs win dispatch-slot competition and drain first from a serial_priority
+// queue. The value is clamped to ±100.
+func (s *Scheduler) TriggerManualPriority(ctx context.Context, dagID string, params map[string]string, priority int) (string, error) {
 	// Only an actively-registered DAG can be triggered: a soft-deleted DAG is
 	// evicted from the cache, and an unknown one was never registered. Using the
 	// cache also gives the parsed task set, so we can gate on the real task count
@@ -435,6 +467,7 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 	if len(d.Tasks) == 0 {
 		return "", fmt.Errorf("dag %q: %w; add a task before triggering", dagID, model.ErrNoTasks)
 	}
+	priority = min(100, max(-100, priority))
 
 	now := time.Now().UTC()
 	run := &model.DagRun{
@@ -444,6 +477,7 @@ func (s *Scheduler) TriggerManual(ctx context.Context, dagID string, params map[
 		State:       model.RunQueued,
 		TriggerType: model.TriggerManual,
 		Params:      params,
+		Priority:    priority,
 	}
 	snapshotRun(run, d)
 	if err := s.store.CreateManualDagRunBounded(ctx, run, s.opts.MaxManualQueuePerDAG, s.opts.MaxManualQueueGlobal); err != nil {
@@ -531,6 +565,13 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 	// never clobber it (UpdateDagRunState has no CAS on the run row).
 	s.finalizeMu.Lock()
 	defer s.finalizeMu.Unlock()
+	return s.cancelRunLocked(ctx, runID)
+}
+
+// cancelRunLocked is CancelRun's body for callers already holding finalizeMu —
+// including its own subdag cascade (cancelAttempt), which recurses through
+// child runs under the one lock hold.
+func (s *Scheduler) cancelRunLocked(ctx context.Context, runID string) error {
 	run, err := s.store.GetDagRun(ctx, runID)
 	if err != nil {
 		return err
@@ -554,7 +595,7 @@ func (s *Scheduler) CancelRun(ctx context.Context, runID string) error {
 			continue
 		}
 		if ti.ExecutorRef != "" {
-			_ = s.exec.Cancel(ctx, ti.ExecutorRef) // best-effort kill of the running process
+			s.cancelAttempt(ctx, ti.ExecutorRef) // best-effort kill (cascades into subdag children)
 		}
 		ti.State = model.TaskCancelled
 		ti.FinishedAt = &fin
@@ -594,6 +635,12 @@ func (s *Scheduler) RetryTask(ctx context.Context, runID, taskID string) error {
 func (s *Scheduler) RetryRun(ctx context.Context, runID string) error {
 	s.finalizeMu.Lock() // serialize the terminal-gate + reactivation with the tick's finalize
 	defer s.finalizeMu.Unlock()
+	return s.retryRunLocked(ctx, runID)
+}
+
+// retryRunLocked is RetryRun's body for callers already holding finalizeMu
+// (the subdag state machine re-running a failed child from inside a tick).
+func (s *Scheduler) retryRunLocked(ctx context.Context, runID string) error {
 	run, d, tiByTask, err := s.retryContext(ctx, runID)
 	if err != nil {
 		return err
@@ -658,7 +705,7 @@ func (s *Scheduler) MarkTask(ctx context.Context, runID, taskID string, target m
 	now := time.Now().UTC()
 	// 1. kill a still-running/queued process so it can't keep executing or writing.
 	if !ti.State.IsTerminal() && ti.ExecutorRef != "" {
-		_ = s.exec.Cancel(ctx, ti.ExecutorRef)
+		s.cancelAttempt(ctx, ti.ExecutorRef)
 	}
 	// 2. release downstream BEFORE flipping the marked task — the reset tasks keep
 	// the run non-terminal during the swap, so a concurrent tick can't finalize (and
@@ -1272,16 +1319,20 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 	if err != nil {
 		s.log.Error("list runs by state", "state", model.RunRunning, "err", err)
 	}
+	var ready []readyTask
 	for _, run := range running {
-		if err := s.processRun(ctx, run); err != nil {
+		if err := s.processRun(ctx, run, &ready); err != nil {
 			s.log.Error("process run", "run", run.RunID, "err", err)
 		}
 	}
-	// Gate queued→running on max_active_runs. This is what makes a 500-period
-	// backfill (or a burst of manual triggers) execute max_active_runs at a
-	// time instead of stampeding — the run-level mutual exclusion the docs
-	// promise. Runs are listed logical_date ASC, so older periods start first;
-	// a run past its dagrun_timeout is still processed so it can time out.
+	// Gate queued→running on max_active_runs and the DAG's execution_policy.
+	// This is what makes a 500-period backfill (or a burst of manual triggers)
+	// execute max_active_runs at a time instead of stampeding — the run-level
+	// mutual exclusion the docs promise. Runs are listed logical_date ASC, so
+	// older periods start first; a serial_priority DAG's queue is reordered to
+	// drain highest run priority first; a run past its dagrun_timeout is still
+	// processed so it can time out.
+	queued = s.reorderPriorityQueues(queued)
 	runningBy := map[string]int{}
 	for _, r := range running {
 		runningBy[r.DagID]++
@@ -1291,17 +1342,208 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 		if globalRunning >= s.opts.MaxActiveRunsGlobal {
 			break
 		}
-		maxActive := 1
-		if d, _, ok := s.cachedDAG(run.DagID); ok && d.MaxActiveRuns > 0 {
-			maxActive = d.MaxActiveRuns
+		maxActive, policy := 1, model.PolicyParallel
+		if d, _, ok := s.cachedDAG(run.DagID); ok {
+			policy = d.ExecutionPolicy
+			if d.MaxActiveRuns > 0 {
+				maxActive = d.MaxActiveRuns
+			}
+		}
+		if policy != model.PolicyParallel {
+			maxActive = 1 // serial policies: one active run, whatever max_active_runs says
 		}
 		if runningBy[run.DagID] >= maxActive {
+			if policy == model.PolicySerialDiscard {
+				// serial_discard: a run arriving while another is active is
+				// dropped, visibly — cancelled, not silently deleted.
+				s.discardRun(ctx, run)
+			}
 			continue // stays queued; picked up on a later tick as slots free
 		}
 		runningBy[run.DagID]++
 		globalRunning++
-		if err := s.processRun(ctx, run); err != nil {
+		if err := s.processRun(ctx, run, &ready); err != nil {
 			s.log.Error("process run", "run", run.RunID, "err", err)
+		}
+	}
+	s.admitReady(ctx, ready)
+}
+
+// reorderPriorityQueues rewrites the queued list so that each serial_priority
+// DAG's runs appear in (priority DESC, logical_date ASC) order — the queue
+// drains urgent work first — while every other DAG keeps its logical-date
+// order and all DAGs keep their relative interleaving.
+func (s *Scheduler) reorderPriorityQueues(queued []*model.DagRun) []*model.DagRun {
+	byDag := map[string][]*model.DagRun{}
+	needs := map[string]bool{}
+	for _, r := range queued {
+		byDag[r.DagID] = append(byDag[r.DagID], r)
+		if _, seen := needs[r.DagID]; !seen {
+			d, _, ok := s.cachedDAG(r.DagID)
+			needs[r.DagID] = ok && d.ExecutionPolicy == model.PolicySerialPriority
+		}
+	}
+	changed := false
+	for dagID, runs := range byDag {
+		if !needs[dagID] || len(runs) < 2 {
+			continue
+		}
+		sort.SliceStable(runs, func(i, j int) bool {
+			if runs[i].Priority != runs[j].Priority {
+				return runs[i].Priority > runs[j].Priority
+			}
+			return runs[i].LogicalDate.Before(runs[j].LogicalDate)
+		})
+		changed = true
+	}
+	if !changed {
+		return queued
+	}
+	// Rebuild the global list: each slot takes the next run of the same DAG,
+	// so per-DAG order is the sorted one and cross-DAG interleaving is stable.
+	idx := map[string]int{}
+	out := make([]*model.DagRun, 0, len(queued))
+	for _, r := range queued {
+		runs := byDag[r.DagID]
+		out = append(out, runs[idx[r.DagID]])
+		idx[r.DagID]++
+	}
+	return out
+}
+
+// discardRun finalizes a queued run as cancelled because its DAG's
+// serial_discard policy dropped it (another run was active when its turn
+// came). Any task instances a half-processed run may have left behind are
+// cancelled with it.
+func (s *Scheduler) discardRun(ctx context.Context, run *model.DagRun) {
+	now := time.Now().UTC()
+	started := run.StartedAt
+	if started == nil {
+		started = &now
+	}
+	if err := s.store.UpdateDagRunState(ctx, run.RunID, model.RunCancelled, started, &now); err != nil {
+		s.log.Error("discard run", "run", run.RunID, "err", err)
+		return
+	}
+	if tis, err := s.store.ListTaskInstances(ctx, run.RunID); err == nil {
+		for _, ti := range tis {
+			if ti.State.IsTerminal() {
+				continue
+			}
+			ti.State = model.TaskCancelled
+			ti.FinishedAt = &now
+			_ = s.store.UpdateTaskInstance(ctx, ti)
+		}
+	}
+	metrics.IncRunFinished(string(model.RunCancelled))
+	s.log.Info("run discarded by execution_policy", "dag", run.DagID, "run", run.RunID, "policy", model.PolicySerialDiscard)
+}
+
+// admitReady launches the tick's harvest of ready tasks in one globally
+// prioritized pass: run priority first (an urgent run's tasks all win), then
+// task priority, then oldest logical date — so cross-run competition for pool
+// slots and budgets is decided by priority, not by which run happened to be
+// processed first.
+func (s *Scheduler) admitReady(ctx context.Context, ready []readyTask) {
+	if len(ready) == 0 {
+		return
+	}
+	sort.SliceStable(ready, func(i, j int) bool {
+		a, b := ready[i], ready[j]
+		if a.run.Priority != b.run.Priority {
+			return a.run.Priority > b.run.Priority
+		}
+		if a.ti.Priority != b.ti.Priority {
+			return a.ti.Priority > b.ti.Priority
+		}
+		if !a.run.LogicalDate.Equal(b.run.LogicalDate) {
+			return a.run.LogicalDate.Before(b.run.LogicalDate)
+		}
+		if a.run.RunID != b.run.RunID {
+			return a.run.RunID < b.run.RunID
+		}
+		return a.ti.TaskID < b.ti.TaskID
+	})
+	// Same lock as MarkTask/MarkRun: collection ran under it too, but it was
+	// released between runs, so each candidate is re-checked below before launch.
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
+	activeTasks, err := s.store.CountActiveTaskInstances(ctx)
+	if err != nil {
+		s.log.Error("count active tasks", "err", err)
+		return
+	}
+	globalRemaining := s.opts.MaxConcurrentTasks - activeTasks
+	poolRemaining := map[string]int{}
+	dagRemaining := map[string]int{} // only for DAGs with max_active_tasks > 0
+	groupUp := map[string]bool{}     // worker-group availability, checked once per tick
+	for _, rt := range ready {
+		if globalRemaining <= 0 {
+			return
+		}
+		// A task routed to a worker group waits (stays scheduled) while the
+		// group has no live worker — a temporarily empty group must queue
+		// work, not fail it.
+		if g := rt.t.WorkerGroup; g != "" {
+			up, checked := groupUp[g]
+			if !checked {
+				up = s.hub != nil && s.hub.GroupAvailable(g)
+				groupUp[g] = up
+				if !up {
+					s.log.Warn("worker group has no live worker; its tasks stay queued", "group", g)
+				}
+			}
+			if !up {
+				continue
+			}
+		}
+		// Per-DAG budget (max_active_tasks), counted once per tick then
+		// decremented locally.
+		if rt.dagMaxTasks > 0 {
+			rem, ok := dagRemaining[rt.run.DagID]
+			if !ok {
+				rem = rt.dagMaxTasks
+				if counter, ok2 := s.store.(interface {
+					CountActiveTasksForDag(context.Context, string) (int, error)
+				}); ok2 {
+					if used, err := counter.CountActiveTasksForDag(ctx, rt.run.DagID); err == nil {
+						rem = rt.dagMaxTasks - used
+					}
+				}
+				dagRemaining[rt.run.DagID] = rem
+			}
+			if rem <= 0 {
+				continue // this DAG's budget is spent; others may still dispatch
+			}
+		}
+		// Pool budget, counted once per tick then decremented locally.
+		rem, ok := poolRemaining[rt.ti.Pool]
+		if !ok {
+			used, err := s.store.CountRunningInPool(ctx, rt.ti.Pool)
+			if err != nil {
+				s.log.Error("count pool occupancy", "pool", rt.ti.Pool, "err", err)
+				continue
+			}
+			rem = s.poolSlots(ctx, rt.ti.Pool) - used
+		}
+		if rem <= 0 {
+			poolRemaining[rt.ti.Pool] = rem
+			continue
+		}
+		// Re-verify: a Mark could have finalized this task between collection
+		// (processRun's lock) and here.
+		cur, err := s.store.GetTaskInstance(ctx, rt.ti.ID)
+		if err != nil || cur.State != model.TaskScheduled {
+			continue
+		}
+		if err := s.dispatch(ctx, rt.run, rt.t, cur, rt.loc); err != nil {
+			s.log.Error("dispatch", "run", rt.run.RunID, "task", rt.t.ID, "err", err)
+			continue
+		}
+		poolRemaining[rt.ti.Pool] = rem - 1
+		globalRemaining--
+		if rt.dagMaxTasks > 0 {
+			dagRemaining[rt.run.DagID]--
 		}
 	}
 }
@@ -1317,10 +1559,79 @@ func (s *Scheduler) listQueuedLimited(ctx context.Context, limit int) ([]*model.
 	return s.store.ListDagRunsByState(ctx, model.RunQueued)
 }
 
-// processRun advances a single run: expands task instances, promotes the run to
-// running, propagates failures to downstream tasks, dispatches ready tasks, and
-// finalizes the run when every task is terminal.
-func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
+// SetWorkerHub arms remote dispatch: tasks with worker_group route to the
+// hub, and Probe/Cancel on already-assigned hub refs route by ownership. The
+// hub also backstops lost-task detection: a ref unknown to BOTH executors
+// during the hub's boot grace probes as running, giving reconnecting workers
+// time to re-claim their attempts before failover kicks in.
+func (s *Scheduler) SetWorkerHub(h *workerhub.Hub) {
+	s.hub = h
+	s.exec = routedExec{local: s.exec, hub: h}
+}
+
+// routedExec is the composite executor: Launch always targets the local
+// executor (remote launches go through hub group executors explicitly in
+// runTask), while Probe/Cancel follow whichever side owns the ref.
+type routedExec struct {
+	local executor.Executor
+	hub   *workerhub.Hub
+}
+
+func (r routedExec) Launch(ctx context.Context, spec executor.Spec) (string, error) {
+	return r.local.Launch(ctx, spec)
+}
+
+func (r routedExec) Probe(ctx context.Context, ref string) (executor.Status, error) {
+	if r.hub.Owns(ref) {
+		return r.hub.ProbeRef(ctx, ref)
+	}
+	st, err := r.local.Probe(ctx, ref)
+	if err == nil && st.Phase == executor.PhaseUnknown && r.hub.InBootGrace() {
+		// May be a remote attempt whose worker has not reconnected yet.
+		return executor.Status{Phase: executor.PhaseRunning}, nil
+	}
+	return st, err
+}
+
+func (r routedExec) Cancel(ctx context.Context, ref string) error {
+	if r.hub.Owns(ref) {
+		return r.hub.CancelRef(ctx, ref)
+	}
+	return r.local.Cancel(ctx, ref)
+}
+
+// Health passes through to the local executor's health check when it has one.
+func (r routedExec) Health(ctx context.Context) error {
+	if hc, ok := r.local.(interface{ Health(context.Context) error }); ok {
+		return hc.Health(ctx)
+	}
+	return nil
+}
+
+// launchExec picks the executor an attempt starts on.
+func (s *Scheduler) launchExec(t model.Task) executor.Executor {
+	if t.WorkerGroup != "" && s.hub != nil {
+		return s.hub.ExecutorForGroup(t.WorkerGroup)
+	}
+	return s.exec
+}
+
+// readyTask is one dispatchable task discovered by processRun, carrying the
+// context admitReady needs to order and launch it globally.
+type readyTask struct {
+	run         *model.DagRun
+	t           model.Task
+	ti          *model.TaskInstance
+	loc         *time.Location
+	dagMaxTasks int
+}
+
+// processRun advances one run's state machine (expansion, block propagation,
+// retries, deadline enforcement, finalize). Tasks that become dispatchable are
+// NOT launched here — they are appended to readyOut, and the caller admits the
+// whole tick's harvest globally (admitReady) so priorities compete across runs
+// instead of first-run-wins.
+func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun, readyOut *[]readyTask) error {
 	// Serialize against MarkTask/MarkRun so the finalize decision below reads a task
 	// snapshot no manual mark can invalidate mid-flight (dispatched tasks run in
 	// their own goroutines, so this only holds for the cheap synchronous body).
@@ -1330,6 +1641,7 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 	if err != nil {
 		return err
 	}
+	loc := dagLocation(d)
 
 	tis, err := s.store.ListTaskInstances(ctx, run.RunID)
 	if err != nil {
@@ -1426,19 +1738,65 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 		}
 	}
 
-	// 3. Dispatch ready scheduled tasks, highest priority first, respecting pool
-	// slots. A pool that is full simply defers its remaining tasks to a later tick.
-	var ready []*model.TaskInstance
+	// 3. Collect ready scheduled tasks. Launch decisions happen later in
+	// admitReady, over every run's harvest at once — pool slots, global and
+	// per-DAG budgets are all arbitrated there.
 	for _, t := range d.Tasks {
 		ti := tiByTask[t.ID]
-		if ti == nil || ti.State != model.TaskScheduled {
+		if ti == nil {
+			continue
+		}
+		// Sub-workflow tasks never dispatch to an executor: their lifecycle is
+		// this state machine — launch/attach a child run when scheduled, mirror
+		// its terminal state while running.
+		if t.Type == "subdag" && (ti.State == model.TaskScheduled || ti.State == model.TaskRunning) {
+			if ti.State == model.TaskScheduled {
+				if r, _ := taskGate(t, tiByTask); !r {
+					continue
+				}
+			}
+			if err := s.advanceSubdag(ctx, run, t, ti); err != nil {
+				return err
+			}
+			continue
+		}
+		if ti.State != model.TaskScheduled {
 			continue
 		}
 		if r, _ := taskGate(t, tiByTask); r {
+			// depends_on_dag gate: hold until the target DAG's matching period
+			// run succeeds. Not-yet-satisfied leaves the task scheduled for a
+			// later tick; a timeout resolves it per on_timeout.
+			if t.DependsOnDag != nil {
+				satisfied, timedOut := s.dependentReady(ctx, run, t, loc)
+				if !satisfied {
+					if !timedOut {
+						continue
+					}
+					now := time.Now().UTC()
+					if t.DependsOnDag.OnTimeout == "skip" {
+						ti.State = model.TaskSkipped
+						ti.FinishedAt = &now
+						if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+							return err
+						}
+						s.log.Info("task skipped: depends_on_dag timeout", "run", run.RunID, "task", t.ID, "target", t.DependsOnDag.Dag)
+						continue
+					}
+					ti.State = model.TaskFailed
+					ti.StartedAt = &now
+					ti.FinishedAt = &now
+					if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
+						return err
+					}
+					s.log.Warn("task failed: depends_on_dag timeout", "run", run.RunID, "task", t.ID, "target", t.DependsOnDag.Dag)
+					continue
+				}
+			}
 			// when: gate — evaluated once the task is otherwise ready (upstream
 			// outputs exist by then). A falsy render marks it SKIPPED, and
 			// trigger rules downstream take it from there.
-			if t.When != "" && !s.evalWhen(ctx, run, t, ti.TryNumber+1) {
+			if t.When != "" && !s.evalWhen(ctx, run, t, ti.TryNumber+1, loc) {
 				now := time.Now().UTC()
 				ti.State = model.TaskSkipped
 				ti.FinishedAt = &now
@@ -1448,59 +1806,9 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun) error {
 				s.log.Info("task skipped by when-condition", "run", run.RunID, "task", t.ID)
 				continue
 			}
-			ready = append(ready, ti)
-		}
-	}
-	sort.SliceStable(ready, func(i, j int) bool {
-		if ready[i].Priority != ready[j].Priority {
-			return ready[i].Priority > ready[j].Priority
-		}
-		return ready[i].TaskID < ready[j].TaskID
-	})
-	poolRemaining := map[string]int{}
-	activeTasks, err := s.store.CountActiveTaskInstances(ctx)
-	if err != nil {
-		return err
-	}
-	globalRemaining := s.opts.MaxConcurrentTasks - activeTasks
-	// max_active_tasks: a per-DAG concurrency budget across all of this DAG's
-	// runs (0 = unlimited). Counted once per run per tick, decremented locally.
-	dagRemaining := -1
-	if d.MaxActiveTasks > 0 {
-		if counter, ok := s.store.(interface {
-			CountActiveTasksForDag(context.Context, string) (int, error)
-		}); ok {
-			if used, err := counter.CountActiveTasksForDag(ctx, run.DagID); err == nil {
-				dagRemaining = d.MaxActiveTasks - used
-			}
-		}
-	}
-	for _, ti := range ready {
-		if globalRemaining <= 0 {
-			break
-		}
-		if dagRemaining == 0 {
-			break // DAG budget exhausted; remaining tasks wait for a later tick
-		}
-		rem, ok := poolRemaining[ti.Pool]
-		if !ok {
-			used, err := s.store.CountRunningInPool(ctx, ti.Pool)
-			if err != nil {
-				return err
-			}
-			rem = s.poolSlots(ctx, ti.Pool) - used
-		}
-		if rem <= 0 {
-			poolRemaining[ti.Pool] = rem
-			continue
-		}
-		if err := s.dispatch(ctx, run, taskByID[ti.TaskID], ti); err != nil {
-			return err
-		}
-		poolRemaining[ti.Pool] = rem - 1
-		globalRemaining--
-		if dagRemaining > 0 {
-			dagRemaining--
+			*readyOut = append(*readyOut, readyTask{
+				run: run, t: taskByID[t.ID], ti: ti, loc: loc, dagMaxTasks: d.MaxActiveTasks,
+			})
 		}
 	}
 
@@ -1624,7 +1932,7 @@ func (s *Scheduler) timeoutRun(ctx context.Context, d *model.DAG, run *model.Dag
 			continue
 		}
 		if ti.ExecutorRef != "" {
-			_ = s.exec.Cancel(ctx, ti.ExecutorRef)
+			s.cancelAttempt(ctx, ti.ExecutorRef)
 		}
 		ti.State = model.TaskTimedOut
 		ti.FinishedAt = &fin
@@ -1842,7 +2150,7 @@ func (s *Scheduler) expandRun(ctx context.Context, run *model.DagRun, d *model.D
 // to prevent re-dispatch on the next tick), assigns this attempt's unique ref,
 // and launches it in a goroutine. The ref embeds the try number so each retry
 // re-runs on the executor (whose Launch is idempotent per ref).
-func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Task, ti *model.TaskInstance) error {
+func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Task, ti *model.TaskInstance, loc *time.Location) error {
 	ti.TryNumber++
 	ti.State = model.TaskQueued
 	ti.ExecutorRef = attemptRef(run.RunID, t.ID, ti.TryNumber)
@@ -1853,7 +2161,7 @@ func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Tas
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
-		s.runTask(ctx, run, t, tiVal)
+		s.runTask(ctx, run, t, tiVal, loc)
 	}()
 	return nil
 }
@@ -1862,9 +2170,9 @@ func (s *Scheduler) dispatch(ctx context.Context, run *model.DagRun, t model.Tas
 // then awaits completion by polling. The executor owns the child process, so a
 // scheduler shutdown (ctx cancel) just stops the poll; the task keeps running
 // and recovery re-attaches to it on restart.
-func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance) {
-	base := templateVars(run, t, ti.TryNumber)
-	resolve := s.templateResolver(ctx, run.RunID, base, run.Params)
+func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task, ti model.TaskInstance, loc *time.Location) {
+	base := templateVars(run, t, ti.TryNumber, loc)
+	resolve := s.templateResolver(ctx, run.RunID, base, run.Params, run.LogicalDate.In(loc))
 	env := taskEnv(base, run.Params)
 	// Output channel: the task may write a small JSON string-map here; it is
 	// collected at success-finalize and exposed downstream as {{ ti.<id>.<key> }}.
@@ -1959,7 +2267,7 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 	if s.taskCancelled(ctx, ti.ID) {
 		return // a CancelRun landed before we launched — don't start the process
 	}
-	if _, err := s.exec.Launch(ctx, spec); err != nil {
+	if _, err := s.launchExec(t).Launch(ctx, spec); err != nil {
 		s.log.Error("launch task", "run", run.RunID, "task", t.ID, "err", err)
 		now := time.Now().UTC()
 		ti.StartedAt = &now
@@ -2019,6 +2327,168 @@ func (s *Scheduler) awaitCompletion(ctx context.Context, ti *model.TaskInstance)
 	}
 }
 
+// maxSubdagDepth bounds parent→child nesting — the runtime backstop against
+// reference cycles the save-time check cannot see (edits applied in an order
+// that only becomes cyclic once every DAG is in place).
+const maxSubdagDepth = 5
+
+// subdagRefPrefix marks a task-instance ExecutorRef as a child-run pointer
+// rather than an executor attempt.
+const subdagRefPrefix = "subdag:"
+
+// advanceSubdag drives one subdag task instance:
+//
+//	scheduled → create (or retry/attach) the child run, mark the task running
+//	running   → mirror the child run's terminal state onto the task
+//
+// A manual RetryTask clears the ref, so it starts a NEW child run (the old one
+// stays as history); automatic retries keep the ref and re-run the SAME child
+// (RetryRun semantics — attempt history preserved).
+func (s *Scheduler) advanceSubdag(ctx context.Context, run *model.DagRun, t model.Task, ti *model.TaskInstance) error {
+	childID := strings.TrimPrefix(ti.ExecutorRef, subdagRefPrefix)
+	if !strings.HasPrefix(ti.ExecutorRef, subdagRefPrefix) {
+		childID = ""
+	}
+	now := time.Now().UTC()
+
+	if ti.State == model.TaskScheduled {
+		if depth, err := s.subdagDepth(ctx, run); err != nil {
+			return err
+		} else if depth >= maxSubdagDepth {
+			ti.TryNumber++
+			ti.State = model.TaskFailed
+			ti.StartedAt, ti.FinishedAt = &now, &now
+			s.log.Error("subdag nesting too deep (cycle?)", "run", run.RunID, "task", t.ID, "depth", depth)
+			return s.store.UpdateTaskInstance(ctx, ti)
+		}
+		if _, _, ok := s.cachedDAG(t.Subdag); !ok {
+			ti.TryNumber++
+			ti.State = model.TaskFailed
+			ti.StartedAt, ti.FinishedAt = &now, &now
+			s.log.Error("subdag target not found or archived", "run", run.RunID, "task", t.ID, "target", t.Subdag)
+			return s.store.UpdateTaskInstance(ctx, ti)
+		}
+		if childID != "" {
+			// An automatic retry re-runs the previous child.
+			child, err := s.store.GetDagRun(ctx, childID)
+			switch {
+			case err != nil:
+				childID = "" // child vanished (pruned) — start a fresh one
+			case child.State.IsTerminal() && child.State != model.RunSuccess:
+				if rerr := s.retryRunLocked(ctx, childID); rerr != nil {
+					s.log.Error("retry subdag child", "child", childID, "err", rerr)
+					childID = ""
+				}
+			}
+		}
+		if childID == "" {
+			childID = fmt.Sprintf("%s__sub_%d", t.Subdag, now.UnixNano())
+			child := &model.DagRun{
+				RunID: childID, DagID: t.Subdag, LogicalDate: now,
+				State: model.RunQueued, TriggerType: model.TriggerSubdag,
+				Params: run.Params, Priority: run.Priority, ParentRunID: run.RunID,
+			}
+			if err := s.store.CreateDagRunBounded(ctx, child, s.opts.MaxQueuedRunsGlobal); err != nil {
+				if errors.Is(err, model.ErrQueueFull) {
+					s.log.Warn("subdag child deferred: global queue full", "run", run.RunID, "task", t.ID)
+					return nil // stays scheduled; try again next tick
+				}
+				return fmt.Errorf("create subdag child: %w", err)
+			}
+			s.log.Info("subdag child created", "run", run.RunID, "task", t.ID, "child", childID)
+		}
+		ti.TryNumber++
+		ti.State = model.TaskRunning
+		ti.StartedAt = &now
+		ti.ExecutorRef = subdagRefPrefix + childID
+		return s.store.UpdateTaskInstance(ctx, ti)
+	}
+
+	// running: mirror the child's terminal state.
+	if childID == "" {
+		s.recordFailure(ctx, ti, "subdag child reference lost")
+		return nil
+	}
+	child, err := s.store.GetDagRun(ctx, childID)
+	if err != nil {
+		s.recordFailure(ctx, ti, "subdag child run not found")
+		return nil
+	}
+	switch child.State {
+	case model.RunSuccess:
+		ti.State = model.TaskSuccess
+		ti.FinishedAt = &now
+		s.finalizeWrite(ctx, ti, "finalize subdag task")
+		s.log.Info("subdag child succeeded", "run", run.RunID, "task", t.ID, "child", childID)
+	case model.RunFailed, model.RunTimedOut:
+		s.recordFailure(ctx, ti, fmt.Sprintf("subdag child %s: %s", childID, child.State))
+	case model.RunCancelled:
+		// The parent-cancel cascade marks this task itself; an independently
+		// cancelled child is a failure from the parent's point of view.
+		s.recordFailure(ctx, ti, "subdag child cancelled")
+	}
+	return nil
+}
+
+// subdagDepth counts how many parents sit above run.
+func (s *Scheduler) subdagDepth(ctx context.Context, run *model.DagRun) (int, error) {
+	depth := 0
+	cur := run
+	for cur.ParentRunID != "" && depth <= maxSubdagDepth {
+		parent, err := s.store.GetDagRun(ctx, cur.ParentRunID)
+		if err != nil {
+			break // pruned parent — treat the chain as ending here
+		}
+		depth++
+		cur = parent
+	}
+	return depth, nil
+}
+
+// cancelAttempt cancels one attempt wherever it lives: a subdag ref cascades
+// into cancelling the child run (recursively, for nested subdags); anything
+// else is an executor kill. Callers hold finalizeMu — every path that reaches
+// here (CancelRun, MarkTask/MarkRun, enforceDeadlines via processRun) does.
+func (s *Scheduler) cancelAttempt(ctx context.Context, ref string) {
+	if child, ok := strings.CutPrefix(ref, subdagRefPrefix); ok {
+		if err := s.cancelRunLocked(ctx, child); err != nil && !errors.Is(err, model.ErrRunNotActive) {
+			s.log.Warn("cancel subdag child", "child", child, "err", err)
+		}
+		return
+	}
+	_ = s.exec.Cancel(ctx, ref)
+}
+
+// dependentReady evaluates a task's depends_on_dag condition: satisfied when
+// the target DAG's run at (this run's logical date, shifted by offset in the
+// DAG's timezone) is SUCCESSFUL. A missing or not-yet-successful target run
+// keeps the task waiting; a failed target run also waits (it may be retried)
+// until the timeout resolves the standoff.
+func (s *Scheduler) dependentReady(ctx context.Context, run *model.DagRun, t model.Task, loc *time.Location) (satisfied, timedOut bool) {
+	dep := t.DependsOnDag
+	ref, ok := datetmpl.Shift(run.LogicalDate.In(loc), dep.Offset)
+	if !ok {
+		// The parser validated this; reaching here means a hand-edited
+		// snapshot. Fail closed as a timeout so the run cannot hang forever.
+		s.log.Error("depends_on_dag offset does not parse", "run", run.RunID, "task", t.ID, "offset", dep.Offset)
+		return false, true
+	}
+	target, err := s.store.GetDagRunByLogicalDate(ctx, dep.Dag, ref.UTC())
+	if err == nil && target.State == model.RunSuccess {
+		return true, false
+	}
+	if dep.Timeout > 0 {
+		anchor := run.LogicalDate
+		if run.StartedAt != nil {
+			anchor = *run.StartedAt
+		}
+		if time.Since(anchor) > time.Duration(dep.Timeout)*time.Second {
+			return false, true
+		}
+	}
+	return false, false
+}
+
 // taskCancelled reports whether a CancelRun already marked this task cancelled —
 // a cheap pre-Launch early-out (the guarded write is the authoritative defense).
 func (s *Scheduler) taskCancelled(ctx context.Context, id int64) bool {
@@ -2045,9 +2515,9 @@ func (s *Scheduler) finalizeWrite(ctx context.Context, ti *model.TaskInstance, w
 // evalWhen renders a task's when: template and decides run-vs-skip. Falsy is
 // "", "false", "0", "no" (case-insensitive) — and any UNRESOLVED placeholder,
 // so a typo'd variable skips visibly instead of running on garbage.
-func (s *Scheduler) evalWhen(ctx context.Context, run *model.DagRun, t model.Task, try int) bool {
-	base := templateVars(run, t, try)
-	rendered := strings.TrimSpace(renderCommand(t.When, s.templateResolver(ctx, run.RunID, base, run.Params)))
+func (s *Scheduler) evalWhen(ctx context.Context, run *model.DagRun, t model.Task, try int, loc *time.Location) bool {
+	base := templateVars(run, t, try, loc)
+	rendered := strings.TrimSpace(renderCommand(t.When, s.templateResolver(ctx, run.RunID, base, run.Params, run.LogicalDate.In(loc))))
 	if strings.Contains(rendered, "{{") {
 		return false
 	}
@@ -2088,8 +2558,10 @@ const maxTaskOutputBytes = 64 << 10
 
 // outputPath is where an attempt may leave its output JSON (next to its log,
 // per-try so a retry can't read a stale file from the previous attempt).
+// The formula lives in the executor package: the worker hub re-derives it when
+// adopting remote attempts.
 func outputPath(logPath string, try int) string {
-	return fmt.Sprintf("%s.out%d.json", logPath, try)
+	return executor.OutputPath(logPath, try)
 }
 
 // collectTaskOutput ingests $CRONOVA_OUTPUT after a successful attempt: a flat
@@ -2266,14 +2738,17 @@ func attemptRef(runID, taskID string, try int) string {
 // {{ name }} placeholders in the command and as CRONOVA_<NAME> env vars. The
 // logical date is what makes catchup meaningful: a backfilled run processes the
 // data for the period it represents, not wall-clock "now".
-func templateVars(run *model.DagRun, t model.Task, try int) map[string]string {
+// The logical date renders in the DAG's timezone (loc) so a run of an
+// Asia/Shanghai DAG sees its own calendar day, not the UTC one it is stored as.
+func templateVars(run *model.DagRun, t model.Task, try int, loc *time.Location) map[string]string {
+	ld := run.LogicalDate.In(loc)
 	return map[string]string{
 		"run_id":           run.RunID,
 		"dag_id":           run.DagID,
 		"task_id":          t.ID,
 		"try_number":       strconv.Itoa(try),
-		"logical_date":     run.LogicalDate.Format("2006-01-02"),
-		"logical_datetime": run.LogicalDate.Format(time.RFC3339),
+		"logical_date":     ld.Format("2006-01-02"),
+		"logical_datetime": ld.Format(time.RFC3339),
 	}
 }
 
@@ -2293,7 +2768,11 @@ func taskEnv(base, params map[string]string) map[string]string {
 }
 
 // dotted names too (var.X, conn.ID.field, params.KEY), but never partial words.
-var templateRe = regexp.MustCompile(`\{\{\s*([\w.]+)\s*\}\}`)
+// The first alternative additionally admits date expressions — anything opening
+// with logical_date (offsets, anchors, | formats; see datetmpl.go) — while every
+// other placeholder keeps the strict word-and-dots shape, so unrelated shell
+// braces are never touched.
+var templateRe = regexp.MustCompile(`\{\{\s*(logical_date[^{}\n]*?|[\w.]+)\s*\}\}`)
 
 // isSecretKey reports whether a template key names a value that must never be
 // echoed to a task log — currently any connection password ({{ conn.ID.password }}
@@ -2374,10 +2853,16 @@ func (s *Scheduler) sqlOpSpec(ctx context.Context, connID, query string, secrets
 // templateResolver resolves a placeholder name to its value: base vars first,
 // then params.KEY, then var.KEY and conn.ID.field which hit the store lazily
 // (only referenced values are fetched, and only referenced secrets are exposed).
-func (s *Scheduler) templateResolver(ctx context.Context, runID string, base, params map[string]string) func(string) (string, bool) {
+// logical is the run's logical date in the DAG's timezone; date expressions
+// ({{ logical_date - 7d | %Y%m%d }} and friends) evaluate against it.
+func (s *Scheduler) templateResolver(ctx context.Context, runID string, base, params map[string]string, logical time.Time) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		if v, ok := base[key]; ok {
 			return v, true
+		}
+		// Decorated logical_date/logical_datetime (bare names hit base above).
+		if strings.HasPrefix(key, "logical_date") {
+			return evalDateExpr(logical, strings.TrimSpace(key))
 		}
 		if name, ok := strings.CutPrefix(key, "params."); ok {
 			v, ok := params[name]

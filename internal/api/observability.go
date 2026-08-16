@@ -96,6 +96,22 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Dial-in worker fleet: per-worker load plus a per-state census, so a
+	// group draining to zero or a worker flapping to lost is alertable.
+	if workers, err := s.store.ListWorkers(ctx); err == nil && len(workers) > 0 {
+		fmt.Fprint(&b, "# HELP cronova_worker_active_tasks In-flight tasks per dial-in worker.\n# TYPE cronova_worker_active_tasks gauge\n")
+		states := map[string]int{}
+		for _, wk := range workers {
+			states[wk.State]++
+			fmt.Fprintf(&b, "cronova_worker_active_tasks{worker=\"%s\",name=\"%s\",group=\"%s\",state=\"%s\"} %d\n",
+				escapeLabel(wk.ID), escapeLabel(wk.Name), escapeLabel(wk.Group()), escapeLabel(wk.State), wk.ActiveTasks)
+		}
+		fmt.Fprint(&b, "# HELP cronova_workers Workers by state (online/offline/lost).\n# TYPE cronova_workers gauge\n")
+		for _, st := range []string{"online", "offline", "lost"} {
+			fmt.Fprintf(&b, "cronova_workers{state=\"%s\"} %d\n", st, states[st])
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
 }

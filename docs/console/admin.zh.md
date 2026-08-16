@@ -1,6 +1,6 @@
-# 依赖图、资源池、变量、审计与 API 令牌
+# 依赖图、资源池、变量、工作节点、审计与 API 令牌
 
-cronova Web 控制台的运维页面：跨 DAG 依赖图、全局并发资源池、共享变量与连接、操作者审计记录，以及供机器访问的 API 令牌。这些页面全部位于 DAG 列表下方的侧边栏中，地址为 `http://localhost:8090`。
+cronova Web 控制台的运维页面：跨 DAG 依赖图、全局并发资源池、共享变量与连接、拨入式工作节点集群、操作者审计记录，以及供机器访问的 API 令牌。这些页面全部位于 DAG 列表下方的侧边栏中，地址为 `http://localhost:8090`。
 
 ## 跨 DAG 依赖图（`#/graph`）
 
@@ -42,7 +42,7 @@ cronova Web 控制台的运维页面：跨 DAG 依赖图、全局并发资源池
 
 ## 变量与连接（`#/resources`）
 
-**Variables & Connections** 页面存放跨任务共享的配置，分为两个标签页。在任务命令中以 `{{ var.KEY }}` 和 `{{ conn.ID.field }}` 引用其值，或在触发时传入 `{{ params.KEY }}`——[模板变量教程](../tutorial/variables-connections-params.md)覆盖了这三种用法。
+**Variables & Connections** 页面存放跨任务共享的配置，分为变量、连接、告警组三个标签页。在任务命令中以 `{{ var.KEY }}` 和 `{{ conn.ID.field }}` 引用其值，或在触发时传入 `{{ params.KEY }}`——[模板变量教程](../tutorial/variables-connections-params.md)覆盖了前两类用法。
 
 ![variables and connections](../img/console/resources.png)
 
@@ -77,6 +77,62 @@ cronova Web 控制台的运维页面：跨 DAG 依赖图、全局并发资源池
 
 在模板中，通过 `{{ conn.ID.host }}`、`.port`、`.login`（别名 `.user`）、`.password`、`.type` 读取连接字段，或用 `{{ conn.ID.extra.KEY }}` 读取 Extra JSON 中的键。`sql` 任务通过其 `conn:` 字段直接使用连接——见 [DAG & Task Reference](../DAG_REFERENCE.md)。
 
+### 告警组
+
+把多个通知渠道打包成一个具名分组（专家模式）。工作流在「设置 → 通知」里选择**告警组**后，运行告警会发往该组的*每一个*渠道，而不是单个 Webhook URL——值班渠道调整时只需在这里改一次，无需逐个修改工作流。
+
+列表显示每个组的名称、渠道数及各渠道目的地摘要、更新时间；**Edit** 打开编辑对话框，**✕** 删除（需确认——引用它的工作流会退回使用各自的通知 URL，告警不会丢失）。
+
+**新建告警组**对话框包含以下字段：
+
+| 字段 | 说明 |
+|---|---|
+| 组名 | 例如 `oncall`。创建后不可修改（字符集规则与变量键相同，最长 128 字符）。 |
+| 渠道 | 1–16 行，每行一个 URL + 消息格式。URL 可以是 `http(s)://` 入群机器人 Webhook 或 `mailto:地址[,地址]`；格式为 `raw`、`slack`、`feishu`、`dingtalk` 或 `email`。**+ 添加渠道**追加一行，**✕** 移除。 |
+
+!!! note "mailto: 渠道需要 SMTP"
+    邮件渠道通过服务端的 SMTP 转发发送——需先配置服务配置文件的 `smtp:` 段，否则邮件投递会失败（仅记录日志，不会阻塞运行）。
+
+在 DAG YAML 中以 `notify.group` 引用告警组——解析规则（组优先于 `notify.url`；悬空引用会回退而不是丢弃告警）见 [DAG & Task Reference](../DAG_REFERENCE.md#notifications-webhooks-email--alert-groups)。
+
+## 工作节点（`#/workers`）
+
+**Workers** 页面（专家模式）管理拨入本调度器的远程工作节点集群。任务通过 `worker_group` 字段（DAG 级或任务级，见 [DAG & Task Reference](../DAG_REFERENCE.md)）选择远程执行；任务的分组会与每个工作节点的 `group` 标签匹配（默认 `default`）。
+
+表格列出所有已注册的工作节点，页面打开期间每约 5 秒自动刷新：
+
+| 列 | 说明 |
+|---|---|
+| Name | 加入时使用的名称（`group` 以外的标签以灰色 `k=v` 文本显示在下方）。 |
+| worker_id | 服务端分配的 id（点击复制）。 |
+| Group | 该节点的路由分组——即 `group` 标签，未设置时为 `default`。 |
+| State | **online**（会话在线且持续心跳）、**offline**（正常断开）或 **lost**（心跳中断且未告别；其上运行中的任务按重试策略故障转移）。排空期间会追加 **draining** 标签。 |
+| Active tasks | 该节点当前正在执行的任务数。 |
+| Version | 工作节点二进制的版本。 |
+| Last heartbeat | 最近一次心跳的相对时间（悬停查看绝对时间）。 |
+| Joined | 节点首次加入的时间。 |
+
+**行内操作**（仅管理员）：
+
+- **排空 / 恢复分配** —— 排空中的节点会跑完手头任务，但不再接收新分配；适合维护前使用。恢复分配后重新参与调度。两者都会先弹出确认。
+- **✕ 移除** —— 删除注册并关闭在线会话，确认对话框会先给出警告。移除立即生效且不可撤销：该节点的证书随即失效，**被移除的节点无法重新连接**——必须用新令牌重新加入。
+
+### 接入一个工作节点
+
+两步接入：
+
+1. 点击**生成加入令牌**（管理员），选择有效期（1 小时 / 24 小时 / 7 天）并生成。一次性令牌**只显示这一次**——请立即复制；服务端只保存其哈希。
+2. 在工作节点主机上运行令牌旁展示的加入命令：
+
+```bash
+cronova worker -server <console-url> -join-token <token>
+```
+
+工作节点用令牌 + CSR 换取签名证书（私钥永不离开该主机）并拨入 hub；几秒内它就会以 **online** 状态出现在表格中。令牌一次性使用，到期自动失效。
+
+!!! note "需要配置 `worker_listen`"
+    工作节点 hub 默认关闭。若生成令牌时报 *worker hub is not enabled*，请在服务端配置中设置 `worker_listen`（或环境变量 `CRONOVA_WORKER_LISTEN`）并重启服务。
+
 ## 审计（`#/audit`）
 
 **Audit** 页面是操作日志：谁在何时对哪个 DAG 或运行做了什么。它列出最近的 200 条记录。
@@ -90,7 +146,7 @@ cronova Web 控制台的运维页面：跨 DAG 依赖图、全局并发资源池
 | Action | 执行的操作（见下文）。 |
 | Target | 受影响的 DAG id、运行 id 或令牌，外加详情后缀（例如标记操作的 `task=success`）。 |
 
-记录的操作包括：**trigger**、**cancel**、**retry run**、**retry task**、**mark task**、**mark run**、**create DAG**、**delete DAG**、**pause**、**unpause**、**create token**、**revoke token**，以及项目上传/删除。
+记录的操作包括：**trigger**、**cancel**、**retry run**、**retry task**、**mark task**、**mark run**、**create DAG**、**delete DAG**、**pause**、**unpause**、**create token**、**revoke token**、**set alert group**、**delete alert group**，以及项目上传/删除。
 
 !!! note "自动保存的编辑不会被记录"
     [任务编辑器](task-editor.md)会在每次防抖后的按键时自动保存，因此对已有 DAG 的日常编辑被有意*排除*在审计之外——只有真正新建 DAG 才会被记录。这样审计记录保持有意义，而不会被保存事件淹没。

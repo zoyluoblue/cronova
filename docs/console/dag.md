@@ -40,6 +40,8 @@ To pass runtime parameters, click the **⋯** button instead. A dialog lets you 
 - Each key is injected into task environments as a `CRONOVA_PARAM_*` environment variable.
 - Commands can reference values as `{{ params.key }}` template variables.
 
+The same dialog has an optional **Priority** field (−100 to 100, default 0): a higher-priority run wins the competition for dispatch slots, and under the `serial_priority` execution policy the queue drains highest priority first. A run triggered with a non-zero priority shows a small `P<n>` badge next to its state badge in the Runs tab and on the run detail page.
+
 See [Variables, connections & params](../tutorial/variables-connections-params.md) for the full templating model.
 
 ## Runs tab
@@ -110,6 +112,7 @@ Settings are a list of one-line summary rows — click a row to expand its edito
 |---|---|
 | Schedule | Manual / Interval / Cron — same three modes as the New DAG dialog, with cron presets, a live "Next: …" fire-time preview, and a start date. A Catchup checkbox is shown but currently disabled ("coming soon"). |
 | Max active runs | How many runs of this DAG may execute concurrently |
+| Execution policy | How queued runs are admitted when another run is active: **Parallel** (up to Max active runs concurrently — the default), **Serial (wait)** (one at a time, later runs queue in logical-date order), **Serial (discard)** (one at a time, runs arriving while busy are cancelled — visibly, never silently), or **Serial (priority)** (one at a time, the queue drains highest run priority first). Serial policies force at most one active run regardless of Max active runs. |
 | Default retries | Retry count applied to tasks that don't set their own |
 | SLA (soft) | Seconds from run start; if the run hasn't finished, an alert fires but the run keeps going. `0` = off. Requires a notification webhook. |
 | Run timeout (hard) | Seconds from run start; on breach the run is force-failed, running tasks are killed, and the run ends as `timed_out`. `0` = off. |

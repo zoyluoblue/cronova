@@ -27,6 +27,7 @@ The console is a two-pane app: a fixed sidebar on the left for switching workspa
 | **Graph** | A cross-DAG graph of trigger dependencies (`trigger_after`) between workflows. |
 | **Pools** | Concurrency pools that cap how many task instances run at once — see [Admin pages](admin.md). |
 | **Variables & Connections** | Reusable variables, connections, and params for templating commands — see [Admin pages](admin.md). |
+| **Workers** | The dial-in remote worker fleet: join tokens, live state, drain/remove — see [Admin pages](admin.md). |
 | **Audit** | The audit log of who changed or triggered what. |
 | **API** | API token management plus the built-in OpenAPI reference. |
 

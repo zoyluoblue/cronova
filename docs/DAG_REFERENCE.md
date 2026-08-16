@@ -48,6 +48,8 @@ notify:
 | `catchup` | bool | `false` | Backfill missed periods between `start_date` and now. Backfilled runs are throttled so they never flood. |
 | `max_active_runs` | int | `1` | Maximum concurrent runs of this DAG (0 is treated as 1). |
 | `max_active_tasks` | int | `0` (unlimited) | Cap on this DAG's concurrently queued/running **tasks** across all of its runs — a per-DAG budget complementing the global pools. |
+| `execution_policy` | string | `parallel` | How queued runs are admitted when another run of this DAG is active: `parallel` (up to `max_active_runs` concurrently), `serial_wait` (one at a time; later runs queue in logical-date order), `serial_discard` (one at a time; runs arriving while busy are **cancelled**, visibly), or `serial_priority` (one at a time; the queue drains highest run priority first — set priority when triggering). Serial policies force at most **one** active run regardless of `max_active_runs`. |
+| `worker_group` | string | `""` (local) | Default dial-in [worker](#task-level-fields) group for every task that doesn't set its own `worker_group`. Empty = tasks run on the scheduler's configured local executor. |
 | `trigger_on_event` | list of strings | — | External event keys this DAG subscribes to: `POST /api/events {"key": …}` creates one event-triggered run per subscriber (idempotent per key). The event payload becomes the run's params. |
 | `default_retries` | int | `0` | Retry count applied to tasks that don't set their own `retries`. |
 | `default_retry_delay` | int (seconds) | `0` | Retry delay applied to tasks that don't set their own `retry_delay`. |
@@ -55,8 +57,9 @@ notify:
 | `dagrun_timeout` | int (seconds) | `0` | Run-level hard deadline, measured from run start. `0` = no limit. |
 | `tasks` | list | — (required) | The task list (see below). |
 | `trigger_after` | list of `{dag_id}` | — | Run this DAG after another DAG **succeeds** (cross-DAG dependency). Visualized in the console's DAG Graph. |
-| `notify` | `{url, on, format}` | — | Webhook notification. `on` is a list of `"failure"` and/or `"success"`. |
-| `notify.format` | string | `raw` | One of `raw`, `slack`, `feishu`, `dingtalk`. `raw` posts the full JSON payload; the chat formats wrap the summary text in the platform's incoming-webhook envelope, so the message renders in Slack/Feishu/DingTalk without a relay service. |
+| `notify` | `{url, on, format, group}` | — | Run-completion notification. `on` is a list of `"failure"` and/or `"success"`. `url` is an `http(s)://` webhook **or** `mailto:addr[,addr]` (delivered through the server's `smtp:` relay). |
+| `notify.format` | string | `raw` | One of `raw`, `slack`, `feishu`, `dingtalk`, `email`. `raw` posts the full JSON payload; the chat formats wrap the summary text in the platform's incoming-webhook envelope, so the message renders in Slack/Feishu/DingTalk without a relay service; `email` is the plain-text mail body used for `mailto:` targets. |
+| `notify.group` | string | — | Name of an [alert group](#notifications-webhooks-email--alert-groups) — a named fan-out of 1–16 channels managed in the console or via `POST /api/alert-groups/{name}`. When set it **wins over** `notify.url` and every channel in the group is alerted. |
 
 Cron schedules are evaluated in **UTC** by default; prefix the expression with `CRON_TZ=<zone>` to evaluate it in a specific timezone:
 
@@ -65,6 +68,23 @@ schedule: "CRON_TZ=Asia/Shanghai 0 2 * * *"   # 02:00 Shanghai time, every day
 ```
 
 > `paused` is **not** a YAML field. Pausing is operational state managed from the console, CLI (`cronova pause <dag_id>`), or API, and is preserved across DAG reloads.
+
+### Notifications: webhooks, email & alert groups
+
+`notify.url` accepts two kinds of targets:
+
+- an `http(s)://` **incoming-webhook** URL — the run summary is POSTed as JSON, shaped by `notify.format`;
+- `mailto:addr[,addr]` — the alert is sent as **email** through the server's SMTP relay. This requires the `smtp:` section of the server config to be filled in; without it, mail channels fail delivery (logged, never blocking the scheduler).
+
+Instead of pasting the same URL into every DAG, `notify.group` references a named **alert group**: a reusable bundle of 1–16 channels, each with its own URL (webhook or `mailto:`) and format. Groups are managed in the console (Variables & Connections → Alert groups) or via the API (`GET /api/alert-groups`, `POST`/`DELETE /api/alert-groups/{name}`), and one run alert fans out to every channel of the group.
+
+```yaml
+notify:
+  group: oncall      # alert every channel of the "oncall" group
+  on: [failure]
+```
+
+Resolution is most-specific-first: a set `notify.group` wins over `notify.url`; a group name that no longer resolves (e.g. the group was deleted) falls back to the DAG's own `notify.url`, and then to the instance-wide default notify target — a dangling reference is logged loudly but never loses the alert.
 
 ## Definition snapshots
 
@@ -83,11 +103,12 @@ Each entry under `tasks:` describes one task.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `id` | string | — (required) | Task identifier, unique within the DAG. |
-| `type` | string | `shell` | One of `shell`, `python`, `sql`, `jar`, `http`. See [Task types](#task-types). |
+| `type` | string | `shell` | One of `shell`, `python`, `sql`, `jar`, `http`, `subdag`. See [Task types](#task-types). |
 | `command` | string | — | The command (shell), code (python), or query (sql). Supports [template variables](#template-variables). Not used for `http`. |
 | `deps` | list of task ids | — | Upstream tasks that must satisfy this task's `trigger_rule` before it runs. Edges are cycle-checked. |
 | `pool` | string | `default` | The [resource pool](#resource-pools) this task consumes a slot from. |
 | `priority` | int | `0` | Higher runs first when tasks contend for the same pool. |
+| `worker_group` | string | inherits DAG `worker_group` | Routes this task to a group of dial-in remote workers (the workers' `group` label, default `"default"`). Empty (and no DAG-level default) = run on the scheduler's local executor. |
 | `retries` | int | inherits `default_retries` | Times to retry on failure. |
 | `retry_delay` | int (seconds) | inherits `default_retry_delay` | Delay between retries. |
 | `retry_backoff` | string | `fixed` | How the wait between retries grows: `fixed` (constant `retry_delay`) or `exponential` (waits `retry_delay·2^(n-1)` before the n-th retry). |
@@ -98,8 +119,10 @@ Each entry under `tasks:` describes one task.
 | `when` | string | — | Runtime condition template (e.g. `"{{ params.env }}"` or `"{{ ti.check.proceed }}"`), evaluated once the task is otherwise ready. A falsy render (`""`, `false`, `0`, `no`, or an unresolved placeholder) marks the task **skipped**. |
 | `foreach` | list of strings | — | Fans the task out into one task per item at definition time: ids become `<id>_<index>`, `{{ item }}` / `{{ item_index }}` are substituted in `command`/`when`, and downstream `deps` on the original id cover every shard. Each shard keeps its own retries, log, and state. |
 | `conn` | string | — | Connection id for a `sql` task (selects driver + builds the DSN). |
-| `project` | string | — | Name of an uploaded project directory to stage as the working directory (shell tasks). See [Getting Started → Projects](GETTING_STARTED.md). |
+| `project` | string | — | Name of an uploaded project directory to stage as the working directory (shell tasks; not combinable with `worker_group`). See [Getting Started → Projects](GETTING_STARTED.md). |
 | `http` | object | — | HTTP request spec for `http` tasks (see below). |
+| `subdag` | string | — | For `type: subdag`: the DAG to run as a **sub-workflow**. The task launches a linked child run (visible in run history with trigger type `subdag` and a parent link) and mirrors its terminal state. Cancelling the parent cascades to the child; a task retry starts a fresh child run (the old one stays as history). Nesting is capped at 5 levels as a cycle backstop. |
+| `depends_on_dag` | object | — | Cross-DAG **wait**: hold this task until another DAG's matching period run has *succeeded*. Fields: `dag` (target id), `offset` (which period, in [date-expression](#date-expressions) offset grammar — `""`/`same`, `- 1d`, `.month_start`…), `timeout` (seconds from run start; 0 = wait until `dagrun_timeout`), `on_timeout` (`fail` default, or `skip`). A failed target run keeps the wait alive (it may be retried); only the timeout resolves the standoff. |
 
 ### `http` task spec
 
@@ -122,6 +145,7 @@ Set under a task's `http:` key when `type: http`:
 | `sql` | in-process (native driver) | the SQL query; `conn` selects the connection | nothing extra |
 | `jar` | OS subprocess (`java`) | a `java -jar …` command | a JRE/JDK on the `PATH` |
 | `http` | in-process HTTP client | — (use the `http:` spec) | nothing extra |
+| `subdag` | scheduler-internal (child run) | — (use the `subdag:` field) | nothing extra |
 
 `sql` and `http` tasks are self-contained in the binary. `shell`, `python`, and `jar` tasks (and anything a shell task invokes) require that tool installed and on the **service** `PATH` — see [Deployment](DEPLOY.md).
 
@@ -164,6 +188,37 @@ Any `command`, `url`, header, `body`, or query can reference `{{ name }}` placeh
 | `{{ dag_id }}` | `CRONOVA_DAG_ID` | The DAG id. |
 | `{{ task_id }}` | `CRONOVA_TASK_ID` | This task's id. |
 | `{{ try_number }}` | `CRONOVA_TRY_NUMBER` | Attempt number (increments on retry). |
+
+When the DAG declares a `timezone:`, `logical_date`/`logical_datetime` render in
+that zone (the run's own calendar day), while storage stays UTC.
+
+### Date expressions
+
+`logical_date` / `logical_datetime` accept offsets, anchors, and custom
+formats directly inside the placeholder:
+
+```
+{{ logical_date[.anchor][ ±N<unit> ]... [| format] }}
+```
+
+| Piece | Values | Notes |
+|---|---|---|
+| anchor | `.month_start` `.month_end` `.week_start` `.week_end` | Binds to the base name, applies first; weeks start Monday; time resets to midnight. |
+| offset | `±N` + `d` (days) `h` (hours) `w` (weeks) `mo` (months) | Repeatable, applied left to right. `d`/`w`/`mo` are calendar arithmetic (wall clock survives DST); `h` is an absolute duration. |
+| format | `\|` + strftime subset: `%Y %y %m %d %H %M %S %%` | Default: `YYYY-MM-DD` for `logical_date`, RFC3339 for `logical_datetime`. |
+
+Examples:
+
+```yaml
+command: "python etl.py --day {{ logical_date - 1d | %Y%m%d }}"     # yesterday as 20260807
+command: "report.sh --from {{ logical_date.month_start }} --to {{ logical_date.month_end }}"
+command: "cleanup.sh --before {{ logical_date.month_start - 1d }}"  # last day of previous month
+command: "sync.sh --since {{ logical_datetime - 6h }}"
+```
+
+An expression that does not parse (unknown unit, bad `%` token, stray text) is
+left in the command verbatim — typos stay visible in the task log instead of
+silently rendering empty.
 
 Shell tasks do not inherit the scheduler's complete process environment. Cronova
 passes a small runtime-safe set (`PATH`, locale, home/temp and certificate

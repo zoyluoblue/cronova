@@ -165,10 +165,10 @@ func apiCatalog() []apiEndpoint {
 
 		// ---- Runs ----
 		{Method: "POST", Path: "/api/dags/{id}/trigger", Tag: "Runs",
-			Summary: "Trigger a run", Desc: "Start a manual run of a DAG. Optional params are injected as CRONOVA_PARAM_* env vars and {{ params.KEY }} template values.",
+			Summary: "Trigger a run", Desc: "Start a manual run of a DAG. Optional params are injected as CRONOVA_PARAM_* env vars and {{ params.KEY }} template values. Optional priority (±100, default 0): higher runs win dispatch-slot competition and drain first from a serial_priority queue.",
 			Params:       []apiParam{{Name: "id", In: "path", Required: true, Desc: "DAG id.", Example: "etl_daily"}},
-			Request:      map[string]any{"params": map[string]string{"date": "2026-07-05", "region": "us"}},
-			RequestDesc:  "Optional trigger-time params. Send an empty body for none.",
+			Request:      map[string]any{"params": map[string]string{"date": "2026-07-05", "region": "us"}, "priority": 10},
+			RequestDesc:  "Optional trigger-time params and run priority. Send an empty body for defaults.",
 			OptionalBody: true,
 			Response:     map[string]any{"run_id": "etl_daily__manual__2026-07-05T12:00:00Z"}},
 		{Method: "POST", Path: "/api/dags/{id}/backfill", Tag: "Runs",
@@ -269,6 +269,24 @@ func apiCatalog() []apiEndpoint {
 			Params:   []apiParam{{Name: "key", In: "path", Required: true, Desc: "Variable key.", Example: "warehouse_url"}},
 			Response: map[string]any{"deleted": true}},
 
+		// ---- Alert groups ----
+		{Method: "GET", Path: "/api/alert-groups", Tag: "Alert groups",
+			Summary: "List alert groups", Desc: "Return named notify-channel fan-outs referenced by a DAG's notify.group.",
+			Response: []any{map[string]any{"name": "oncall", "channels": []any{
+				map[string]any{"url": "https://hooks.slack.com/services/T/B/x", "format": "slack"},
+				map[string]any{"url": "mailto:oncall@example.com", "format": "email"}}}}},
+		{Method: "POST", Path: "/api/alert-groups/{name}", Tag: "Alert groups",
+			Summary: "Create or update an alert group", Desc: "Upsert a named fan-out of 1-16 channels. Each channel url is http(s) or mailto:; format is raw/slack/feishu/dingtalk/email.",
+			Params: []apiParam{{Name: "name", In: "path", Required: true, Desc: "Group name.", Example: "oncall"}},
+			Request: map[string]any{"channels": []any{
+				map[string]any{"url": "https://hooks.slack.com/services/T/B/x", "format": "slack"},
+				map[string]any{"url": "mailto:oncall@example.com", "format": "email"}}},
+			Response: map[string]any{"ok": true}},
+		{Method: "DELETE", Path: "/api/alert-groups/{name}", Tag: "Alert groups",
+			Summary: "Delete an alert group", Desc: "Remove a group. DAGs still referencing it fall back to their own notify.url or the instance default.",
+			Params:   []apiParam{{Name: "name", In: "path", Required: true, Desc: "Group name.", Example: "oncall"}},
+			Response: map[string]any{"deleted": true}},
+
 		// ---- Connections ----
 		{Method: "GET", Path: "/api/connections", Tag: "Connections",
 			Summary: "List connections", Desc: "Return structured connections ({{ conn.ID.host }}). Passwords are never returned; has_password flags whether one is set.",
@@ -295,6 +313,31 @@ func apiCatalog() []apiEndpoint {
 			Summary: "Delete a project", Desc: "Remove an uploaded project directory and all its files.",
 			Params:   []apiParam{{Name: "name", In: "path", Required: true, Desc: "Project name.", Example: "my_app"}},
 			Response: map[string]any{"ok": true}},
+
+		// ---- Workers ----
+		{Method: "GET", Path: "/api/workers", Tag: "Workers",
+			Summary: "List workers", Desc: "Return every registered dial-in worker with its live state (online/offline/lost), draining flag, labels (the `group` label is the routing group tasks target with worker_group), version, active task count, and last heartbeat.",
+			Response: []any{map[string]any{"worker_id": "wk_ab12cd34ef", "name": "gpu-1", "labels": map[string]string{"group": "gpu"}, "state": "online", "draining": false, "version": "1.4.0", "active_tasks": 2, "last_heartbeat": "2026-07-05T12:00:00Z", "created_at": "2026-07-01T09:00:00Z"}}},
+		{Method: "POST", Path: "/api/workers/join", Tag: "Workers", NoAuth: true,
+			Summary: "Join a worker (bootstrap)", Desc: "Exchange a one-time join token + CSR for a signed worker certificate and the hub address. The token is the credential (rate-limited like login) and is consumed on first use; the worker's private key never leaves the worker. 409 with code workers_disabled when the server has no worker_listen configured.",
+			Request:     map[string]any{"token": "cwj_ab12cd34…", "name": "gpu-1", "labels": map[string]string{"group": "gpu"}, "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n…"},
+			RequestDesc: "token and csr_pem are required; name (≤64 chars) and up to 16 labels are optional. The `group` label routes tasks (default \"default\").",
+			Response:    map[string]any{"worker_id": "wk_ab12cd34ef", "cert_pem": "-----BEGIN CERTIFICATE-----\n…", "ca_pem": "-----BEGIN CERTIFICATE-----\n…", "hub_addr": "sched.example.com:9091"}},
+		{Method: "POST", Path: "/api/workers/{id}/drain", Tag: "Workers",
+			Summary: "Drain or undrain a worker", Desc: "Toggle draining: a draining worker finishes its running tasks but receives no new assignments — use it before maintenance or removal.",
+			Params:   []apiParam{{Name: "id", In: "path", Required: true, Desc: "Worker id.", Example: "wk_ab12cd34ef"}},
+			Request:  map[string]any{"draining": true},
+			Response: map[string]any{"ok": true, "draining": true}},
+		{Method: "DELETE", Path: "/api/workers/{id}", Tag: "Workers",
+			Summary: "Remove a worker", Desc: "Delete the registration and close any live session. Removal is effective immediately and permanent — the worker's certificate stops being accepted, so a removed worker cannot reconnect; it must re-join with a fresh token.",
+			Params:   []apiParam{{Name: "id", In: "path", Required: true, Desc: "Worker id.", Example: "wk_ab12cd34ef"}},
+			Response: map[string]any{"deleted": true}},
+		{Method: "POST", Path: "/api/worker-tokens", Tag: "Workers",
+			Summary: "Mint a worker join token", Desc: "Create a one-time join token (admin). The plaintext is returned ONCE in this response and never again — only its hash is stored. Pass it to `cronova worker -server <url> -join-token <token>` on the worker host. 409 with code workers_disabled when worker_listen is not configured.",
+			Request:      map[string]any{"ttl": "24h"},
+			RequestDesc:  "Optional ttl as a Go duration (default 24h, max 720h). Send an empty body for the default.",
+			OptionalBody: true,
+			Response:     map[string]any{"token": "cwj_ab12cd34…", "expires_at": "2026-07-06T12:00:00Z"}},
 
 		// ---- Tokens ----
 		{Method: "GET", Path: "/api/tokens", Tag: "Tokens",
@@ -354,6 +397,7 @@ var tagOrder = []struct{ name, desc string }{
 	{"Pools", "Concurrency pools."},
 	{"Variables", "Shared key-value variables ({{ var.KEY }})."},
 	{"Connections", "Structured credentials ({{ conn.ID.field }})."},
+	{"Workers", "Dial-in remote workers: join tokens, fleet state, drain and removal."},
 	{"Tokens", "API tokens for programmatic (Bearer) access."},
 	{"Operations", "Dashboard and audit trail."},
 	{"System", "Auth, health probes, and metrics."},

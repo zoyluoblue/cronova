@@ -42,13 +42,40 @@ type Config struct {
 	// KeyFile holds the hex key that encrypts connection passwords at rest.
 	// Auto-generated (0600) on first serve. "none" disables encryption.
 	KeyFile string `yaml:"key_file"`
-	// Notify is the instance-wide default webhook: DAGs without their own
-	// notify_url alert here (failure-only unless they set notify_on), and
-	// scheduler-level events (executor down, retention failures) post here too.
+	// WorkerListen enables the dial-in worker hub: a mTLS gRPC listener remote
+	// workers connect to (e.g. ":9091"). Empty = no worker hub (single-binary
+	// default). The embedded CA lives next to the key file.
+	WorkerListen string `yaml:"worker_listen"`
+	// WorkerAdvertise is the host:port workers are told to dial at join time
+	// (defaults to the join request's host + the WorkerListen port). Set it
+	// when the scheduler sits behind NAT or a load balancer.
+	WorkerAdvertise string `yaml:"worker_advertise"`
+	// WorkerJoinTokens pre-seeds one-time join tokens at startup (24h TTL,
+	// hashed at rest) so an orchestrated stack (docker compose, k8s) can join
+	// workers without a manual mint step. Comma-separated in the env form.
+	WorkerJoinTokens []string `yaml:"worker_join_tokens"`
+	// Notify is the instance-wide default alert destination: DAGs without their
+	// own notify settings alert here (failure-only unless they set notify_on),
+	// and scheduler-level events (executor down, retention failures) post here
+	// too. Group names an alert group and wins over URL when both are set; URL
+	// also accepts mailto:addr[,addr] once smtp is configured.
 	Notify struct {
 		URL    string `yaml:"url"`
-		Format string `yaml:"format"` // ""/raw | slack | feishu | dingtalk
+		Format string `yaml:"format"` // ""/raw | slack | feishu | dingtalk | email
+		Group  string `yaml:"group"`
 	} `yaml:"notify"`
+	// SMTP is the mail relay behind mailto: notify targets. Password accepts an
+	// enc:v1: value encrypted with the key file (same scheme as connections).
+	// Port 465 = implicit TLS; otherwise STARTTLS is required unless
+	// allow_plaintext is set (lab relays).
+	SMTP struct {
+		Host           string `yaml:"host"`
+		Port           int    `yaml:"port"` // default 587
+		Username       string `yaml:"username"`
+		Password       string `yaml:"password"`
+		From           string `yaml:"from"` // default: username
+		AllowPlaintext bool   `yaml:"allow_plaintext"`
+	} `yaml:"smtp"`
 	// Log controls the process-wide logger: level debug|info|warn|error,
 	// format text|json (json for Loki/ELK ingestion).
 	Log struct {
@@ -128,8 +155,28 @@ func applyEnv(c *Config) {
 	env("CRONOVA_RETENTION", &c.Retention)
 	env("CRONOVA_AUDIT_RETENTION", &c.AuditRetention)
 	env("CRONOVA_KEY_FILE", &c.KeyFile)
+	env("CRONOVA_WORKER_LISTEN", &c.WorkerListen)
+	env("CRONOVA_WORKER_ADVERTISE", &c.WorkerAdvertise)
+	if v, ok := os.LookupEnv("CRONOVA_WORKER_JOIN_TOKENS"); ok {
+		c.WorkerJoinTokens = nil
+		for _, t := range strings.Split(v, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				c.WorkerJoinTokens = append(c.WorkerJoinTokens, t)
+			}
+		}
+	}
 	env("CRONOVA_NOTIFY_URL", &c.Notify.URL)
 	env("CRONOVA_NOTIFY_FORMAT", &c.Notify.Format)
+	env("CRONOVA_NOTIFY_GROUP", &c.Notify.Group)
+	env("CRONOVA_SMTP_HOST", &c.SMTP.Host)
+	if v, ok := os.LookupEnv("CRONOVA_SMTP_PORT"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			c.SMTP.Port = n
+		}
+	}
+	env("CRONOVA_SMTP_USERNAME", &c.SMTP.Username)
+	env("CRONOVA_SMTP_PASSWORD", &c.SMTP.Password)
+	env("CRONOVA_SMTP_FROM", &c.SMTP.From)
 	env("CRONOVA_LOG_LEVEL", &c.Log.Level)
 	env("CRONOVA_LOG_FORMAT", &c.Log.Format)
 	envInt := func(key string, dst *int) {

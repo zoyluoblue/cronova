@@ -1,0 +1,168 @@
+# cronova — Docker stacks.
+# See docs/DEPLOY.md "Docker" for first login, backups, and upgrades.
+#
+# Minimal (default, no profile): ONE container, SQLite in a named volume.
+#
+#   docker compose up -d          # build + start; console on http://localhost:8090
+#   docker compose exec cronova /cronova users add admin -role admin
+#
+# Full (distributed demo/integration bed): PostgreSQL metadata store + a
+# scheduler with the dial-in worker hub + two remote workers that join
+# automatically via pre-seeded one-time tokens.
+#
+#   CRONOVA_JOIN_TOKEN_1=$(openssl rand -hex 16) \
+#   CRONOVA_JOIN_TOKEN_2=$(openssl rand -hex 16) \
+#   docker compose --profile full up -d
+#
+# Route a task to the workers with `worker_group: default` in its YAML.
+
+services:
+  cronova:
+    build: .
+    image: cronova:latest
+    restart: unless-stopped
+    # docker-init as PID 1: reaps any orphaned grandchildren of shell tasks.
+    init: true
+    # Give in-flight tasks and the scheduler's graceful shutdown room to finish.
+    stop_grace_period: 30s
+    ports:
+      # Console + API. Auth is enabled below, so publishing on all host
+      # interfaces is acceptable; prefer "127.0.0.1:8090:8090" to keep it
+      # host-local behind a reverse proxy or SSH tunnel.
+      - "8090:8090"
+    environment:
+      # Bind all container interfaces so the published port is reachable. A
+      # non-loopback bind REQUIRES auth — `serve` refuses to start otherwise
+      # (validateHTTPExposure) — so keep CRONOVA_AUTH=true.
+      CRONOVA_HTTP: 0.0.0.0:8090
+      CRONOVA_AUTH: "true"
+      # One-time admin bootstrap (optional): put both in a .env file next to
+      # this compose file for the FIRST `docker compose up`, then remove them.
+      # The password is hashed straight into SQLite and scrubbed from the
+      # server process's environment on start. Without them, create the admin
+      # interactively instead:
+      #   docker compose exec cronova /cronova users add admin -role admin
+      CRONOVA_ADMIN_USER: ${CRONOVA_ADMIN_USER:-}
+      CRONOVA_ADMIN_PASSWORD: ${CRONOVA_ADMIN_PASSWORD:-}
+      # Behind an HTTPS reverse proxy, mark the session cookie Secure and trust
+      # the proxy's X-Forwarded-For:
+      # CRONOVA_SECURE_COOKIE: "true"
+      # CRONOVA_TRUSTED_PROXIES: 172.16.0.0/12
+      # GitOps hot-reload of the dags dir (pairs with the bind mount below):
+      # CRONOVA_RELOAD: 30s
+    volumes:
+      # One named volume holds all state: SQLite DB, dags/, logs/, projects/,
+      # workspaces/, and the connection-encryption key (cronova.key).
+      - cronova-data:/var/lib/cronova
+      # GitOps alternative: manage DAG YAML from a checkout on the host instead
+      # of the console editor (read-only so the console cannot edit them):
+      # - ./dags:/var/lib/cronova/dags:ro
+    healthcheck:
+      # Distroless image: no shell/wget — the binary probes /readyz itself.
+      test: ["CMD", "/cronova", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---- full profile: PostgreSQL + worker hub + two dial-in workers ----
+
+  postgres:
+    profiles: ["full"]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cronova
+      POSTGRES_PASSWORD: ${CRONOVA_PG_PASSWORD:-cronova-dev}
+      POSTGRES_DB: cronova
+    volumes:
+      - cronova-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cronova -d cronova"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  cronova-full:
+    profiles: ["full"]
+    build: .
+    image: cronova:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      CRONOVA_DB: postgres://cronova:${CRONOVA_PG_PASSWORD:-cronova-dev}@postgres:5432/cronova?sslmode=disable
+      CRONOVA_HTTP: 0.0.0.0:8090
+      CRONOVA_AUTH: "true"
+      CRONOVA_ADMIN_USER: ${CRONOVA_ADMIN_USER:-}
+      CRONOVA_ADMIN_PASSWORD: ${CRONOVA_ADMIN_PASSWORD:-}
+      # Dial-in worker hub (mTLS gRPC). Workers resolve this service name on
+      # the compose network; the CA lives in the state volume.
+      CRONOVA_WORKER_LISTEN: 0.0.0.0:9091
+      CRONOVA_WORKER_ADVERTISE: cronova-full:9091
+      # Pre-seeded ONE-TIME join tokens (24h TTL, hashed at rest) consumed by
+      # the two worker containers below. Generate real values via .env — the
+      # compose refuses to seed short/guessable ones.
+      CRONOVA_WORKER_JOIN_TOKENS: ${CRONOVA_JOIN_TOKEN_1:-},${CRONOVA_JOIN_TOKEN_2:-}
+    volumes:
+      - cronova-full-data:/var/lib/cronova
+    healthcheck:
+      test: ["CMD", "/cronova", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Workers hold no published ports: they DIAL the hub (NAT-friendly). Their
+  # state volume keeps the issued mTLS identity plus in-flight attempt state,
+  # so a container restart re-adopts running tasks instead of re-running them
+  # (the join token is ignored once an identity exists).
+  cronova-worker-1:
+    profiles: ["full"]
+    image: cronova:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    depends_on:
+      cronova-full:
+        condition: service_healthy
+    command:
+      - worker
+      - -state-dir=/var/lib/cronova/worker
+      - -server=http://cronova-full:8090
+      - -join-token=${CRONOVA_JOIN_TOKEN_1:-}
+      - -name=worker-1
+      - -labels=group=default
+    volumes:
+      - cronova-worker1-data:/var/lib/cronova
+
+  cronova-worker-2:
+    profiles: ["full"]
+    image: cronova:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    depends_on:
+      cronova-full:
+        condition: service_healthy
+    command:
+      - worker
+      - -state-dir=/var/lib/cronova/worker
+      - -server=http://cronova-full:8090
+      - -join-token=${CRONOVA_JOIN_TOKEN_2:-}
+      - -name=worker-2
+      - -labels=group=default
+    volumes:
+      - cronova-worker2-data:/var/lib/cronova
+
+volumes:
+  cronova-data:
+  cronova-pgdata:
+  cronova-full-data:
+  cronova-worker1-data:
+  cronova-worker2-data:

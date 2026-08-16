@@ -48,9 +48,22 @@ func (c *Client) ListPools(ctx context.Context) ([]model.Pool, error) {
 
 // TriggerDAG starts a manual run and returns its run id.
 func (c *Client) TriggerDAG(ctx context.Context, dagID string, params map[string]string) (string, error) {
+	return c.TriggerDAGPriority(ctx, dagID, params, 0)
+}
+
+// TriggerDAGPriority is TriggerDAG with an explicit run priority (±100;
+// higher wins dispatch competition; 0 = default).
+func (c *Client) TriggerDAGPriority(ctx context.Context, dagID string, params map[string]string, priority int) (string, error) {
 	var body []byte
-	if len(params) > 0 {
-		b, err := jsonBody(map[string]any{"params": params})
+	if len(params) > 0 || priority != 0 {
+		payload := map[string]any{}
+		if len(params) > 0 {
+			payload["params"] = params
+		}
+		if priority != 0 {
+			payload["priority"] = priority
+		}
+		b, err := jsonBody(payload)
 		if err != nil {
 			return "", err
 		}

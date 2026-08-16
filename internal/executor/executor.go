@@ -14,6 +14,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -52,6 +53,14 @@ type Status struct {
 
 // TimeoutExitCode marks a task killed for exceeding its timeout.
 const TimeoutExitCode = 124
+
+// OutputPath is where an attempt may leave its $CRONOVA_OUTPUT JSON — next to
+// its log, per-try so a retry can't read a stale file. Shared here because the
+// scheduler derives it for local tasks and the worker hub re-derives it when
+// adopting a remote attempt after a scheduler restart.
+func OutputPath(logPath string, try int) string {
+	return fmt.Sprintf("%s.out%d.json", logPath, try)
+}
 
 // Executor launches, probes, and cancels tasks. Launch is idempotent on
 // Spec.TaskRunID.

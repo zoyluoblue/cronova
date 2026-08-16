@@ -179,6 +179,7 @@ created run example_etl__manual_1783442227904284000 (a running `cronova serve` w
 | Flag | Default | Description |
 |---|---|---|
 | `-params` | | Trigger params as a JSON object of string values, e.g. `'{"day":"2026-01-01"}'`. |
+| `-priority` | `0` | Run priority ±100. Higher wins dispatch-slot competition across runs and drains first from a `serial_priority` queue. |
 | `-db` / `-dags` | `data/cronova.db` / `dags` | Local DB and DAG directory. |
 
 The run is queued in the database; a running `cronova serve` picks it up and executes it.
@@ -419,6 +420,51 @@ ID  NAME        ROLE    PREFIX           LAST_USED
 | `create <name>` | `-role admin\|viewer` (default `admin`), `-db` | Mint a token. The plaintext is shown once; only a hash is stored. |
 | `list` | `-db` | List tokens with role, prefix, and last-used time. |
 | `delete <id>` | `-db` | Revoke a token by ID. |
+
+### `cronova worker`
+
+Run this host as a **dial-in remote worker**: it joins a scheduler once with a
+one-time token (generating a local keypair; only the CSR travels) and then
+holds a single outbound mTLS stream for assignments, cancels, heartbeats, and
+log streaming. No inbound port, no shared filesystem. A worker restart
+re-adopts its running tasks instead of killing them.
+
+```console
+$ cronova worker -server http://sched.example:8090 -join-token cwj_9a1f… -name gpu-1 -labels group=gpu
+joined as wk_76417dbc51 (state in /home/etl/.cronova/worker)
+time=… msg="connected to hub" worker=wk_76417dbc51 addr=sched.example:9091 heartbeat=5s
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-server` | `$CRONOVA_SERVER` | Scheduler console URL (join only). |
+| `-join-token` | `$CRONOVA_JOIN_TOKEN` | One-time join token (mint with `cronova workers token`). Ignored once an identity exists — restarts are idempotent. |
+| `-name` | hostname | Display name. |
+| `-labels` | `group=default` | Comma-separated `key=value` routing labels; `group` is the worker group tasks target with `worker_group:`. |
+| `-hub` | server-advertised | Override the hub `host:port` (NAT / port-forward setups). |
+| `-state-dir` | `~/.cronova/worker` | Identity, attempt state, and log spool. |
+
+### `cronova workers`
+
+Manage the worker fleet through the REST API (`-server`/`-token` or `CRONOVA_SERVER`/`CRONOVA_TOKEN`).
+
+```console
+$ cronova workers token
+join token (one-time, expires 2026-08-09T03:20:11Z):
+cwj_9a1f0c…
+on the worker host: cronova worker -server <console-url> -join-token <token>
+
+$ cronova workers list
+WORKER         NAME             GROUP      STATE    TASKS  LAST HEARTBEAT
+wk_76417dbc51  gpu-1            gpu        online   2      2026-08-08T03:20:41Z
+```
+
+| Subcommand | Flags | Description |
+|---|---|---|
+| `token` | `-ttl` (default `24h`) | Mint a one-time join token (admin). Shown once; only a hash is stored. |
+| `list` | | List workers with group, state (`online`/`offline`/`lost`, `+drain`), load, and last heartbeat. |
+| `drain <worker_id>` | `-off` to undrain | Stop new assignments; running tasks finish. |
+| `remove <worker_id>` | | Delete the registration and close its session. A removed worker cannot reconnect. |
 
 ### `cronova mcp`
 

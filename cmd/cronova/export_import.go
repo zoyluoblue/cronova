@@ -17,7 +17,8 @@ import (
 //	cronova export <dest-dir> -server http://host:8090 -token $TOKEN
 //
 // dest/dags/*.yaml (full definitions), dest/pools.json, dest/variables.json,
-// dest/connections.json. Connection PASSWORDS are deliberately excluded (the
+// dest/connections.json, dest/alert-groups.json. Connection PASSWORDS are
+// deliberately excluded (the
 // API never returns them); after import they must be re-entered — a bundle you
 // can email must not carry secrets. Run history and logs are not exported
 // (that is `cronova backup`'s job).
@@ -58,7 +59,7 @@ func cmdExport(args []string) error {
 	}
 	fmt.Printf("dags        → %d file(s)\n", len(list))
 
-	for name, path := range map[string]string{"pools.json": "/api/pools", "variables.json": "/api/variables", "connections.json": "/api/connections"} {
+	for name, path := range map[string]string{"pools.json": "/api/pools", "variables.json": "/api/variables", "connections.json": "/api/connections", "alert-groups.json": "/api/alert-groups"} {
 		var raw json.RawMessage
 		if _, err := c.CallJSON(ctx, "GET", path, client.Options{}, &raw); err != nil {
 			return fmt.Errorf("export %s: %w", name, err)
@@ -152,6 +153,27 @@ func cmdImport(args []string) error {
 		}
 		if len(conns) > 0 {
 			fmt.Printf("connections → %d (passwords NOT restored — re-enter them in the console)\n", len(conns))
+		}
+	}
+
+	if b, err := os.ReadFile(filepath.Join(src, "alert-groups.json")); err == nil {
+		var groups []struct {
+			Name     string          `json:"name"`
+			Channels json.RawMessage `json:"channels"`
+		}
+		if err := json.Unmarshal(b, &groups); err != nil {
+			return fmt.Errorf("alert-groups.json: %w", err)
+		}
+		for _, gr := range groups {
+			body, _ := json.Marshal(map[string]json.RawMessage{"channels": gr.Channels})
+			if _, err := c.Call(ctx, "POST", "/api/alert-groups/{name}", client.Options{
+				Path: map[string]string{"name": gr.Name}, Body: body,
+			}); err != nil {
+				return fmt.Errorf("import alert group %s: %w", gr.Name, err)
+			}
+		}
+		if len(groups) > 0 {
+			fmt.Printf("alert groups→ %d\n", len(groups))
 		}
 	}
 

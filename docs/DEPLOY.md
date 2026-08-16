@@ -1,4 +1,4 @@
-# Deploying cronova (Linux & macOS)
+# Deploying cronova (Linux, macOS & Docker)
 
 cronova is a **scheduler**, not a runtime. It schedules DAGs and launches each
 task as an OS subprocess that runs with the **host machine's own interpreters**
@@ -13,12 +13,13 @@ Both platforms install the same way (one-click `curl | sudo bash` below); they
 differ only in the service manager and file layout — see
 [Platform layout](#platform-layout).
 
-> Why not Docker? A container only sees the interpreters baked into its image,
+> Why native first? A container only sees the interpreters baked into its image,
 > not the host's. Containerising a polyglot subprocess scheduler therefore forces
 > you to either bloat the image with every runtime, or lose access to the host
-> tooling the tasks depend on. Native + systemd sidesteps both. (If you still
-> want the scheduler containerised, run the standalone `cronova-executor` on the
-> host and point the scheduler at it over gRPC — see the README.)
+> tooling the tasks depend on. Native + systemd sidesteps both. If your
+> workload fits inside a container anyway (`http`/`sql` operators, simple shell
+> tasks) — or you pair the container with a host-side `cronova-executor` — see
+> [Docker](#docker-docker-compose).
 
 ## Quick install (one-click)
 
@@ -314,6 +315,222 @@ on macOS (override with `key_file:` in `cronova.yaml` or `CRONOVA_KEY_FILE`).
 Include it in the same backup as the SQLite DB: a database restored without its
 key file has unreadable connection passwords, and they must be re-entered.
 
+## Docker (docker compose)
+
+The repo ships a multi-stage `Dockerfile` (static binary → distroless, with a
+static busybox `sh`) and a minimal `docker-compose.yml`: **one container, SQLite
+state in one named volume**. The web console is embedded in the binary, so the
+image needs no extra assets. The trade-off from the note at the top still
+applies — inside the container, tasks only see what the image carries:
+
+| Task `type` | In the container |
+|---|---|
+| `http`, `sql` | work — self-contained in the binary (CA certificates included for HTTPS) |
+| `shell` | works, against **busybox** `sh` + common applets (`sed`, `awk`, `wget`, …) — no bash, python, java |
+| `python`, `jar` | **not available** — no interpreter in the image |
+
+For polyglot workloads keep the native install above, or run the standalone
+`cronova-executor` on a host that has the tools and point the container at it:
+`CRONOVA_EXECUTOR=tcp://host:9445` plus the `CRONOVA_EXEC_TLS_CERT`/`_KEY`/`_CA`
+mutual-TLS variables (see `cronova.yaml.example`).
+
+### Quick start
+
+```bash
+git clone https://github.com/zoyluoblue/cronova && cd cronova
+docker compose up -d          # builds the image on first run
+docker compose ps             # wait for status "healthy"
+```
+
+Open <http://localhost:8090>. The compose file publishes port 8090 on all host
+interfaces; change the mapping to `127.0.0.1:8090:8090` to keep it host-local
+behind a reverse proxy or SSH tunnel. The container's health is probed by the
+binary itself (`cronova healthcheck`, which hits `/readyz`) — distroless has no
+shell or curl for a script-based probe, and none is needed.
+
+The first start seeds the example DAGs into the volume (the same seeding the
+native installer does); pause or delete them from the console once you have
+your own.
+
+### First login (admin bootstrap)
+
+The compose file enables authentication (`CRONOVA_AUTH=true`) — required
+anyway, because `serve` **refuses to start** with an unauthenticated console on
+a non-loopback bind — and bakes in **no default credentials**. Create the first
+admin one of two ways:
+
+**Interactively** (recommended — nothing touches disk or shell history):
+
+```bash
+docker compose exec cronova /cronova users add admin -role admin
+# password: ...            (prompted; hashed into SQLite)
+```
+
+**Via first-boot environment**: put both variables in a `.env` file next to
+`docker-compose.yml` before the first `docker compose up`:
+
+```bash
+CRONOVA_ADMIN_USER=admin
+CRONOVA_ADMIN_PASSWORD=change-me-now
+```
+
+`serve` seeds the account (idempotently — re-supplying the same value is a
+no-op, a changed value rotates the password), stores only the **hash** in
+SQLite, and scrubs `CRONOVA_ADMIN_PASSWORD` from its process environment before
+any task runs. Remove both lines from `.env` after the first login; the
+account persists in the database.
+
+Manage accounts later with the same subcommand:
+
+```bash
+docker compose exec cronova /cronova users list
+docker compose exec cronova /cronova users passwd admin
+```
+
+### Volumes & backup
+
+Everything stateful lives in the single `cronova-data` volume mounted at
+`/var/lib/cronova`: the SQLite DB (`data/cronova.db`), `dags/`, `logs/`,
+`projects/`, `workspaces/`, and the auto-generated encryption key
+(`cronova.key`). Upgrading or recreating the container never touches it.
+
+`cronova backup` works unchanged inside the container (live-safe `VACUUM INTO`
+snapshot — see [Backup & restore](#backup--restore)); the image pre-creates
+`/var/lib/cronova/backups` for the destination:
+
+```bash
+docker compose exec cronova /cronova backup /var/lib/cronova/backups/$(date +%F)
+docker compose cp cronova:/var/lib/cronova/backups/$(date +%F) ./cronova-backup-$(date +%F)
+```
+
+To restore, stop the scheduler, copy the backup back into the volume, and
+restart — the image's busybox shell makes the one-off container trivial:
+
+```bash
+docker compose stop cronova
+docker compose run --rm --entrypoint /bin/sh cronova -c \
+  'cp /var/lib/cronova/backups/2026-08-08/cronova.db /var/lib/cronova/data/cronova.db'
+docker compose start cronova
+```
+
+### Environment reference
+
+Paths are baked into the image so `docker exec` subcommands (`users`, `backup`,
+`healthcheck`) resolve the same files as the server. Everything else follows
+the normal precedence: flag > `CRONOVA_*` env > config file > default.
+
+| Variable | Container default | Meaning |
+|---|---|---|
+| `CRONOVA_HTTP` | `0.0.0.0:8090` (compose) | console/API bind address |
+| `CRONOVA_AUTH` | `true` (compose) | require login for console + API |
+| `CRONOVA_ADMIN_USER` / `CRONOVA_ADMIN_PASSWORD` | unset | first-boot admin seed (remove after first login) |
+| `CRONOVA_DB` | `/var/lib/cronova/data/cronova.db` | SQLite path — or a `postgres://` DSN |
+| `CRONOVA_DAGS` | `/var/lib/cronova/dags` | DAG YAML directory (console-editable) |
+| `CRONOVA_LOGS` | `/var/lib/cronova/logs` | task log directory |
+| `CRONOVA_PROJECTS` | `/var/lib/cronova/projects` | uploaded project files |
+| `CRONOVA_WORKSPACES` | `/var/lib/cronova/workspaces` | per-attempt project workspaces |
+| `CRONOVA_KEY_FILE` | `/var/lib/cronova/cronova.key` | connection-encryption key (back it up with the DB) |
+| `CRONOVA_RELOAD` | unset (`0` = off) | GitOps: re-scan the dags dir this often (e.g. `30s`) |
+| `CRONOVA_TICK` | `2s` | scheduling loop interval |
+| `CRONOVA_RETENTION` / `CRONOVA_AUDIT_RETENTION` | `2160h` / `8760h` | prune finished runs / audit entries |
+| `CRONOVA_NOTIFY_URL` / `CRONOVA_NOTIFY_FORMAT` | unset | instance-wide default webhook (`slack`/`feishu`/`dingtalk`/raw) |
+| `CRONOVA_LOG_LEVEL` / `CRONOVA_LOG_FORMAT` | `info` / `text` | server logging (`json` for Loki/ELK) |
+| `CRONOVA_SECURE_COOKIE` | unset | mark the session cookie `Secure` behind HTTPS |
+| `CRONOVA_TRUSTED_PROXIES` | unset | CIDRs whose `X-Forwarded-For` is trusted |
+| `CRONOVA_SESSION_TTL` | `24h` | console session lifetime |
+| `CRONOVA_EXECUTOR` | unset (in-process) | remote executor target (`tcp://…` + TLS vars) |
+
+`CRONOVA_ALLOW_UNAUTHENTICATED_REMOTE` exists but is **dangerous** — it is the
+explicit opt-out that lets an unauthenticated console bind non-loopback. Leave
+it unset.
+
+### Upgrading the container
+
+State lives in the volume and the schema migrates automatically on start, so an
+upgrade is just a newer image:
+
+```bash
+git pull                      # or bump the image tag once releases are published
+docker compose build --pull   # --pull refreshes the Go + distroless base images
+docker compose up -d          # recreates the container; volume is untouched
+```
+
+Note the in-container scheduler uses the **in-process executor**: tasks that are
+mid-flight when the container stops are failed over on restart (they do not keep
+running, unlike the native install's standalone-executor pair). Upgrade in a
+quiet window, or point the container at a host-side executor. `cronova update`
+(the native self-updater) does not apply in Docker — the binary lives in a
+read-only image layer; upgrade the image instead.
+
+## Distributed workers (dial-in)
+
+cronova can fan task execution out to remote **workers** that *dial in* to the
+scheduler — no inbound port, no reachable address, and no shared filesystem is
+required on the worker side, so a worker behind NAT or in another network
+works out of the box. Everything rides one mTLS gRPC stream per worker: task
+assignments, cancellations, heartbeats, live log bytes (streamed back into the
+scheduler's normal per-run log files — the console tails them as if the task
+were local), and each task's `$CRONOVA_OUTPUT` (so `{{ ti.task.key }}` works
+across machines).
+
+**1. Enable the hub on the scheduler** (`cronova.yaml` or env):
+
+```yaml
+worker_listen: ":9091"                 # mTLS gRPC listener for worker sessions
+worker_advertise: "sched.example:9091" # address workers are told to dial
+```
+
+The first start mints an embedded CA (`cronova-ca.crt/.key` next to the key
+file — back it up with the rest of your key material).
+
+**2. Mint a one-time join token** (admin):
+
+```bash
+cronova workers token -server http://sched.example:8090 -token $ADMIN_TOKEN
+```
+
+**3. Join and run the worker** on the remote host:
+
+```bash
+cronova worker -server http://sched.example:8090 -join-token cwj_... -name gpu-1 -labels group=gpu
+```
+
+The worker generates a keypair locally, sends a CSR, and receives an mTLS
+client certificate (the private key never leaves the host). The identity is
+persisted under `-state-dir` (default `~/.cronova/worker`); later starts need
+no token, and a worker **restart re-adopts its running tasks** instead of
+killing or re-running them (same attempt-state machinery as the standalone
+executor).
+
+**4. Route tasks to a group** in the DAG YAML:
+
+```yaml
+tasks:
+  - id: train
+    worker_group: gpu        # or set a DAG-level worker_group default
+    command: python train.py
+```
+
+Tasks without `worker_group` keep running on the scheduler's local executor,
+exactly as before — zero workers configured means nothing changes.
+
+Semantics worth knowing:
+
+- **Routing** picks the least-loaded online, non-draining worker of the group.
+  A group with no live worker holds its tasks **queued** (with a log warning)
+  rather than failing them.
+- **Failover**: a worker silent for 3 heartbeat intervals is marked `lost`;
+  its in-flight tasks fail over and retry per each task's retry policy. A
+  clean worker restart re-adopts instead (no re-run).
+- **Fleet ops**: `cronova workers list|drain|remove`, the console's Workers
+  page, and `/metrics` (`cronova_workers{state=...}`,
+  `cronova_worker_active_tasks{worker=...}`).
+- **Limits**: uploaded-project staging (`project:`) assumes the scheduler's
+  filesystem and is refused on worker-routed tasks at save time. Typed tasks
+  (`python`/`sql`/`http`) run through `cronova run-op`, so the cronova binary
+  must sit at the same path on the worker host as on the scheduler (always
+  true for the Docker image's `/cronova`).
+
 ## Backup & restore
 
 `cronova backup` snapshots everything a restore needs, **while the server is
@@ -340,6 +557,32 @@ To restore:
 Runs that were mid-flight at backup time recover on start exactly as after a
 crash (re-attached under a standalone executor, failed over under the
 in-process one).
+
+## Email alerts (SMTP)
+
+Point cronova at a mail relay and any notify target can be a `mailto:` list —
+per-DAG (`notify.url: mailto:oncall@example.com`), inside an alert group
+channel, or as the instance-wide default:
+
+```yaml
+smtp:
+  host: smtp.example.com
+  port: 587                    # 465 = implicit TLS; anything else upgrades via STARTTLS
+  username: cronova@example.com
+  password: enc:v1:...         # encrypt with the key file, same scheme as connections
+  from: cronova@example.com    # default: username
+  # allow_plaintext: true      # lab relays without TLS only
+
+notify:
+  url: mailto:oncall@example.com,backup@example.com
+  # or: group: oncall          # an alert group fans out to N channels
+```
+
+Env equivalents: `CRONOVA_SMTP_HOST/PORT/USERNAME/PASSWORD/FROM`,
+`CRONOVA_NOTIFY_GROUP`. Delivery is TLS-required by default (STARTTLS, or
+implicit TLS on port 465), retried on the same backoff ladder as webhooks, and
+failures land in `cronova_notify_failures_total` — alerts are best-effort and
+never block the scheduler.
 
 ## Monitoring
 

@@ -88,35 +88,41 @@ const (
 	TriggerManual     TriggerType = "manual"
 	TriggerDependency TriggerType = "dependency"
 	TriggerEvent      TriggerType = "event"
+	TriggerSubdag     TriggerType = "subdag"   // child run launched by a parent's subdag task
 	TriggerBackfill   TriggerType = "backfill" // operator-requested historical re-run
 )
 
 // DAG is a workflow definition. Persisted fields live in the dags table; Tasks
 // are derived by parsing DefinitionYAML and are not stored row-by-row.
 type DAG struct {
-	DagID          string     `json:"dag_id"`
-	Schedule       string     `json:"schedule"`           // cron expression; empty => manual/event only
-	Timezone       string     `json:"timezone,omitempty"` // IANA zone the cron fields evaluate in ("" = UTC)
-	StartDate      time.Time  `json:"start_date"`
-	Catchup        bool       `json:"catchup"`
-	Paused         bool       `json:"paused"`
-	MaxActiveRuns  int        `json:"max_active_runs"`
-	MaxActiveTasks int        `json:"max_active_tasks,omitempty"` // cap on this DAG's concurrent tasks across runs (0 = unlimited)
-	DefaultRetries int        `json:"default_retries"`            // DAG-level default; per-task retries override
-	DefinitionYAML string     `json:"definition_yaml,omitempty"`
-	Owner          string     `json:"owner,omitempty"`   // reserved for future RBAC
-	Project        string     `json:"project,omitempty"` // reserved for future RBAC
-	Tasks          []Task     `json:"tasks,omitempty"`
-	TriggerAfter   []string   `json:"trigger_after,omitempty"`    // upstream dag_ids
-	TriggerOnEvent []string   `json:"trigger_on_event,omitempty"` // external event keys that trigger a run
-	NotifyURL      string     `json:"notify_url,omitempty"`       // webhook POSTed on a notify_on state
-	NotifyOn       []string   `json:"notify_on,omitempty"`        // run states to notify on: "failure", "success"
-	NotifyFormat   string     `json:"notify_format,omitempty"`    // webhook body shape: ""/raw | slack | feishu | dingtalk
-	SLA            int        `json:"sla,omitempty"`              // soft deadline (seconds from run start); breach alerts, run keeps going
-	DagrunTimeout  int        `json:"dagrun_timeout,omitempty"`   // hard deadline (seconds from run start); breach kills the run → timed_out
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	DeletedAt      *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
+	DagID          string    `json:"dag_id"`
+	Schedule       string    `json:"schedule"`           // cron expression; empty => manual/event only
+	Timezone       string    `json:"timezone,omitempty"` // IANA zone the cron fields evaluate in ("" = UTC)
+	StartDate      time.Time `json:"start_date"`
+	Catchup        bool      `json:"catchup"`
+	Paused         bool      `json:"paused"`
+	MaxActiveRuns  int       `json:"max_active_runs"`
+	MaxActiveTasks int       `json:"max_active_tasks,omitempty"` // cap on this DAG's concurrent tasks across runs (0 = unlimited)
+	// ExecutionPolicy gates queued-run admission: "" (parallel; the default),
+	// serial_wait, serial_discard, or serial_priority. Serial policies admit at
+	// most one active run regardless of max_active_runs.
+	ExecutionPolicy string     `json:"execution_policy,omitempty"`
+	DefaultRetries  int        `json:"default_retries"` // DAG-level default; per-task retries override
+	DefinitionYAML  string     `json:"definition_yaml,omitempty"`
+	Owner           string     `json:"owner,omitempty"`   // reserved for future RBAC
+	Project         string     `json:"project,omitempty"` // reserved for future RBAC
+	Tasks           []Task     `json:"tasks,omitempty"`
+	TriggerAfter    []string   `json:"trigger_after,omitempty"`    // upstream dag_ids
+	TriggerOnEvent  []string   `json:"trigger_on_event,omitempty"` // external event keys that trigger a run
+	NotifyURL       string     `json:"notify_url,omitempty"`       // webhook (or mailto:) fired on a notify_on state
+	NotifyOn        []string   `json:"notify_on,omitempty"`        // run states to notify on: "failure", "success"
+	NotifyFormat    string     `json:"notify_format,omitempty"`    // webhook body shape: ""/raw | slack | feishu | dingtalk | email
+	NotifyGroup     string     `json:"notify_group,omitempty"`     // alert group name; wins over notify_url when set
+	SLA             int        `json:"sla,omitempty"`              // soft deadline (seconds from run start); breach alerts, run keeps going
+	DagrunTimeout   int        `json:"dagrun_timeout,omitempty"`   // hard deadline (seconds from run start); breach kills the run → timed_out
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"` // non-nil => soft-deleted (archived)
 }
 
 // Task is a single node in a DAG.
@@ -137,6 +143,16 @@ type Task struct {
 	Timeout       int    `json:"timeout"`                   // execution timeout seconds; 0 = none (kills the attempt)
 	SLA           int    `json:"sla,omitempty"`             // soft deadline (seconds from run start); breach alerts only
 	TriggerRule   string `json:"trigger_rule"`              // when to run vs. upstream states (default all_success)
+	// WorkerGroup routes this task to a group of dial-in remote workers.
+	// Empty = run on the scheduler's configured local/legacy executor.
+	WorkerGroup string `json:"worker_group,omitempty"`
+	// DependsOnDag holds this task until another DAG's matching period run
+	// has succeeded (cross-DAG wait, DS "dependent" semantics).
+	DependsOnDag *DependsOnDag `json:"depends_on_dag,omitempty"`
+	// Subdag is set when Type == "subdag": the task runs another DAG as a
+	// child run and mirrors its terminal state. Cancel cascades; a task retry
+	// re-runs the child (RetryRun semantics — history preserved).
+	Subdag string `json:"subdag,omitempty"`
 	// When is an optional runtime condition template (e.g. "{{ params.env }}"
 	// or "{{ ti.check.proceed }}"): evaluated once the task is otherwise ready;
 	// a falsy/unresolved render marks the task skipped instead of running it.
@@ -154,6 +170,18 @@ type Task struct {
 	// directory and runs Command with its cwd there (so `python3 main.py` resolves)
 	// and CRONOVA_PROJECT_DIR pointing at it. Empty = run with the executor's cwd.
 	Project string `json:"project,omitempty"`
+}
+
+// DependsOnDag is a cross-DAG wait condition: the task becomes ready only
+// once the target DAG's run for the referenced period is successful.
+type DependsOnDag struct {
+	Dag string `json:"dag"`
+	// Offset shifts which period of the target is awaited, in the datetmpl
+	// anchor/offset grammar ("" = same logical date; "- 1d" = the previous
+	// day's period; ".month_start" = this month's first period, …).
+	Offset    string `json:"offset,omitempty"`
+	Timeout   int    `json:"timeout,omitempty"`    // seconds from run start; 0 = wait until dagrun_timeout
+	OnTimeout string `json:"on_timeout,omitempty"` // "fail" (default) | "skip"
 }
 
 // DagVersion is one entry of a DAG's append-only definition history.
@@ -187,6 +215,31 @@ type DagRun struct {
 	Params         map[string]string `json:"params,omitempty"` // trigger-time params, injected as CRONOVA_PARAM_* + {{ params.KEY }}
 	DefinitionYAML string            `json:"-"`                // immutable definition used by this run
 	DefinitionHash string            `json:"definition_hash,omitempty"`
+	// Priority orders this run against others when competing for dispatch
+	// slots and inside a serial_priority queue (higher first; default 0).
+	Priority int `json:"priority,omitempty"`
+	// ParentRunID links a sub-workflow child run to the parent run whose
+	// subdag task launched it ("" = a normal top-level run).
+	ParentRunID string `json:"parent_run_id,omitempty"`
+}
+
+// Execution policies gate how a DAG's queued runs are admitted when another
+// run of the same DAG is already active.
+const (
+	PolicyParallel       = ""                // (default) max_active_runs applies as configured
+	PolicySerialWait     = "serial_wait"     // one at a time; queued runs wait in logical-date order
+	PolicySerialDiscard  = "serial_discard"  // one at a time; runs arriving while busy are cancelled
+	PolicySerialPriority = "serial_priority" // one at a time; queue drains highest priority first
+)
+
+// ValidExecutionPolicy reports whether p names a known execution policy
+// ("parallel" is accepted as an alias of the default).
+func ValidExecutionPolicy(p string) bool {
+	switch p {
+	case PolicyParallel, "parallel", PolicySerialWait, PolicySerialDiscard, PolicySerialPriority:
+		return true
+	}
+	return false
 }
 
 // Event is a durable scheduler signal. The dependency source uses a DagRun's
@@ -263,6 +316,56 @@ type User struct {
 	// request principal (never persisted or serialized): when non-empty, write
 	// operations are limited to this DAG.
 	TokenDagScope string `json:"-"`
+}
+
+// Worker states. A worker is online while its Session stream is up and
+// heartbeating; offline after a clean disconnect; lost when heartbeats stopped
+// without a goodbye (its running tasks are failed over per retry policy).
+const (
+	WorkerOnline  = "online"
+	WorkerOffline = "offline"
+	WorkerLost    = "lost"
+)
+
+// Worker is a remote task runner that joined the cluster via a join token.
+// Labels carry routing metadata; the "group" label (default "default") is the
+// worker group tasks target with worker_group:.
+type Worker struct {
+	ID            string            `json:"worker_id"`
+	Name          string            `json:"name"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	State         string            `json:"state"`
+	Draining      bool              `json:"draining,omitempty"` // no new assignments; running tasks finish
+	Version       string            `json:"version,omitempty"`
+	ActiveTasks   int               `json:"active_tasks"`
+	LastHeartbeat *time.Time        `json:"last_heartbeat,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+}
+
+// Group returns the worker's routing group (the "group" label, default
+// "default").
+func (w *Worker) Group() string {
+	if g := w.Labels["group"]; g != "" {
+		return g
+	}
+	return "default"
+}
+
+// NotifyChannel is one delivery target inside an alert group: an http(s)
+// webhook or a mailto: address list, with the same format vocabulary as a
+// DAG's notify.format ("" / raw | slack | feishu | dingtalk | email).
+type NotifyChannel struct {
+	URL    string `json:"url"`
+	Format string `json:"format,omitempty"`
+}
+
+// AlertGroup is a named fan-out of notify channels. A DAG referencing the
+// group (notify.group) alerts every channel; groups keep channel lists in one
+// place instead of one webhook URL pasted into every DAG.
+type AlertGroup struct {
+	Name      string          `json:"name"`
+	Channels  []NotifyChannel `json:"channels"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // Variable is a UI-managed shared key-value, referenced as {{ var.Key }}.
