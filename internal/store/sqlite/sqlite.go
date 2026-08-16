@@ -915,7 +915,7 @@ func (s *Store) ListPools(ctx context.Context) ([]*model.Pool, error) {
 func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_instances WHERE pool=? AND state IN ('queued','running')`, pool).
+		`SELECT COUNT(*) FROM task_instances WHERE pool=? AND state IN ('queued','running') AND executor_ref NOT LIKE 'subdag:%'`, pool).
 		Scan(&n)
 	return n, err
 }
@@ -923,7 +923,7 @@ func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error
 func (s *Store) CountActiveTaskInstances(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_instances WHERE state IN ('queued','running')`).Scan(&n)
+		`SELECT COUNT(*) FROM task_instances WHERE state IN ('queued','running') AND executor_ref NOT LIKE 'subdag:%'`).Scan(&n)
 	return n, err
 }
 

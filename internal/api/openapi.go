@@ -55,11 +55,11 @@ type Endpoint struct {
 
 // Plan3 action classifications (see plans/plan3-executable.md §1).
 const (
-	ClassDirectRead     = "DIRECT_READ"              // queries within AuthZ/budget
-	ClassDirectDraft    = "DIRECT_DRAFT"             // touches only non-executable drafts/dry-runs
-	ClassPrepareApprove = "PREPARE_APPROVE_EXECUTE"  // mutation an agent may PREPARE; a human confirms
-	ClassHumanOnly      = "HUMAN_ONLY"               // never exposed to agents (credential minting, break-glass)
-	ClassInternalOnly   = "INTERNAL_ONLY"            // machine-to-machine (worker join), not a user action
+	ClassDirectRead     = "DIRECT_READ"             // queries within AuthZ/budget
+	ClassDirectDraft    = "DIRECT_DRAFT"            // touches only non-executable drafts/dry-runs
+	ClassPrepareApprove = "PREPARE_APPROVE_EXECUTE" // mutation an agent may PREPARE; a human confirms
+	ClassHumanOnly      = "HUMAN_ONLY"              // never exposed to agents (credential minting, break-glass)
+	ClassInternalOnly   = "INTERNAL_ONLY"           // machine-to-machine (worker join), not a user action
 )
 
 // classify assigns the classification for one endpoint: explicit overrides
@@ -84,9 +84,9 @@ var classifyOverride = map[string]string{
 	"POST /api/worker-tokens": ClassHumanOnly,
 	// Machine bootstrap endpoints — the one-time token/secret IS the caller's
 	// credential; these are not user actions.
-	"POST /api/workers/join":         ClassInternalOnly,
-	"POST /api/hooks/{id}/{secret}":  ClassInternalOnly,
-	"POST /api/login":                ClassInternalOnly,
+	"POST /api/workers/join":        ClassInternalOnly,
+	"POST /api/hooks/{id}/{secret}": ClassInternalOnly,
+	"POST /api/login":               ClassInternalOnly,
 }
 
 // Param is a public projection of apiParam.

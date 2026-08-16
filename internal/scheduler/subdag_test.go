@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -190,5 +191,33 @@ func TestSubdagDepthGuard(t *testing.T) {
 	run := s.driveToTerminal(t, ctx, runID, 200)
 	if run.State != model.RunFailed {
 		t.Fatalf("cyclic parent = %s, want failed via depth guard", run.State)
+	}
+}
+
+// TestSubdagPlaceholdersDontStarvePool: N running subdag placeholders must
+// not consume default-pool slots — the children they spawn (and unrelated
+// DAGs) still dispatch. Regression for the adversarial finding where
+// placeholder rows counted into every budget query and 16 subdag parents
+// deadlocked the fleet.
+func TestSubdagPlaceholdersDontStarvePool(t *testing.T) {
+	s := newTestScheduler(t)
+	ctx := context.Background()
+	// Slow child so many placeholders are simultaneously "running".
+	registerSimpleDAG(t, s, "starve_child", "sleep 0.5")
+	// 8 parents (default pool has limited slots) each wrapping the child... a
+	// single parent DAG with 8 subdag tasks exercises the same budget path.
+	var tasks []model.Task
+	for i := 0; i < 8; i++ {
+		tasks = append(tasks, model.Task{ID: fmt.Sprintf("sub%d", i), Type: "subdag", Subdag: "starve_child", Pool: model.DefaultPoolName})
+	}
+	parent := &model.DAG{DagID: "starve_parent", MaxActiveRuns: 1, StartDate: time.Now().UTC().Add(-time.Hour), Tasks: tasks}
+	if err := s.registerDAG(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := s.TriggerManual(ctx, "starve_parent", nil)
+	// If placeholders consumed budget, children could never dispatch and this
+	// would stall until the driveToTerminal cap fails the test.
+	if run := s.driveToTerminal(t, ctx, runID, 200); run.State != model.RunSuccess {
+		t.Fatalf("parent = %s, want success (children must dispatch past placeholders)", run.State)
 	}
 }

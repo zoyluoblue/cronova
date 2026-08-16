@@ -94,7 +94,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8090:8090"
+      - "8091:8090"
     environment:
       CRONOVA_DB: postgres://cronova:${CRONOVA_PG_PASSWORD:-cronova-dev}@postgres:5432/cronova?sslmode=disable
       CRONOVA_HTTP: 0.0.0.0:8090

@@ -369,8 +369,22 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	return nil
 }
 
+// admissionLockKey serializes bounded run admission: PostgreSQL's READ
+// COMMITTED lets two concurrent INSERT..SELECT COUNT statements both see
+// count = limit-1 and over-admit (SQLite cannot — single writer). The
+// transaction-scoped advisory lock restores the "atomic bound check" contract.
+const admissionLockKey = 0x63726f6e_0001 // "cron"+1
+
 func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global int) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, admissionLockKey); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
 		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
 		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$14 AND deleted_at IS NULL)
@@ -384,7 +398,11 @@ func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global
 		}
 		return fmt.Errorf("create bounded dag_run %q: %w", r.RunID, err)
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	inserted, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if inserted > 0 {
 		return nil
 	}
 	d, derr := s.GetDAG(ctx, r.DagID)
@@ -395,7 +413,15 @@ func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global
 }
 
 func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, admissionLockKey); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
 		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
 		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$14 AND deleted_at IS NULL)
@@ -411,7 +437,11 @@ func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, 
 		}
 		return fmt.Errorf("create bounded dag_run %q: %w", r.RunID, err)
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	inserted, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if inserted > 0 {
 		return nil
 	}
 	d, derr := s.GetDAG(ctx, r.DagID)
@@ -925,7 +955,7 @@ func (s *Store) ListPools(ctx context.Context) ([]*model.Pool, error) {
 func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_instances WHERE pool=$1 AND state IN ('queued','running')`, pool).
+		`SELECT COUNT(*) FROM task_instances WHERE pool=$1 AND state IN ('queued','running') AND executor_ref NOT LIKE 'subdag:%'`, pool).
 		Scan(&n)
 	return n, err
 }
@@ -933,7 +963,7 @@ func (s *Store) CountRunningInPool(ctx context.Context, pool string) (int, error
 func (s *Store) CountActiveTaskInstances(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_instances WHERE state IN ('queued','running')`).Scan(&n)
+		`SELECT COUNT(*) FROM task_instances WHERE state IN ('queued','running') AND executor_ref NOT LIKE 'subdag:%'`).Scan(&n)
 	return n, err
 }
 

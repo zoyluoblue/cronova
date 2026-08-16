@@ -1965,6 +1965,11 @@ func (s *Scheduler) timeoutRun(ctx context.Context, d *model.DAG, run *model.Dag
 // clearSLAKeys drops a run's SLA-dedup entries once it finalizes (bounded growth).
 func (s *Scheduler) clearSLAKeys(runID string) {
 	delete(s.slaAlerted, runID)
+	// A mark-driven notify suppression must not outlive THIS terminal
+	// transition: cancel/timeout paths call clearSLAKeys without consuming the
+	// key, and a stale entry would silently swallow the notification of a
+	// LATER legitimate finalize (e.g. mark → cancel → retry → fail).
+	delete(s.notifySuppress, runID)
 	prefix := runID + "\x00"
 	for k := range s.slaAlerted {
 		if strings.HasPrefix(k, prefix) {
@@ -2279,6 +2284,21 @@ func (s *Scheduler) runTask(ctx context.Context, run *model.DagRun, t model.Task
 		return // a CancelRun landed before we launched — don't start the process
 	}
 	if _, err := s.launchExec(t).Launch(ctx, spec); err != nil {
+		// Routing race, not a task failure: the group's last worker vanished
+		// between the availability check and Launch. Nothing ever executed, so
+		// give the attempt back (reset to scheduled) instead of consuming a
+		// retry — the group gate holds it until a worker returns.
+		if errors.Is(err, workerhub.ErrNoWorker) {
+			s.log.Warn("worker group emptied mid-dispatch; attempt returned to the queue", "run", run.RunID, "task", t.ID, "err", err)
+			prevRef := ti.ExecutorRef
+			ti.TryNumber--
+			ti.State = model.TaskScheduled
+			ti.ExecutorRef = ""
+			if applied, uerr := s.store.UpdateTaskInstanceGuarded(ctx, &ti, prevRef); uerr != nil || !applied {
+				s.log.Error("reset never-launched attempt", "ti", ti.ID, "applied", applied, "err", uerr)
+			}
+			return
+		}
 		s.log.Error("launch task", "run", run.RunID, "task", t.ID, "err", err)
 		now := time.Now().UTC()
 		ti.StartedAt = &now

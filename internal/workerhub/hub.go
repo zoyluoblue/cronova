@@ -142,17 +142,38 @@ func (h *Hub) sweep(ctx context.Context) {
 		}
 	}
 	// Refs whose worker has no session: grace for reconnects, then lost.
-	for ref, rs := range h.refs {
+	// The store lookups happen OUTSIDE the lock (a slow database must not
+	// freeze every Launch/Probe/log append), deduplicated per worker, with
+	// re-validation after relocking.
+	candidates := map[string]bool{}
+	for _, rs := range h.refs {
 		if rs.phase != executor.PhaseRunning || rs.lost {
 			continue
 		}
 		if _, ok := h.sessions[rs.workerID]; ok {
 			continue
 		}
-		if stale[rs.workerID] || h.workerSilentTooLong(ctx, rs.workerID, now) {
-			rs.lost = true
-			lost = append(lost, lostRef{ref, rs.workerID})
+		candidates[rs.workerID] = true
+	}
+	h.mu.Unlock()
+
+	silent := map[string]bool{}
+	for id := range candidates {
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		silent[id] = stale[id] || h.workerSilentTooLong(qctx, id, now)
+		cancel()
+	}
+
+	h.mu.Lock()
+	for ref, rs := range h.refs {
+		if rs.phase != executor.PhaseRunning || rs.lost || !silent[rs.workerID] {
+			continue
 		}
+		if _, ok := h.sessions[rs.workerID]; ok {
+			continue // reconnected while we were checking — keep it
+		}
+		rs.lost = true
+		lost = append(lost, lostRef{ref, rs.workerID})
 	}
 	h.mu.Unlock()
 

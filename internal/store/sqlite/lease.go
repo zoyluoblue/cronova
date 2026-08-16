@@ -218,6 +218,6 @@ func (s *Store) CountActiveTasksForDag(ctx context.Context, dagID string) (int, 
 	err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM task_instances ti
 JOIN dag_runs r ON r.run_id = ti.run_id
-WHERE r.dag_id = ? AND ti.state IN ('queued','running')`, dagID).Scan(&n)
+WHERE r.dag_id = ? AND ti.state IN ('queued','running') AND ti.executor_ref NOT LIKE 'subdag:%'`, dagID).Scan(&n)
 	return n, err
 }
