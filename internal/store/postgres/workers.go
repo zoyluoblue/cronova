@@ -130,3 +130,17 @@ func (s *Store) ConsumeJoinToken(ctx context.Context, tokenHash string) error {
 	}
 	return nil
 }
+
+// SetDagRunHeld flips a run's operator hold (mirrors the sqlite store).
+func (s *Store) SetDagRunHeld(ctx context.Context, runID string, held bool) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE dag_runs SET held=$1 WHERE run_id=$2 AND state IN ('queued','running')`,
+		boolToInt(held), runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}

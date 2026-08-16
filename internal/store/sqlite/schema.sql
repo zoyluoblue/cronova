@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     definition_hash TEXT NOT NULL DEFAULT '', -- SHA-256 of definition_yaml
     priority        INTEGER NOT NULL DEFAULT 0,
     parent_run_id   TEXT NOT NULL DEFAULT '', -- sub-workflow parent run ('' = top-level)
+    held            INTEGER NOT NULL DEFAULT 0, -- operator hold: no new task dispatch
     UNIQUE (dag_id, logical_date)
 );
 

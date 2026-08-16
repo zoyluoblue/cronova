@@ -164,6 +164,11 @@ type Store interface {
 	UpsertVariable(ctx context.Context, v *model.Variable) error
 	DeleteVariable(ctx context.Context, key string) error
 
+	// SetDagRunHeld flips a run's operator hold (plan2 R5B intent): a held run
+	// dispatches no NEW tasks and is not promoted; running tasks continue.
+	// Only non-terminal runs can be held.
+	SetDagRunHeld(ctx context.Context, runID string, held bool) error
+
 	// Alert groups: named notify-channel fan-outs referenced by a DAG's
 	// notify.group.
 	ListAlertGroups(ctx context.Context) ([]*model.AlertGroup, error)

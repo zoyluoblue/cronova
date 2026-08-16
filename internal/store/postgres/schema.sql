@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS dag_runs (
     definition_hash TEXT NOT NULL DEFAULT '', -- SHA-256 of definition_yaml
     priority        INTEGER NOT NULL DEFAULT 0, -- orders competing runs at dispatch (higher first)
     parent_run_id   TEXT NOT NULL DEFAULT '',
+    held            INTEGER NOT NULL DEFAULT 0,
     UNIQUE (dag_id, logical_date)
 );
 

@@ -92,6 +92,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS dag_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dag_runs ADD COLUMN IF NOT EXISTS held INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil {
 			return fmt.Errorf("migrate (%s): %w", alter, err)
@@ -299,7 +300,7 @@ func (s *Store) SetDAGPaused(ctx context.Context, dagID string, paused bool) err
 
 // --- DAG runs ---
 
-const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params, definition_yaml, definition_hash, priority, parent_run_id`
+const runCols = `run_id, dag_id, logical_date, state, trigger_type, started_at, finished_at, params, definition_yaml, definition_hash, priority, parent_run_id, held`
 
 func marshalParams(p map[string]string) string {
 	if len(p) == 0 {
@@ -325,8 +326,9 @@ func scanRun(sc scanner) (*model.DagRun, error) {
 	var logStr, state, trig string
 	var startNS, finNS sql.NullString
 	var params string
+	var held int
 	err := sc.Scan(&r.RunID, &r.DagID, &logStr, &state, &trig, &startNS, &finNS, &params,
-		&r.DefinitionYAML, &r.DefinitionHash, &r.Priority, &r.ParentRunID)
+		&r.DefinitionYAML, &r.DefinitionHash, &r.Priority, &r.ParentRunID, &held)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -339,6 +341,7 @@ func scanRun(sc scanner) (*model.DagRun, error) {
 	r.StartedAt = nsToTime(startNS)
 	r.FinishedAt = nsToTime(finNS)
 	r.Params = unmarshalParams(params)
+	r.Held = held != 0
 	return &r, nil
 }
 
@@ -350,10 +353,10 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 	// SELECT inserts zero rows when deleted_at IS NOT NULL.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$13 AND deleted_at IS NULL)`,
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$14 AND deleted_at IS NULL)`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, r.DagID)
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, boolToInt(r.Held), r.DagID)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -369,12 +372,12 @@ func (s *Store) CreateDagRun(ctx context.Context, r *model.DagRun) error {
 func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global int) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
-		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$13 AND deleted_at IS NULL)
-		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < $14`,
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$14 AND deleted_at IS NULL)
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < $15`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, r.DagID, global)
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, boolToInt(r.Held), r.DagID, global)
 	if err != nil {
 		if isUniqueErr(err) {
 			return store.ErrAlreadyExists
@@ -394,13 +397,13 @@ func (s *Store) CreateDagRunBounded(ctx context.Context, r *model.DagRun, global
 func (s *Store) CreateManualDagRunBounded(ctx context.Context, r *model.DagRun, perDAG, global int) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO dag_runs (`+runCols+`)
-		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
-		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$13 AND deleted_at IS NULL)
-		   AND (SELECT COUNT(*) FROM dag_runs WHERE dag_id=$14 AND state IN ('queued','running')) < $15
-		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < $16`,
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+		 WHERE EXISTS (SELECT 1 FROM dags WHERE dag_id=$14 AND deleted_at IS NULL)
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE dag_id=$15 AND state IN ('queued','running')) < $16
+		   AND (SELECT COUNT(*) FROM dag_runs WHERE state='queued') < $17`,
 		r.RunID, r.DagID, fmtTime(r.LogicalDate), string(r.State), string(r.TriggerType),
 		fmtNullTime(r.StartedAt), fmtNullTime(r.FinishedAt), marshalParams(r.Params),
-		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID,
+		r.DefinitionYAML, r.DefinitionHash, r.Priority, r.ParentRunID, boolToInt(r.Held),
 		r.DagID, r.DagID, perDAG, global)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -524,7 +527,7 @@ func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, err
 	// ordering for never-started runs.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.run_id, r.dag_id, r.logical_date, r.state, r.trigger_type, r.started_at, r.finished_at, r.params,
-		        r.definition_yaml, r.definition_hash, r.priority, r.parent_run_id
+		        r.definition_yaml, r.definition_hash, r.priority, r.parent_run_id, r.held
 		 FROM dag_runs r JOIN dags d ON r.dag_id=d.dag_id
 		 WHERE d.deleted_at IS NULL
 		 ORDER BY COALESCE(EXTRACT(EPOCH FROM NULLIF(r.started_at,'')::timestamptz),

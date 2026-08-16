@@ -1342,6 +1342,9 @@ func (s *Scheduler) processActiveRuns(ctx context.Context) {
 		if globalRunning >= s.opts.MaxActiveRunsGlobal {
 			break
 		}
+		if run.Held {
+			continue // operator hold: stays queued until released
+		}
 		maxActive, policy := 1, model.PolicyParallel
 		if d, _, ok := s.cachedDAG(run.DagID); ok {
 			policy = d.ExecutionPolicy
@@ -1736,6 +1739,14 @@ func (s *Scheduler) processRun(ctx context.Context, run *model.DagRun, readyOut 
 		if err := s.store.UpdateTaskInstance(ctx, ti); err != nil {
 			return err
 		}
+	}
+
+	// Operator hold (plan2 R5B): a held run keeps its RUNNING tasks (hold is
+	// not suspend) but dispatches nothing new until released. Propagation,
+	// retries, deadline enforcement, and finalize above/below still apply, so
+	// releasing a hold resumes exactly where the run paused.
+	if run.Held {
+		return nil
 	}
 
 	// 3. Collect ready scheduled tasks. Launch decisions happen later in

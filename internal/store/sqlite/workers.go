@@ -136,3 +136,18 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// SetDagRunHeld flips a run's operator hold. Terminal runs are refused (a
+// hold on a settled run is meaningless and likely a UI race).
+func (s *Store) SetDagRunHeld(ctx context.Context, runID string, held bool) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE dag_runs SET held=? WHERE run_id=? AND state IN ('queued','running')`,
+		boolInt(held), runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}

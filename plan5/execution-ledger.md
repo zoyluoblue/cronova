@@ -42,7 +42,15 @@
 
 ## Plan2（调度产品能力）
 
-待 Plan1 阶段推进后逐项展开（hold/release/timeline、DST/Backfill、Inbox/Outbox/DLQ、WFQ、Bin-pack…）。
+| 工作包 | 状态 | 验收/证据 |
+|---|---|---|
+| R5B hold/release 意图 | PASS | `dag_runs.held` 列（双 store+迁移）；hold≠suspend（在跑任务继续、不派新任务、queued 不晋升、run 冻结不 finalize，release 原地恢复）；API `POST /api/runs/{id}/hold|release`（operator 权限、审计、终态 409 run_not_active）。验收：`TestHoldBlocksNewDispatch`+`TestHeldQueuedNotPromoted`+`TestRunTimelineAndHold` |
+| R5B Timeline/DecisionFact 投影 | PASS | `GET /api/runs/{id}/timeline`：run 生命周期+任务 attempt+审计操作合并时序视图（只读投影，无第二账本，符合 plan2 权威约束）；openapi 目录同源三条目 |
+| R7 DST/时区、Backfill | PASS(既有) | V2 已交付：DAG timezone（CRON_TZ+日期模板时区渲染+DST 测试）、catchup/backfill（cron 槽位、节流） |
+| R8 事件 Inbox | PASS(既有)/PARTIAL | `POST /api/events` 幂等（UNIQUE source+key）、入站 webhook per-DAG secret+限流；DLQ/重放语义未建（缺口记录） |
+| R8 通知 Outbox | PARTIAL | 通知重试退避+失败计数+SSRF 防护已有；durable outbox 表未建（进程内重试，重启丢投递意图——缺口记录） |
+| R10A WFQ / R10P Bin-pack | 未实施 | 加权公平与装箱评分需引入 pool 权重与评分层；判定为下轮（不阻塞本轮收口，plan2 允许 capability 独立发布） |
+| R9 OCI/WASM/Sidecar | N/A_SCOPE | 容器任务运行时与本项目"宿主进程执行"定位冲突（ADR 偏差记录） |
 
 ## Plan3（AI Native 操作层）
 

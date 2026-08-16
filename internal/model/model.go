@@ -245,6 +245,10 @@ type DagRun struct {
 	// ParentRunID links a sub-workflow child run to the parent run whose
 	// subdag task launched it ("" = a normal top-level run).
 	ParentRunID string `json:"parent_run_id,omitempty"`
+	// Held pauses NEW task dispatch for this run (hold ≠ suspend: tasks that
+	// are already running keep running; a held queued run is not promoted).
+	// Operator intent, set/cleared via hold/release — plan2 R5B semantics.
+	Held bool `json:"held,omitempty"`
 }
 
 // Execution policies gate how a DAG's queued runs are admitted when another
