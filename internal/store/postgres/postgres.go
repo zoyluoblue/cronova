@@ -546,14 +546,29 @@ func (s *Store) RecentRuns(ctx context.Context, limit int) ([]*model.DagRun, err
 }
 
 func (s *Store) UpdateDagRunState(ctx context.Context, runID string, state model.RunState, startedAt, finishedAt *time.Time) error {
+	// State-machine guard (plan1 W12), mirroring the sqlite store exactly.
+	prior := model.LegalPriorRunStates(state)
+	if len(prior) == 0 {
+		return fmt.Errorf("%w: no state may become %q", model.ErrIllegalRunTransition, state)
+	}
+	args := []any{string(state), fmtNullTime(startedAt), fmtNullTime(finishedAt), runID}
+	ph := make([]string, len(prior))
+	for i, p := range prior {
+		ph[i] = fmt.Sprintf("$%d", len(args)+1)
+		args = append(args, string(p))
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE dag_runs SET state=$1, started_at=$2, finished_at=$3 WHERE run_id=$4`,
-		string(state), fmtNullTime(startedAt), fmtNullTime(finishedAt), runID)
+		`UPDATE dag_runs SET state=$1, started_at=$2, finished_at=$3 WHERE run_id=$4 AND state IN (`+strings.Join(ph, ",")+`)`,
+		args...)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return store.ErrNotFound
+		var cur string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM dag_runs WHERE run_id=$1`, runID).Scan(&cur); err != nil {
+			return store.ErrNotFound
+		}
+		return fmt.Errorf("%w: %s → %s (run %s)", model.ErrIllegalRunTransition, cur, state, runID)
 	}
 	return nil
 }

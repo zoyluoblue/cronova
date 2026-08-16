@@ -54,6 +54,30 @@ func (s RunState) IsTerminal() bool {
 	return s == RunSuccess || s == RunFailed || s == RunCancelled || s == RunTimedOut
 }
 
+// ErrIllegalRunTransition is returned when a run-state write names a target
+// its current state may not legally reach (e.g. success → queued). The write
+// is refused at the store so no code path — present or future — can corrupt a
+// run's lifecycle.
+var ErrIllegalRunTransition = errors.New("illegal run state transition")
+
+// LegalPriorRunStates enumerates the states a run may move to target FROM:
+// queued → running (start) and running → terminal are the natural lifecycle;
+// terminal → running is retry reactivation; success ↔ failed is the operator
+// mark override; nothing ever returns to queued.
+func LegalPriorRunStates(target RunState) []RunState {
+	switch target {
+	case RunRunning:
+		return []RunState{RunQueued, RunSuccess, RunFailed, RunCancelled, RunTimedOut}
+	case RunSuccess, RunFailed:
+		return []RunState{RunQueued, RunRunning, RunSuccess, RunFailed}
+	case RunCancelled:
+		return []RunState{RunQueued, RunRunning}
+	case RunTimedOut:
+		return []RunState{RunRunning}
+	}
+	return nil
+}
+
 // TaskState is the lifecycle state of a TaskInstance.
 type TaskState string
 
