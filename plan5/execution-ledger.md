@@ -33,11 +33,11 @@
 | P1-REBASE-ENTRY | PASS | 本账本 + source-manifest + 基线 commit 43132b7 |
 | W10 基线止血/PG CI（R0-04/LB-02） | PASS | test.yml 加 PG 服务容器 + "postgres suite must not skip" 断言步骤（本地等价验证：PG17.5 真库全套件绿） |
 | W11 Source CAS（R0-07/LB-01 核心） | PASS | DAG 保存乐观并发：GET 返回 definition_hash → 编辑器回显 expected_hash → 不匹配 409 dag_conflict；build 响应回传新 hash 防自冲突；无 hash 保留 CLI/GitOps last-write-wins。验收：`TestDagSaveCAS`（stale 拒写且不达引擎）+ 浏览器实测（自续期 renewed、并发者获胜、冲突 toast 双语）。版本历史/运行快照/三 hash 中的 source hash 既有 |
-| W12 执行正确性（状态机/锁序/receipt/invariant） | 待执行 | |
+| W12 执行正确性（状态机/receipt/invariant） | PASS(核心)/PARTIAL(PG真库单元) | 存储层 run 状态转移守卫（条件 UPDATE，双 store 镜像）：禁止回 queued、禁止篡改已定终态；retry 复活与 mark 覆写合法路径保留。验收：`TestRunTransitionGuard`（非法边拒绝且状态不变）+ 全量调度套件零回归（证明合法表完备）。PG 真库 cell 因本机 Docker daemon 停机待重验（CI PG 容器兜底）。既有 receipt=audit 链 + attempt ref + guarded CAS 写 |
 | W2x cluster-basic（协议/Grant/Artifact/E2E） | 待执行 | 既有：拨入 worker E2E；按 plan1 语义补强 |
 | W3x HA | 待执行 | 既有：lease 主备；3-Control AA 为 BLOCKED_ENVIRONMENT 候选 |
 | W4x 生产安全/升级/DR | 待执行 | |
-| W5x Authoring（Raw/Canvas/冲突/Diff） | 待执行 | 既有：graph 结构编辑（保存链路已验） |
+| W5x Authoring（Raw/Canvas/冲突/Diff） | PASS(核心路径) | graph 结构编辑浏览器全链路验收：加节点→diff 条→保存持久化；连线模式建边（c.deps=[b] 落库）；环拒绝（c→a 拒 + toast「依赖存在环」）；删边（edge-hit 命中区→「✕ 移除依赖」→保存后 API 一致）；点节点进任务编辑器；双编辑冲突由 Source CAS 覆盖（W11）。剩余：触屏路径与 WCAG 人工复核未做（BLOCKED_ENVIRONMENT：无独立可访问性评审） |
 | 7 天 Soak / 72h Chaos / 28d Pilot | BLOCKED_ENVIRONMENT | 需连续多周真实窗口 |
 
 ## Plan2（调度产品能力）
