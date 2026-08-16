@@ -101,6 +101,8 @@ func main() {
 		err = cmdWorker(args)
 	case "workers":
 		err = cmdWorkers(args)
+	case "migrate-store":
+		err = cmdMigrateStore(args)
 	case "mcp":
 		err = cmdMCP(args)
 	case "users":

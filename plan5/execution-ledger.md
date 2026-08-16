@@ -63,7 +63,13 @@
 
 ## Plan4（部署/迁群/批量扩容）
 
-待执行（single→cluster 存储迁移工具、fleet 批量安装、bootstrap 收口；基于既有 join/compose）。
+| 工作包 | 状态 | 验收/证据 |
+|---|---|---|
+| R18 single→cluster 迁移（migrate-store） | PASS | `cronova migrate-store -from sqlite -to postgres://`：源先规范化到当前 schema→活动 run 预检拒绝→目标空库预检（建表前检查，容忍 relation 不存在，pools 种子行 upsert 吸收）→16 表单事务拷贝→plan5 §9 依赖闭合校验（counts 全等 + 4 类孤儿=0，JSON 报告）；sessions/join-token 有意不迁（新 incarnation 语义）。E2E：真实源库迁移→**调度器直连目标 PG 触发运行 3 任务全 success** |
+| R16/R17 单机安装/bootstrap | PASS(既有) | curl\|bash bootstrap、init 向导、systemd/launchd、Docker minimal/full profile、healthcheck |
+| R19 批量 SSH ADD（100 台） | BLOCKED_ENVIRONMENT | 需 Ubuntu 主机清单与实验室；worker 侧已有 join token 幂等接入 primitive（容器重启幂等实测） |
+| R20 AI-assisted deploy | PARTIAL | MCP 分类层（Plan3）覆盖 workers 读操作；部署 mutation 归 HUMAN_ONLY/操作者确认约定 |
+| PG 真库 cell 补验 | PASS | W12 转移守卫所在 PG 全套件真库重跑 6/6 绿（Docker 恢复后） |
 
 ## Plan5（质量闸门与证据）
 
